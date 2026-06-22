@@ -103,13 +103,21 @@ export default function Layout() {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontWeight: 'bold',
-            fontSize: collapsed ? 16 : 20,
-            color: themeToken.colorPrimary,
+            gap: 10,
+            padding: '0 12px',
             borderBottom: `1px solid ${themeToken.colorBorderSecondary}`,
           }}
         >
-          {collapsed ? '宏曦' : '宏曦标书'}
+          <img
+            src="https://hongxikeji.oss-cn-chengdu.aliyuncs.com/%E5%AE%8F%E6%9B%A6%E7%A7%91%E6%8A%80logo-08.png"
+            alt="logo"
+            style={{ width: 36, height: 36, flexShrink: 0 }}
+          />
+          {!collapsed && (
+            <span style={{ fontWeight: 'bold', fontSize: 18, color: themeToken.colorPrimary, whiteSpace: 'nowrap' }}>
+              宏曦标书
+            </span>
+          )}
         </div>
         <Menu
           mode="inline"

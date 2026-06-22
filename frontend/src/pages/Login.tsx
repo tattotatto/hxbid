@@ -61,6 +61,11 @@ export default function Login() {
           style={{ width: '100%', textAlign: 'center' }}
         >
           <div>
+            <img
+              src="https://hongxikeji.oss-cn-chengdu.aliyuncs.com/%E5%AE%8F%E6%9B%A6%E7%A7%91%E6%8A%80logo-08.png"
+              alt="宏曦科技"
+              style={{ width: 80, height: 80, marginBottom: 8 }}
+            />
             <Title level={2} style={{ marginBottom: 0 }}>
               宏曦标书
             </Title>
