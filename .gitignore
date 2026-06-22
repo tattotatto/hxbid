@@ -27,6 +27,7 @@ Thumbs.db
 uploads/
 outputs/
 templates/
+素材/
 
 # Frontend
 frontend/node_modules/
