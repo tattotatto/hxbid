@@ -1,4 +1,4 @@
-"""宏曦标书 - FastAPI Application Entry Point.
+﻿"""宏曦标书 - FastAPI Application Entry Point.
 
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
@@ -11,14 +11,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.config import settings
+from app.database import engine, Base
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create required directories on startup."""
+    """Create required directories and database tables on startup."""
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     os.makedirs(settings.TEMPLATE_DIR, exist_ok=True)
+
+    # Auto-create tables (idempotent - skips existing)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     yield
 
 
