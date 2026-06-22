@@ -89,6 +89,53 @@ async def upload_and_parse(
 
 
 # ---------------------------------------------------------------------------
+# POST /upload-history  (Direct historical bid upload)
+# ---------------------------------------------------------------------------
+
+@router.post("/upload-history", response_model=ParseResponse)
+async def upload_history(
+    file: UploadFile = File(...),
+    project_name: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload a historical bid document for the resource library.
+
+    Same as upload-and-parse but marks the project as 'archived' immediately,
+    since historical bids are reference material, not active projects.
+    """
+    upload_dir = Path(settings.UPLOAD_DIR)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    file_ext = Path(file.filename).suffix if file.filename else ".tmp"
+    saved_filename = f"{uuid.uuid4().hex}{file_ext}"
+    saved_path = upload_dir / saved_filename
+
+    content = await file.read()
+    with open(saved_path, "wb") as f:
+        f.write(content)
+
+    text = parse_document(str(saved_path))
+    requirements = await parse_bid_requirements(text)
+
+    project = BidProject(
+        name=project_name or requirements.get("project_name") or "未命名项目",
+        original_file_path=str(saved_path.absolute()),
+        parsed_requirements_json=json.dumps(requirements, ensure_ascii=False),
+        status="archived",
+        created_by=current_user.id,
+    )
+    db.add(project)
+    await db.flush()
+    await db.refresh(project)
+
+    return ParseResponse(
+        project_name=project.name,
+        requirements=requirements,
+    )
+
+
+# ---------------------------------------------------------------------------
 # POST /generate  (Step 3 — SSE streaming generation)
 # ---------------------------------------------------------------------------
 
