@@ -27,11 +27,11 @@ export default function Login() {
   const handleSubmit = async (values: LoginFormValues) => {
     setLoading(true)
     try {
-      const formData = new FormData()
-      formData.append('username', values.username)
-      formData.append('password', values.password)
-      const res = await client.post('/auth/login', formData)
-      localStorage.setItem('token', res.data.token)
+      const res = await client.post('/auth/login', {
+        username: values.username,
+        password: values.password,
+      })
+      localStorage.setItem('token', res.data.access_token)
       localStorage.setItem('user', JSON.stringify(res.data.user))
       message.success('登录成功')
       navigate('/')
