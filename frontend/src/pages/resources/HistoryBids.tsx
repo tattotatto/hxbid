@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Table, Tag, message, Upload, Button, Modal, Input } from 'antd'
+import { useEffect, useState, useRef } from 'react'
+import { Table, Tag, message, Upload, Button, Modal, Input, Progress } from 'antd'
 import { UploadOutlined, InboxOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import type { UploadProps } from 'antd'
@@ -22,12 +22,22 @@ const statusLabelMap: Record<string, { text: string; color: string }> = {
   archived: { text: '已归档', color: 'default' },
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
 export default function HistoryBids() {
   const [data, setData] = useState<Project[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [uploadPercent, setUploadPercent] = useState(0)
+  const [uploadFileName, setUploadFileName] = useState('')
+  const [uploadFileSize, setUploadFileSize] = useState(0)
   const [bidName, setBidName] = useState('')
+  const xhrRef = useRef<XMLHttpRequest | null>(null)
 
   const fetchProjects = async () => {
     setLoading(true)
@@ -46,25 +56,56 @@ export default function HistoryBids() {
 
   useEffect(() => { fetchProjects() }, [])
 
-  const handleUpload: UploadProps['customRequest'] = async (options) => {
+  const handleUpload: UploadProps['customRequest'] = (options) => {
     const { file, onSuccess, onError } = options as any
+    const token = localStorage.getItem('token')
+
     setUploading(true)
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('project_name', bidName || file.name)
-      await client.post('/bid/upload-history', formData)
-      message.success(`「${bidName || file.name}」已上传到历史标书库`)
-      setModalOpen(false)
-      setBidName('')
-      fetchProjects()
-      onSuccess?.('ok')
-    } catch (err: any) {
-      message.error(err.response?.data?.detail || '上传失败')
-      onError?.(err)
-    } finally {
+    setUploadPercent(0)
+    setUploadFileName(file.name)
+    setUploadFileSize(file.size)
+
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('project_name', bidName || file.name)
+
+    const xhr = new XMLHttpRequest()
+    xhrRef.current = xhr
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        setUploadPercent(Math.round((e.loaded / e.total) * 100))
+      }
+    })
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        message.success(`「${bidName || file.name}」已上传到历史标书库`)
+        setModalOpen(false)
+        setBidName('')
+        setUploadPercent(0)
+        fetchProjects()
+        onSuccess?.(JSON.parse(xhr.responseText))
+      } else {
+        let detail = '上传失败'
+        try { detail = JSON.parse(xhr.responseText)?.detail || detail } catch {}
+        message.error(detail)
+        onError?.(new Error(detail))
+      }
       setUploading(false)
-    }
+      xhrRef.current = null
+    })
+
+    xhr.addEventListener('error', () => {
+      message.error('网络错误，请检查连接后重试')
+      setUploading(false)
+      xhrRef.current = null
+      onError?.(new Error('Network error'))
+    })
+
+    xhr.open('POST', '/api/v1/bid/upload-history')
+    xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.send(formData)
   }
 
   const columns: ColumnsType<Project> = [
@@ -105,27 +146,54 @@ export default function HistoryBids() {
       <Modal
         title="上传历史标书"
         open={modalOpen}
-        onCancel={() => { setModalOpen(false); setBidName('') }}
+        onCancel={() => {
+          if (!uploading) { setModalOpen(false); setBidName('') }
+        }}
         footer={null}
+        maskClosable={!uploading}
+        closable={!uploading}
       >
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ marginBottom: 8, fontWeight: 500 }}>标书名称（可选）</div>
-          <Input
-            placeholder="如：XX项目2023年度投标文件"
-            value={bidName}
-            onChange={(e) => setBidName(e.target.value)}
-          />
-        </div>
-        <Upload.Dragger
-          accept=".docx,.doc,.pdf,.wps"
-          customRequest={handleUpload}
-          showUploadList={false}
-          disabled={uploading}
-        >
-          <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-          <p className="ant-upload-text">点击或拖拽历史标书文件</p>
-          <p className="ant-upload-hint">支持 .docx / .doc / .pdf / .wps，文件将自动解析归档</p>
-        </Upload.Dragger>
+        {!uploading ? (
+          <>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ marginBottom: 8, fontWeight: 500 }}>标书名称（可选）</div>
+              <Input
+                placeholder="如：XX项目2023年度投标文件"
+                value={bidName}
+                onChange={(e) => setBidName(e.target.value)}
+              />
+            </div>
+            <Upload.Dragger
+              accept=".docx,.doc,.pdf,.wps"
+              customRequest={handleUpload}
+              showUploadList={false}
+            >
+              <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+              <p className="ant-upload-text">点击或拖拽历史标书文件</p>
+              <p className="ant-upload-hint">支持 .docx / .doc / .pdf / .wps，最大 500MB</p>
+            </Upload.Dragger>
+          </>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '24px 0' }}>
+            <div style={{ fontSize: 16, marginBottom: 16, fontWeight: 500 }}>
+              正在上传：{uploadFileName}
+            </div>
+            <div style={{ fontSize: 13, color: '#888', marginBottom: 20 }}>
+              文件大小：{formatFileSize(uploadFileSize)}
+            </div>
+            <Progress
+              type="circle"
+              percent={uploadPercent}
+              size={120}
+              status={uploadPercent < 100 ? 'active' : 'success'}
+            />
+            <div style={{ marginTop: 16, color: '#888', fontSize: 13 }}>
+              {uploadPercent < 100
+                ? `上传中 ${uploadPercent}% ... 大文件请耐心等待`
+                : '上传完成，正在解析归档...'}
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   )
