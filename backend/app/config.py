@@ -3,6 +3,7 @@
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +48,14 @@ class Settings(BaseSettings):
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        if isinstance(v, str):
+            import json
+            return json.loads(v)
+        return v
 
 
 settings = Settings()
