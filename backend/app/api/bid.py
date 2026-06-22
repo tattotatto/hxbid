@@ -29,6 +29,7 @@ from app.services.ai_pipeline import (
     parse_bid_requirements,
 )
 from app.services.document_parser import parse_document
+from app.services.notification import send_notification
 from app.services.render_engine import export_to_pdf, render_bid_to_docx
 from app.utils.security import get_current_user
 
@@ -151,6 +152,7 @@ async def generate_bid(
 
     # -- Snapshot data for the generator (before the handler session closes) --
     project_id = project.id
+    project_name = project.name
     chapter_data = [
         {"id": c.id, "title": c.title, "order_index": c.order_index}
         for c in chapters_to_generate
@@ -238,6 +240,7 @@ async def generate_bid(
                 if db_project:
                     db_project.status = "review"
                     await gen_db.commit()
+                    await send_notification("generation_complete", project_name=project_name)
 
                 yield {"event": "done", "data": "{}"}
 
