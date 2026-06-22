@@ -65,14 +65,16 @@ async def upload_and_parse(
         f.write(content)
 
     # -- Parse document text --
-    text = parse_document(str(saved_path))
-
-    # -- AI requirements extraction --
-    requirements = await parse_bid_requirements(text)
+    requirements = {}
+    try:
+        text = parse_document(str(saved_path))
+        requirements = await parse_bid_requirements(text)
+    except Exception as e:
+        requirements = {"project_name": project_name or file.filename or "未命名项目", "parse_error": str(e)}
 
     # -- Create project record --
     project = BidProject(
-        name=project_name or requirements.get("project_name") or "未命名项目",
+        name=project_name or requirements.get("project_name") or file.filename or "未命名项目",
         original_file_path=str(saved_path.absolute()),
         parsed_requirements_json=json.dumps(requirements, ensure_ascii=False),
         status="parsed",
@@ -115,11 +117,16 @@ async def upload_history(
     with open(saved_path, "wb") as f:
         f.write(content)
 
-    text = parse_document(str(saved_path))
-    requirements = await parse_bid_requirements(text)
+    requirements = {}
+    try:
+        text = parse_document(str(saved_path))
+        requirements = await parse_bid_requirements(text)
+    except Exception as e:
+        # Document parsing failed — still save the file for manual review
+        requirements = {"project_name": project_name or file.filename or "未命名项目", "parse_error": str(e)}
 
     project = BidProject(
-        name=project_name or requirements.get("project_name") or "未命名项目",
+        name=project_name or requirements.get("project_name") or file.filename or "未命名项目",
         original_file_path=str(saved_path.absolute()),
         parsed_requirements_json=json.dumps(requirements, ensure_ascii=False),
         status="archived",
