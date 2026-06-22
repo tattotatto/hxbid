@@ -26,3 +26,7 @@ Thumbs.db
 uploads/
 outputs/
 templates/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
