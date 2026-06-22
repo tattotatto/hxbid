@@ -6,6 +6,7 @@ endpoints that wire together the full AI bid-document pipeline.
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -356,12 +357,14 @@ async def stream_progress(project_id: str):
     a generation run is in progress. Stops when the project reaches a terminal
     status (review, exported, or error).
     """
-    import asyncio
 
     async def event_generator():
         async with async_session() as poll_db:
             while True:
-                project = await poll_db.get(BidProject, project_id)
+                # populate_existing=True forces a DB hit, bypassing the identity-map cache
+                project = await poll_db.get(
+                    BidProject, project_id, populate_existing=True
+                )
                 if not project:
                     yield {
                         "event": "error",
