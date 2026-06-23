@@ -628,6 +628,86 @@ async def get_vector_stats():
 # ---------------------------------------------------------------------------
 
 
+@router.post("/index-history/{project_id}")
+async def index_history_bid(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    """Re-parse and index a single historical bid into the vector store.
+
+    Reads the original uploaded document, extracts text, splits into
+    sections, and indexes each section as a searchable chunk.
+    """
+    if not vector_store.is_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector store is not available",
+        )
+
+    project = await db.get(BidProject, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if not project.original_file_path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No original file to index")
+
+    file_path = Path(project.original_file_path)
+    if not file_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"File not found: {project.original_file_path}")
+
+    # Parse document
+    try:
+        text = parse_document(str(file_path))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Document parse failed: {e}")
+
+    if not text or len(text.strip()) < 50:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document text too short")
+
+    # Split into sections by Chinese bid chapter headers
+    import re
+    sections = re.split(r'\n(?=(?:第[一二三四五六七八九十\d]+[章节篇]|[\（\(][一二三四五六七八九十\d]+[\）\)]|[一二三四五六七八九十\d]+[、．.]))', text)
+
+    if len(sections) < 2:
+        # No section markers found, split by double newlines as paragraphs
+        sections = [s.strip() for s in re.split(r'\n\s*\n', text) if len(s.strip()) > 50]
+        if len(sections) < 2:
+            sections = [text]  # Use whole document as one chunk
+
+    # Clear old index entries for this project
+    vector_store.delete_project(project_id)
+
+    # Index each section
+    indexed = 0
+    for i, section in enumerate(sections):
+        content = section.strip()
+        if len(content) < 50:
+            continue
+        # Use first line as title, rest as content
+        lines = content.split('\n', 1)
+        title = lines[0].strip()[:100] if lines else f"Section {i+1}"
+        body = lines[1].strip() if len(lines) > 1 else content
+        if len(body) < 30:
+            body = content
+
+        ok = vector_store.index_chapter(
+            chapter_id=f"{project_id}_sec_{i}",
+            project_id=project_id,
+            title=title,
+            content=body,
+            metadata={"source": "history", "project_name": project.name},
+        )
+        if ok:
+            indexed += 1
+
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "sections_indexed": indexed,
+        "total_chars": len(text),
+    }
+
+
 @router.post("/rebuild-index")
 async def rebuild_index():
     """Rebuild the vector index from all projects with generated chapters.

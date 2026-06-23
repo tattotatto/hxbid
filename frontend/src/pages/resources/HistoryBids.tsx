@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { Table, Tag, message, Upload, Button, Modal, Input, Progress } from 'antd'
-import { UploadOutlined, InboxOutlined } from '@ant-design/icons'
+import { UploadOutlined, InboxOutlined, DeploymentUnitOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import type { UploadProps } from 'antd'
 import dayjs from 'dayjs'
@@ -37,6 +37,7 @@ export default function HistoryBids() {
   const [uploadFileName, setUploadFileName] = useState('')
   const [uploadFileSize, setUploadFileSize] = useState(0)
   const [bidName, setBidName] = useState('')
+  const [vectorizing, setVectorizing] = useState<Record<string, boolean>>({})
   const xhrRef = useRef<XMLHttpRequest | null>(null)
 
   const fetchProjects = async () => {
@@ -108,6 +109,18 @@ export default function HistoryBids() {
     xhr.send(formData)
   }
 
+  const handleVectorize = async (id: string) => {
+    setVectorizing((p) => ({ ...p, [id]: true }))
+    try {
+      const res = await client.post(`/bid/index-history/${id}`)
+      message.success(`向量化完成：${res.data.sections_indexed} 个章节片段已入库`)
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '向量化失败')
+    } finally {
+      setVectorizing((p) => ({ ...p, [id]: false }))
+    }
+  }
+
   const columns: ColumnsType<Project> = [
     { title: '项目名称', dataIndex: 'name', key: 'name' },
     {
@@ -124,6 +137,20 @@ export default function HistoryBids() {
       dataIndex: 'created_at',
       key: 'created_at',
       render: (val: string) => dayjs(val).format('YYYY-MM-DD'),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      render: (_: unknown, record: Project) => (
+        <Button
+          size="small"
+          icon={<DeploymentUnitOutlined />}
+          loading={vectorizing[record.id]}
+          onClick={() => handleVectorize(record.id)}
+        >
+          向量化
+        </Button>
+      ),
     },
   ]
 
