@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.api.router import api_router
 from app.config import settings
@@ -44,13 +44,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount uploads as static files for serving images
-uploads_abs = os.path.abspath(settings.UPLOAD_DIR)
-os.makedirs(uploads_abs, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=uploads_abs), name="uploads")
-
 # API routes
 app.include_router(api_router, prefix="/api/v1")
+
+
+# ---------------------------------------------------------------------------
+# Uploaded file serving (images, attachments)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/uploads/{file_path:path}")
+async def serve_upload(file_path: str):
+    """Serve uploaded files (images, attachments) from UPLOAD_DIR.
+
+    This replaces StaticFiles mount which has issues with Docker volume paths.
+    """
+    full_path = os.path.join(settings.UPLOAD_DIR, file_path)
+    # Prevent directory traversal
+    real_path = os.path.realpath(full_path)
+    real_upload = os.path.realpath(settings.UPLOAD_DIR)
+    if not real_path.startswith(real_upload):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    if not os.path.isfile(real_path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    return FileResponse(real_path)
 
 
 @app.get("/")
