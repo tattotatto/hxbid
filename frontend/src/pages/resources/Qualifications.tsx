@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Table, Button, Modal, Form, Input, DatePicker, Popconfirm, message, Space, Upload, Row, Col, Image, Spin } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined, ScanOutlined } from '@ant-design/icons'
+import { Table, Button, Modal, Form, Input, DatePicker, Popconfirm, message, Space, Upload, Row, Col } from 'antd'
+import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
 import client from '../../api/client'
@@ -29,9 +29,8 @@ export default function Qualifications() {
     try {
       const res = await client.get('/qualifications/')
       setData(res.data)
-    } catch {
-      message.error('获取资质列表失败')
-    } finally { setLoading(false) }
+    } catch { message.error('获取资质列表失败') }
+    finally { setLoading(false) }
   }
 
   useEffect(() => { fetchData() }, [])
@@ -82,6 +81,7 @@ export default function Qualifications() {
     finally { setConfirmLoading(false) }
   }
 
+  // Auto OCR on image upload — only fill empty fields
   const handleOcr = async (file: File) => {
     setOcrLoading(true)
     const fd = new FormData()
@@ -91,22 +91,21 @@ export default function Qualifications() {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       const d = res.data
-      // Auto-fill fields from OCR, preserving any existing user input
       const current = form.getFieldsValue()
-      form.setFieldsValue({
-        name: d.name || current.name || '',
-        cert_number: d.cert_number || current.cert_number || '',
-        issuing_authority: d.issuing_authority || current.issuing_authority || '',
-        issue_date: d.issue_date ? dayjs(d.issue_date) : current.issue_date,
-        expiry_date: d.expiry_date ? dayjs(d.expiry_date) : current.expiry_date,
-      })
+      // Only fill fields that are currently empty
+      if (!current.name && d.name) form.setFieldValue('name', d.name)
+      if (!current.cert_number && d.cert_number) form.setFieldValue('cert_number', d.cert_number)
+      if (!current.issuing_authority && d.issuing_authority) form.setFieldValue('issuing_authority', d.issuing_authority)
+      if (!current.issue_date && d.issue_date) form.setFieldValue('issue_date', dayjs(d.issue_date))
+      if (!current.expiry_date && d.expiry_date) form.setFieldValue('expiry_date', dayjs(d.expiry_date))
+
       if (d.ocr_text && d.ocr_text.length > 10) {
-        message.success('OCR识别完成，请核对自动填充的字段')
+        message.success('识别完成，空白字段已自动填充，请核对修正')
       } else {
-        message.warning('未识别到有效文字，请手动填写字段')
+        message.info('图片已上传，未能识别文字，请手动填写')
       }
     } catch (err: any) {
-      message.error(err.response?.data?.detail || 'OCR识别失败，请手动填写')
+      message.error(err.response?.data?.detail || '识别失败，请手动填写')
     } finally { setOcrLoading(false) }
   }
 
@@ -146,29 +145,18 @@ export default function Qualifications() {
         width={560}
         destroyOnClose
       >
-        {/* OCR Upload Section */}
-        <div style={{ marginBottom: 16, padding: 12, background: '#fafafa', borderRadius: 8 }}>
-          <Row gutter={8} align="middle">
-            <Col>
-              <Upload
-                accept="image/*"
-                showUploadList={false}
-                beforeUpload={(file) => { handleOcr(file); return false }}
-              >
-                <Button icon={<ScanOutlined />} loading={ocrLoading}>
-                  上传图片自动识别
-                </Button>
-              </Upload>
-            </Col>
-            <Col flex="auto">
-              <span style={{ color: '#888', fontSize: 12 }}>
-                上传资质证书图片，系统自动识别名称、编号、颁发机构、日期等信息，识别后可手动修正
-              </span>
-            </Col>
-          </Row>
-        </div>
-
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item label="资质证书图片（上传即自动识别填充）" help="上传资质证书图片，系统自动识别名称、编号等信息填入下方空白字段">
+            <Upload
+              accept="image/*"
+              showUploadList={false}
+              beforeUpload={(file) => { handleOcr(file); return false }}
+            >
+              <Button icon={<UploadOutlined />} loading={ocrLoading}>
+                上传图片自动识别
+              </Button>
+            </Upload>
+          </Form.Item>
           <Form.Item label="资质名称" name="name" rules={[{ required: true }]}>
             <Input placeholder="如：保安服务许可证" />
           </Form.Item>

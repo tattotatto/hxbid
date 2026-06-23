@@ -17,3 +17,5 @@ openai==1.50.0
 sse-starlette==1.6.5
 chromadb==0.5.23
 sentence-transformers==3.0.1
+pytesseract==0.3.13
+Pillow==12.2.0
