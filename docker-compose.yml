@@ -30,11 +30,12 @@ services:
       UPLOAD_DIR: /app/uploads
       OUTPUT_DIR: /app/outputs
       TEMPLATE_DIR: /app/templates
-      VECTOR_STORE_ENABLED: "false"
-      HF_ENDPOINT: https://hf-mirror.com
+      VECTOR_STORE_ENABLED: "true"
+      EMBEDDING_MODEL: /app/bge-base-zh-v1.5
     volumes:
       - uploads:/app/uploads
       - outputs:/app/outputs
+      - ./bge-base-zh-v1.5:/app/bge-base-zh-v1.5:ro
     depends_on:
       db:
         condition: service_healthy
