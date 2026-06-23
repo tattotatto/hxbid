@@ -10,6 +10,7 @@ import {
   TeamOutlined,
   HistoryOutlined,
   LogoutOutlined,
+  UserOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 import Copyright from './Copyright'
@@ -18,45 +19,69 @@ const { Header, Sider, Content, Footer } = AntLayout
 
 type MenuItem = Required<MenuProps>['items'][number]
 
-const menuItems: MenuItem[] = [
-  {
-    key: '/',
-    icon: <HomeOutlined />,
-    label: '工作台',
-  },
-  {
-    key: '/projects',
-    icon: <FileTextOutlined />,
-    label: '标书项目',
-  },
-  {
-    key: 'resources',
-    icon: <DatabaseOutlined />,
-    label: '资源库',
-    children: [
-      {
-        key: '/resources/qualifications',
-        icon: <SafetyCertificateOutlined />,
-        label: '公司资质',
-      },
-      {
-        key: '/resources/personnel',
-        icon: <TeamOutlined />,
-        label: '人员信息',
-      },
-      {
-        key: '/resources/history',
-        icon: <HistoryOutlined />,
-        label: '历史标书',
-      },
-    ],
-  },
-  {
-    key: '/settings',
-    icon: <SettingOutlined />,
-    label: '系统设置',
-  },
-]
+function getUserRole(): string {
+  try {
+    const raw = localStorage.getItem('user')
+    if (!raw) return 'viewer'
+    return JSON.parse(raw).role || 'viewer'
+  } catch {
+    return 'viewer'
+  }
+}
+
+function buildMenuItems(): MenuItem[] {
+  const role = getUserRole()
+  const items: MenuItem[] = [
+    {
+      key: '/',
+      icon: <HomeOutlined />,
+      label: '工作台',
+    },
+    {
+      key: '/projects',
+      icon: <FileTextOutlined />,
+      label: '标书项目',
+    },
+    {
+      key: 'resources',
+      icon: <DatabaseOutlined />,
+      label: '资源库',
+      children: [
+        {
+          key: '/resources/qualifications',
+          icon: <SafetyCertificateOutlined />,
+          label: '公司资质',
+        },
+        {
+          key: '/resources/personnel',
+          icon: <TeamOutlined />,
+          label: '人员信息',
+        },
+        {
+          key: '/resources/history',
+          icon: <HistoryOutlined />,
+          label: '历史标书',
+        },
+      ],
+    },
+    {
+      key: '/settings',
+      icon: <SettingOutlined />,
+      label: '系统设置',
+    },
+  ]
+
+  // Admin-only menu items
+  if (role === 'admin') {
+    items.push({
+      key: '/admin/users',
+      icon: <UserOutlined />,
+      label: '用户管理',
+    })
+  }
+
+  return items
+}
 
 export default function Layout() {
   const [collapsed, setCollapsed] = useState(false)
@@ -123,7 +148,7 @@ export default function Layout() {
           mode="inline"
           selectedKeys={getSelectedKeys()}
           defaultOpenKeys={getOpenKeys()}
-          items={menuItems}
+          items={buildMenuItems()}
           onClick={handleMenuClick}
           style={{ borderInlineEnd: 'none' }}
         />

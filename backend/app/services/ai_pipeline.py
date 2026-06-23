@@ -10,8 +10,12 @@ Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 import json
 from typing import Any, AsyncIterator, Dict, List
 
+import logging
+
 from app.services.ai_adapter import ai_adapter
 from app.services.deid import deidentify_text
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -44,15 +48,52 @@ DEFAULT_BID_SECTIONS = [
 
 MAX_INPUT_CHARS = 15000
 
+# Cache for active constraints (refreshed each generation session)
+_active_constraints_cache: List[str] = []
+_constraints_cache_version: int = 0
+
+
+async def _get_active_constraints() -> List[str]:
+    """Load active prompt constraints from the feedback loop.
+
+    Cached in-process; refreshed when called from the API handler.
+    """
+    global _active_constraints_cache, _constraints_cache_version
+    try:
+        from app.database import async_session
+        from app.services.feedback_loop import get_active_prompt_constraints
+
+        async with async_session() as db:
+            constraints = await get_active_prompt_constraints(db)
+            _active_constraints_cache = constraints
+            _constraints_cache_version += 1
+            return constraints
+    except Exception as exc:
+        logger.debug("Failed to load active constraints: %s", exc)
+        return _active_constraints_cache
+
+
+def _build_system_prompt(extra_constraints: List[str] | None = None) -> str:
+    """Build the full system prompt, appending any active feedback rules."""
+    parts = [SYSTEM_PROMPT]
+    all_constraints = list(_active_constraints_cache)
+    if extra_constraints:
+        all_constraints.extend(extra_constraints)
+    if all_constraints:
+        parts.append("\n额外写作约束（基于历史编辑反馈自动生成）：")
+        for i, c in enumerate(all_constraints, 1):
+            parts.append(f"  {i}. {c}")
+    return "\n".join(parts)
+
 
 # ---------------------------------------------------------------------------
 # Helper: build messages list with system prompt prepended
 # ---------------------------------------------------------------------------
 
-def _build_messages(user_content: str) -> List[Dict[str, str]]:
+def _build_messages(user_content: str, extra_constraints: List[str] | None = None) -> List[Dict[str, str]]:
     """Return a messages list with SYSTEM_PROMPT as the system message."""
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _build_system_prompt(extra_constraints)},
         {"role": "user", "content": user_content},
     ]
 

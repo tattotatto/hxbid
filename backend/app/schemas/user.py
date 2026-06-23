@@ -37,6 +37,14 @@ class UserLogin(BaseModel):
     password: str
 
 
+class UserUpdate(BaseModel):
+    """Schema for admin updating a user's role or active status."""
+
+    display_name: Optional[str] = Field(None, max_length=100)
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 class Token(BaseModel):
     """Schema for JWT token response."""
 

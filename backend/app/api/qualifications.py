@@ -16,6 +16,7 @@ from app.schemas.qualification import (
     QualificationRead,
     QualificationUpdate,
 )
+from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
 
 router = APIRouter()
@@ -41,7 +42,7 @@ async def list_qualifications(
 async def create_qualification(
     data: QualificationCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_editor),
 ):
     """Create a new qualification record."""
     qual = Qualification(**data.model_dump())
@@ -75,7 +76,7 @@ async def update_qualification(
     qual_id: str,
     data: QualificationUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_editor),
 ):
     """Update a qualification record. Only supplied fields are changed."""
     result = await db.execute(
@@ -99,7 +100,7 @@ async def update_qualification(
 async def delete_qualification(
     qual_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_editor),
 ):
     """Delete a qualification record."""
     result = await db.execute(

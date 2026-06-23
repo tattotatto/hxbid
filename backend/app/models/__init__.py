@@ -7,6 +7,8 @@ from app.models.user import User
 from app.models.qualification import Qualification
 from app.models.personnel import Personnel, PersonnelExperience, PersonnelCertificate
 from app.models.project import BidProject, ProjectChapter
+from app.models.template import BidTemplate
+from app.models.edit_rule import EditRule
 
 __all__ = [
     "User",
@@ -16,4 +18,6 @@ __all__ = [
     "PersonnelCertificate",
     "BidProject",
     "ProjectChapter",
+    "BidTemplate",
+    "EditRule",
 ]

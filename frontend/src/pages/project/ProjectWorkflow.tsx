@@ -8,11 +8,19 @@ import {
   Tabs,
   Spin,
   message,
+  Modal,
+  Tag,
+  Descriptions,
+  List,
+  Divider,
+  Select,
 } from 'antd'
 import {
   ThunderboltOutlined,
   DownloadOutlined,
   ArrowLeftOutlined,
+  ExperimentOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons'
 import client from '../../api/client'
 import GenerationProgress from '../../components/GenerationProgress'
@@ -31,6 +39,28 @@ interface SseChapter {
   id: string
   title: string
   status: string
+}
+
+interface RagSourceInfo {
+  similar_count: number
+  qual_count: number
+  personnel_count: number
+  similar_titles?: string[]
+}
+
+interface AiTraceInfo {
+  verdict: string
+  scores: {
+    empty_phrase: number
+    anchor: number
+    repetition: number
+    overall: number
+  }
+  empty_phrase_count: number
+  anchor_count: number
+  anchor_gaps: Array<{ paragraph_index: number; preview: string }>
+  repetitive_openings: Array<{ pattern: string; count: number }>
+  empty_phrases: Array<{ phrase: string; count: number }>
 }
 
 const steps = [
@@ -61,10 +91,33 @@ export default function ProjectWorkflow() {
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
 
+  // Edit analysis
+  const [analyzing, setAnalyzing] = useState(false)
+  const [editAnalysis, setEditAnalysis] = useState<any>(null)
+  const [analysisModalOpen, setAnalysisModalOpen] = useState(false)
+
+  // Feedback loop
+  const [feedbackLoading, setFeedbackLoading] = useState(false)
+  const [bidResult, setBidResult] = useState<string>(project?.bid_result || 'pending')
+
+  // Template selector for export
+  const [templates, setTemplates] = useState<Array<{ id: string; name: string; is_default: boolean }>>([])
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | undefined>(undefined)
+
+  useEffect(() => {
+    client.get('/templates/').then((res) => {
+      setTemplates(res.data)
+      const def = res.data.find((t: any) => t.is_default)
+      if (def) setSelectedTemplateId(def.id)
+    }).catch(() => {})
+  }, [])
+
   // Generation progress tracking
   const [sseChapters, setSseChapters] = useState<SseChapter[]>([])
   const [completed, setCompleted] = useState(0)
   const [total, setTotal] = useState(0)
+  const [ragSources, setRagSources] = useState<Record<string, RagSourceInfo>>({})
+  const [aiTraces, setAiTraces] = useState<Record<string, AiTraceInfo>>({})
 
   // Local chapter content edits
   const [chapterContent, setChapterContent] = useState<Record<string, string>>({})
@@ -106,6 +159,8 @@ export default function ProjectWorkflow() {
     setTotal(0)
     setSseChapters([])
     setCurrentChapter('')
+    setRagSources({})
+    setAiTraces({})
 
     const token = localStorage.getItem('token')
     let response: Response
@@ -184,6 +239,34 @@ export default function ProjectWorkflow() {
                   }))
                   break
                 }
+                case 'rag_sources': {
+                  // Store RAG source info per chapter
+                  setRagSources((prev) => ({
+                    ...prev,
+                    [data.chapter_id]: {
+                      similar_count: data.similar_count ?? 0,
+                      qual_count: data.qual_count ?? 0,
+                      personnel_count: data.personnel_count ?? 0,
+                      similar_titles: data.similar_titles ?? [],
+                    },
+                  }))
+                  break
+                }
+                case 'ai_trace_report': {
+                  setAiTraces((prev) => ({
+                    ...prev,
+                    [data.chapter_id]: {
+                      verdict: data.verdict,
+                      scores: data.scores,
+                      empty_phrase_count: data.empty_phrase_count,
+                      anchor_count: data.anchor_count,
+                      anchor_gaps: data.anchor_gaps ?? [],
+                      repetitive_openings: data.repetitive_openings ?? [],
+                      empty_phrases: data.empty_phrases ?? [],
+                    },
+                  }))
+                  break
+                }
                 case 'chapter_done': {
                   setCompleted((prev) => prev + 1)
                   // Mark chapter as generated in SSE list
@@ -251,6 +334,7 @@ export default function ProjectWorkflow() {
       const res = await client.post('/bid/export', {
         project_id: id,
         format: 'both',
+        template_id: selectedTemplateId,
       })
       const { docx_url, pdf_url } = res.data
 
@@ -268,6 +352,57 @@ export default function ProjectWorkflow() {
       message.error('导出失败')
     } finally {
       setExporting(false)
+    }
+  }
+
+  const handleAnalyzeEdits = async () => {
+    if (!id) return
+    setAnalyzing(true)
+    setEditAnalysis(null)
+    try {
+      const res = await client.post('/bid/analyze-edits', { project_id: id })
+      setEditAnalysis(res.data)
+      setAnalysisModalOpen(true)
+      if (res.data.chapters_analyzed === 0) {
+        message.info('没有已编辑的章节可供分析')
+      } else {
+        message.success(`分析了 ${res.data.chapters_analyzed} 个章节的编辑意图`)
+      }
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '编辑分析失败')
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  const handleRunFeedback = async () => {
+    if (!id) return
+    setFeedbackLoading(true)
+    try {
+      const res = await client.post('/feedback/run', {
+        project_id: id,
+        bid_result: bidResult !== 'pending' ? bidResult : null,
+      })
+      message.success(
+        `反馈闭环完成：新增 ${res.data.rules_new} 条规则，升级 ${res.data.rules_upgraded} 条`,
+      )
+      await fetchProject()
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '反馈闭环执行失败')
+    } finally {
+      setFeedbackLoading(false)
+    }
+  }
+
+  const handleMarkResult = async (result: string) => {
+    if (!id) return
+    try {
+      await client.put(`/feedback/projects/${id}/result`, { result })
+      setBidResult(result)
+      message.success(`已标记为${result === 'won' ? '中标' : result === 'lost' ? '未中标' : '待定'}`)
+      await fetchProject()
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '更新失败')
     }
   }
 
@@ -331,6 +466,17 @@ export default function ProjectWorkflow() {
           >
             一键生成标书
           </Button>
+          <Select
+            value={selectedTemplateId}
+            onChange={setSelectedTemplateId}
+            style={{ width: 180 }}
+            placeholder="选择排版模板"
+            options={templates.map((t) => ({
+              value: t.id,
+              label: t.name + (t.is_default ? ' (默认)' : ''),
+            }))}
+            prefix={<FileTextOutlined />}
+          />
           <Button
             icon={<DownloadOutlined />}
             loading={exporting}
@@ -339,6 +485,36 @@ export default function ProjectWorkflow() {
           >
             导出 Word + PDF
           </Button>
+          <Button
+            icon={<ExperimentOutlined />}
+            loading={analyzing}
+            disabled={!hasChapters || generating || project.status === 'draft'}
+            onClick={handleAnalyzeEdits}
+          >
+            分析编辑意图
+          </Button>
+
+          {project.status === 'review' || project.status === 'exported' ? (
+            <>
+              <Select
+                value={bidResult}
+                onChange={(v) => handleMarkResult(v)}
+                style={{ width: 100 }}
+                options={[
+                  { value: 'pending', label: '待定' },
+                  { value: 'won', label: '中标 ✅' },
+                  { value: 'lost', label: '未中标 ❌' },
+                ]}
+              />
+              <Button
+                type="primary"
+                loading={feedbackLoading}
+                onClick={handleRunFeedback}
+              >
+                反馈闭环
+              </Button>
+            </>
+          ) : null}
         </Space>
       </Card>
 
@@ -350,6 +526,8 @@ export default function ProjectWorkflow() {
             currentChapter={currentChapter}
             completed={completed}
             total={total}
+            ragSources={ragSources}
+            aiTraces={aiTraces}
           />
         </Card>
       )}
@@ -384,6 +562,108 @@ export default function ProjectWorkflow() {
           )}
         </Card>
       )}
+
+      {/* Edit Analysis Modal */}
+      <Modal
+        title="编辑意图分析报告"
+        open={analysisModalOpen}
+        onCancel={() => setAnalysisModalOpen(false)}
+        footer={null}
+        width={800}
+      >
+        {editAnalysis ? (
+          <div>
+            <Descriptions size="small" column={3} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="分析章节">{editAnalysis.chapters_analyzed}</Descriptions.Item>
+              <Descriptions.Item label="总修改数">{editAnalysis.total_changes}</Descriptions.Item>
+              <Descriptions.Item label="可提炼规则">{editAnalysis.suggested_rules?.length || 0}</Descriptions.Item>
+            </Descriptions>
+
+            {Object.keys(editAnalysis.edit_type_totals || {}).length > 0 && (
+              <>
+                <div style={{ fontWeight: 'bold', marginBottom: 8 }}>修改类型分布</div>
+                <Space wrap style={{ marginBottom: 16 }}>
+                  {Object.entries(editAnalysis.edit_type_totals).map(
+                    ([type, count]: [string, any]) => (
+                      <Tag key={type} color="blue">
+                        {type}：{count}次
+                      </Tag>
+                    ),
+                  )}
+                </Space>
+              </>
+            )}
+
+            {editAnalysis.suggested_rules?.length > 0 && (
+              <>
+                <Divider />
+                <div style={{ fontWeight: 'bold', marginBottom: 8 }}>
+                  可提炼的写作规则（将在后续生成中应用）
+                </div>
+                <List
+                  size="small"
+                  dataSource={editAnalysis.suggested_rules}
+                  renderItem={(rule: string, i: number) => (
+                    <List.Item>
+                      <Tag color="green">规则 {i + 1}</Tag> {rule}
+                    </List.Item>
+                  )}
+                />
+              </>
+            )}
+
+            {editAnalysis.results?.length > 0 && (
+              <>
+                <Divider />
+                <div style={{ fontWeight: 'bold', marginBottom: 8 }}>逐章详情</div>
+                {editAnalysis.results.map((r: any) => (
+                  <Card
+                    key={r.chapter_id}
+                    size="small"
+                    title={r.chapter_title || '未命名章节'}
+                    style={{ marginBottom: 8 }}
+                  >
+                    {r.error ? (
+                      <Tag color="red">分析失败：{r.error}</Tag>
+                    ) : (
+                      <>
+                        <Descriptions size="small" column={3}>
+                          <Descriptions.Item label="修改数">{r.total_changes}</Descriptions.Item>
+                          <Descriptions.Item label="AI分析">{r.ai_analyzed ? '是' : '否（启发式）'}</Descriptions.Item>
+                          <Descriptions.Item label="修改段数">{r.segments?.length || 0}</Descriptions.Item>
+                        </Descriptions>
+                        {r.segments?.length > 0 && (
+                          <List
+                            size="small"
+                            dataSource={r.segments.slice(0, 5)}
+                            renderItem={(seg: any) => (
+                              <List.Item>
+                                <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                                  <span>
+                                    <Tag color="orange">{seg.edit_type}</Tag>
+                                    置信度：{Math.round(seg.confidence * 100)}%
+                                  </span>
+                                  <span style={{ color: '#666', fontSize: 12 }}>
+                                    {seg.reason}
+                                  </span>
+                                </Space>
+                              </List.Item>
+                            )}
+                          />
+                        )}
+                      </>
+                    )}
+                  </Card>
+                ))}
+              </>
+            )}
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', padding: 40 }}>
+            <Spin />
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }

@@ -18,6 +18,7 @@ from app.schemas.project import (
     ProjectRead,
     ProjectUpdate,
 )
+from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
 
 router = APIRouter()

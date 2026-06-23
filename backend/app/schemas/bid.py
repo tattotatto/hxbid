@@ -22,6 +22,7 @@ class ExportRequest(BaseModel):
     project_id: str
     format: str = "docx"  # "docx" | "pdf" | "both"
     chapter_ids: Optional[List[str]] = None
+    template_id: Optional[str] = None
 
 
 class ExportResponse(BaseModel):

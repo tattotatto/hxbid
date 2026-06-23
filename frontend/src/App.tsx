@@ -9,6 +9,7 @@ import Qualifications from './pages/resources/Qualifications'
 import Personnel from './pages/resources/Personnel'
 import HistoryBids from './pages/resources/HistoryBids'
 import Settings from './pages/settings/Settings'
+import UserManagement from './pages/admin/UserManagement'
 
 function App() {
   const token = localStorage.getItem('token')
@@ -28,6 +29,7 @@ function App() {
         <Route path="resources/personnel" element={<Personnel />} />
         <Route path="resources/history" element={<HistoryBids />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="admin/users" element={<UserManagement />} />
       </Route>
     </Routes>
   )

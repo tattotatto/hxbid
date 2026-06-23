@@ -17,6 +17,7 @@ from app.schemas.personnel import (
     PersonnelRead,
     PersonnelUpdate,
 )
+from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
 
 router = APIRouter()
@@ -60,7 +61,7 @@ async def list_personnel(
 async def create_personnel(
     data: PersonnelCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_editor),
 ):
     """Create a personnel record with nested experiences and certificates."""
     # Build the main personnel record (without nested collections)
@@ -116,7 +117,7 @@ async def update_personnel(
     p_id: str,
     data: PersonnelUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_editor),
 ):
     """Update basic fields of a personnel record. Only supplied fields are changed."""
     personnel = await _get_with_relations(p_id, db)
@@ -137,7 +138,7 @@ async def update_personnel(
 async def delete_personnel(
     p_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_editor),
 ):
     """Delete a personnel record. Cascade removes nested experiences and certificates."""
     personnel = await _get_with_relations(p_id, db)

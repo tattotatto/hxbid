@@ -28,10 +28,15 @@ from app.services.ai_pipeline import (
     generate_outline,
     parse_bid_requirements,
 )
+from app.services.anti_ai import analyze_chapter, analyze_project_chapters, report_to_dict
 from app.services.document_parser import parse_document
+from app.services.edit_analyzer import analyze_chapter_edits, edit_analysis_to_dict
 from app.services.notification import send_notification
+from app.services.rag import assemble_chapter_context
 from app.services.render_engine import export_to_pdf, render_bid_to_docx
+from app.services.vector_store import vector_store
 from app.utils.security import get_current_user
+from app.models.template import BidTemplate
 
 router = APIRouter()
 
@@ -66,9 +71,10 @@ async def upload_and_parse(
 
     # -- Parse document text --
     requirements = {}
+    document_text = ""
     try:
-        text = parse_document(str(saved_path))
-        requirements = await parse_bid_requirements(text)
+        document_text = parse_document(str(saved_path))
+        requirements = await parse_bid_requirements(document_text)
     except Exception as e:
         requirements = {"project_name": project_name or file.filename or "未命名项目", "parse_error": str(e)}
 
@@ -83,6 +89,18 @@ async def upload_and_parse(
     db.add(project)
     await db.flush()
     await db.refresh(project)
+
+    # -- Index raw document text into vector store (best-effort) --
+    if document_text:
+        try:
+            vector_store.index_chapter(
+                chapter_id=project.id,
+                project_id=project.id,
+                title=project.name,
+                content=document_text,
+            )
+        except Exception:
+            pass
 
     return ParseResponse(
         project_name=project.name,
@@ -118,9 +136,10 @@ async def upload_history(
         f.write(content)
 
     requirements = {}
+    document_text = ""
     try:
-        text = parse_document(str(saved_path))
-        requirements = await parse_bid_requirements(text)
+        document_text = parse_document(str(saved_path))
+        requirements = await parse_bid_requirements(document_text)
     except Exception as e:
         # Document parsing failed — still save the file for manual review
         requirements = {"project_name": project_name or file.filename or "未命名项目", "parse_error": str(e)}
@@ -135,6 +154,18 @@ async def upload_history(
     db.add(project)
     await db.flush()
     await db.refresh(project)
+
+    # -- Index raw document text into vector store (best-effort) --
+    if document_text:
+        try:
+            vector_store.index_chapter(
+                chapter_id=project.id,
+                project_id=project.id,
+                title=project.name,
+                content=document_text,
+            )
+        except Exception:
+            pass
 
     return ParseResponse(
         project_name=project.name,
@@ -237,13 +268,42 @@ async def generate_bid(
 
                     # --- Stream chapter content ---
                     full_content = ""
+                    # RAG: assemble context from all sources
+                    similar_chapters = []
+                    matched_qualifications = []
+                    matched_personnel = []
+                    source_summary = {}
+
+                    try:
+                        similar_chapters, matched_qualifications, matched_personnel, source_summary = \
+                            await assemble_chapter_context(
+                                chapter_title=ch["title"],
+                                requirements=requirements,
+                                project_id=project_id,
+                                db=gen_db,
+                            )
+                    except Exception:
+                        source_summary = {"similar_count": 0, "qual_count": 0, "personnel_count": 0}
+
+                    # Emit RAG source info to frontend
+                    yield {
+                        "event": "rag_sources",
+                        "data": json.dumps(
+                            {
+                                "chapter_id": ch["id"],
+                                **source_summary,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+
                     try:
                         async for chunk in generate_chapter_with_materials(
                             chapter_title=ch["title"],
                             requirements=requirements,
-                            matched_qualifications=[],
-                            matched_personnel=[],
-                            similar_chapters=[],
+                            matched_qualifications=matched_qualifications,
+                            matched_personnel=matched_personnel,
+                            similar_chapters=[s["content"] for s in similar_chapters],
                         ):
                             full_content += chunk
                             yield {
@@ -277,6 +337,23 @@ async def generate_bid(
                         db_chapter.status = "generated"
                         await gen_db.commit()
 
+                    # --- Anti-AI trace analysis ---
+                    try:
+                        report = analyze_chapter(
+                            chapter_id=ch["id"],
+                            chapter_title=ch["title"],
+                            content=full_content,
+                        )
+                        yield {
+                            "event": "ai_trace_report",
+                            "data": json.dumps(
+                                report_to_dict(report),
+                                ensure_ascii=False,
+                            ),
+                        }
+                    except Exception:
+                        pass  # analysis is best-effort
+
                     # --- chapter_done event ---
                     yield {
                         "event": "chapter_done",
@@ -288,6 +365,30 @@ async def generate_bid(
                             ensure_ascii=False,
                         ),
                     }
+
+                # --- All chapters done — index into vector store ---
+                if vector_store.is_available():
+                    try:
+                        index_chapters = [
+                            {"id": ch["id"], "title": ch.get("title", ch["title"]), "content": ch.get("content", "")}
+                            for ch in chapter_data
+                        ]
+                        # Re-fetch chapters with actual content for indexing
+                        result = await gen_db.execute(
+                            select(ProjectChapter)
+                            .where(ProjectChapter.project_id == project_id)
+                            .order_by(ProjectChapter.order_index)
+                        )
+                        db_chapters = result.scalars().all()
+                        chapters_for_index = [
+                            {"id": c.id, "title": c.title, "content": c.ai_generated_content}
+                            for c in db_chapters
+                            if c.ai_generated_content
+                        ]
+                        if chapters_for_index:
+                            vector_store.index_project(project_id, chapters_for_index)
+                    except Exception:
+                        pass  # indexing is best-effort
 
                 # --- All chapters done — mark project for review ---
                 db_project = await gen_db.get(BidProject, project_id)
@@ -333,6 +434,8 @@ async def export_bid(
 
     Builds a chapters payload from ProjectChapter records and hands it off to
     the render engine. Returns download URLs for the produced file(s).
+
+    Accepts optional template_id to apply a saved style template.
     """
     # -- Load project with chapters --
     result = await db.execute(
@@ -346,6 +449,42 @@ async def export_bid(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
         )
+
+    # -- Load style template if provided --
+    style_config = None
+    template_id = getattr(data, "template_id", None)
+    if template_id:
+        template = await db.get(BidTemplate, template_id)
+        if template:
+            import json as _json
+            style_config = _json.loads(template.style_config_json)
+    else:
+        # Use the default template
+        result_tpl = await db.execute(
+            select(BidTemplate).where(BidTemplate.is_default == True)
+        )
+        default_tpl = result_tpl.scalar_one_or_none()
+        if default_tpl:
+            import json as _json
+            style_config = _json.loads(default_tpl.style_config_json)
+
+    # Convert JSON-friendly keys to python-docx types
+    if style_config:
+        from docx.shared import Pt, Cm
+        if "body_font_size_pt" in style_config:
+            style_config["body_font_size"] = Pt(style_config.pop("body_font_size_pt"))
+        if "heading1_font_size_pt" in style_config:
+            style_config["heading1_font_size"] = Pt(style_config.pop("heading1_font_size_pt"))
+        if "heading2_font_size_pt" in style_config:
+            style_config["heading2_font_size"] = Pt(style_config.pop("heading2_font_size_pt"))
+        if "margin_top_cm" in style_config:
+            style_config["margin_top"] = Cm(style_config.pop("margin_top_cm"))
+        if "margin_bottom_cm" in style_config:
+            style_config["margin_bottom"] = Cm(style_config.pop("margin_bottom_cm"))
+        if "margin_left_cm" in style_config:
+            style_config["margin_left"] = Cm(style_config.pop("margin_left_cm"))
+        if "margin_right_cm" in style_config:
+            style_config["margin_right"] = Cm(style_config.pop("margin_right_cm"))
 
     # -- Filter chapters if chapter_ids provided --
     if data.chapter_ids:
@@ -362,7 +501,7 @@ async def export_bid(
         chapters_payload.append({"title": c.title, "content": content})
 
     # -- Render .docx --
-    docx_path = render_bid_to_docx(chapters_payload, project.name)
+    docx_path = render_bid_to_docx(chapters_payload, project.name, style_config=style_config)
     docx_filename = Path(docx_path).name
 
     # -- Optionally render .pdf --
@@ -465,3 +604,244 @@ async def stream_progress(project_id: str):
                 await asyncio.sleep(1)
 
     return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
+# GET /vector-stats  (Vector store statistics)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/vector-stats")
+async def get_vector_stats():
+    """Return collection statistics for the vector knowledge base.
+
+    Used by the frontend Workbench and Settings pages to display
+    knowledge base health.
+    """
+    stats = vector_store.get_collection_stats()
+    stats["enabled"] = vector_store.is_available()
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# POST /rebuild-index  (Rebuild the entire vector index)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/rebuild-index")
+async def rebuild_index():
+    """Rebuild the vector index from all projects with generated chapters.
+
+    Queries every project that has generated chapter content, clears the
+    existing collection, and re-indexes all chapters. This is a potentially
+    long-running operation.
+    """
+    if not vector_store.is_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector store is not available",
+        )
+
+    async with async_session() as db:
+        # Fetch all projects that have chapters with generated content
+        result = await db.execute(
+            select(ProjectChapter)
+            .where(ProjectChapter.ai_generated_content != "")
+            .order_by(ProjectChapter.project_id, ProjectChapter.order_index)
+        )
+        all_chapters = result.scalars().all()
+
+        if not all_chapters:
+            return {"message": "No chapters to index", "indexed": 0}
+
+        chapters_data = [
+            {
+                "id": c.id,
+                "project_id": c.project_id,
+                "title": c.title,
+                "content": c.ai_generated_content,
+            }
+            for c in all_chapters
+        ]
+
+        indexed = vector_store.rebuild_index(chapters_data)
+        return {"message": f"Index rebuilt: {indexed} chapters indexed", "indexed": indexed}
+
+
+# ---------------------------------------------------------------------------
+# POST /check-ai-traces  (Anti-AI trace analysis for existing chapters)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/check-ai-traces")
+async def check_ai_traces(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run anti-AI trace analysis on a project's chapters.
+
+    Request body: {"project_id": "..."} or {"chapter_ids": ["...", "..."]}
+
+    Returns per-chapter scores and overall project verdict.
+    """
+    # -- Load chapters --
+    if "chapter_ids" in data and data["chapter_ids"]:
+        result = await db.execute(
+            select(ProjectChapter)
+            .where(ProjectChapter.id.in_(data["chapter_ids"]))
+            .order_by(ProjectChapter.order_index)
+        )
+    elif "project_id" in data:
+        result = await db.execute(
+            select(ProjectChapter)
+            .where(ProjectChapter.project_id == data["project_id"])
+            .order_by(ProjectChapter.order_index)
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide project_id or chapter_ids",
+        )
+
+    chapters = result.scalars().all()
+    if not chapters:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No chapters found",
+        )
+
+    # -- Run analysis --
+    chapters_data = [
+        {
+            "id": c.id,
+            "title": c.title,
+            "content": c.final_content or c.ai_generated_content,
+        }
+        for c in chapters
+    ]
+    reports = analyze_project_chapters(chapters_data)
+
+    # -- Build response --
+    report_dicts = [report_to_dict(r) for r in reports]
+    overall_score = round(
+        sum(r["scores"]["overall"] for r in report_dicts) / max(len(report_dicts), 1),
+        1,
+    )
+    worst_chapter = max(report_dicts, key=lambda r: r["scores"]["overall"]) if report_dicts else None
+
+    return {
+        "project_id": data.get("project_id", ""),
+        "chapters_count": len(report_dicts),
+        "overall_score": overall_score,
+        "worst_chapter": worst_chapter,
+        "chapters": report_dicts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /analyze-edits  (Edit intent analysis)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/analyze-edits")
+async def analyze_edits(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze edit intent by comparing AI-generated vs human-edited content.
+
+    Request body: {"project_id": "..."} or {"chapter_ids": ["...", "..."]}
+
+    For each chapter that has both ai_generated_content and final_content,
+    computes a paragraph-level diff and uses AI to classify each edit's intent.
+    Returns edit type counts, suggested writing rules, and per-segment details.
+    """
+    # -- Load chapters --
+    if "chapter_ids" in data and data["chapter_ids"]:
+        result = await db.execute(
+            select(ProjectChapter)
+            .where(ProjectChapter.id.in_(data["chapter_ids"]))
+            .order_by(ProjectChapter.order_index)
+        )
+    elif "project_id" in data:
+        result = await db.execute(
+            select(ProjectChapter)
+            .where(ProjectChapter.project_id == data["project_id"])
+            .order_by(ProjectChapter.order_index)
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide project_id or chapter_ids",
+        )
+
+    chapters = result.scalars().all()
+    if not chapters:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No chapters found",
+        )
+
+    # -- Filter to chapters that have BOTH AI and final content --
+    chapters_data = [
+        {
+            "id": c.id,
+            "title": c.title,
+            "ai_generated_content": c.ai_generated_content,
+            "final_content": c.final_content,
+        }
+        for c in chapters
+        if c.ai_generated_content and c.final_content
+    ]
+
+    if not chapters_data:
+        return {
+            "message": "No chapters with both AI-generated and edited content found",
+            "chapters_analyzed": 0,
+            "results": [],
+        }
+
+    # -- Run analysis --
+    analyses = []
+    for ch in chapters_data:
+        try:
+            analysis = await analyze_chapter_edits(
+                chapter_id=ch["id"],
+                chapter_title=ch["title"],
+                ai_generated_content=ch["ai_generated_content"],
+                final_content=ch["final_content"],
+                use_ai=data.get("use_ai", True),
+            )
+            analyses.append(edit_analysis_to_dict(analysis))
+        except Exception as exc:
+            logger.warning("Edit analysis failed for chapter %s: %s", ch["id"], exc)
+            analyses.append({
+                "chapter_id": ch["id"],
+                "chapter_title": ch["title"],
+                "error": str(exc),
+            })
+
+    # -- Aggregate across all chapters --
+    type_totals: dict = {}
+    all_rules: list = []
+    total_changes = 0
+    for a in analyses:
+        if "edit_type_counts" in a:
+            for t, c in a["edit_type_counts"].items():
+                type_totals[t] = type_totals.get(t, 0) + c
+            total_changes += a.get("total_changes", 0)
+            if a.get("suggested_rules"):
+                for rule in a["suggested_rules"]:
+                    if rule not in all_rules:
+                        all_rules.append(rule)
+
+    return {
+        "project_id": data.get("project_id", ""),
+        "chapters_analyzed": len(analyses),
+        "total_changes": total_changes,
+        "edit_type_totals": type_totals,
+        "suggested_rules": all_rules,
+        "results": analyses,
+    }
