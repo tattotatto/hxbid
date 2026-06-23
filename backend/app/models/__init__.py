@@ -9,6 +9,7 @@ from app.models.personnel import Personnel, PersonnelExperience, PersonnelCertif
 from app.models.project import BidProject, ProjectChapter
 from app.models.template import BidTemplate
 from app.models.edit_rule import EditRule
+from app.models.company_profile import CompanyProfile
 
 __all__ = [
     "User",
@@ -20,4 +21,5 @@ __all__ = [
     "ProjectChapter",
     "BidTemplate",
     "EditRule",
+    "CompanyProfile",
 ]

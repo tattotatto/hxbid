@@ -4,7 +4,7 @@ Provides full CRUD for qualification / certificate records.
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ from app.schemas.qualification import (
     QualificationRead,
     QualificationUpdate,
 )
+from app.services.ocr_service import analyze_document_image
 from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
 
@@ -113,3 +114,33 @@ async def delete_qualification(
             detail="Qualification not found",
         )
     await db.delete(qual)
+
+
+# ---------------------------------------------------------------------------
+# POST /ocr  — OCR analyze a certificate/license image
+# ---------------------------------------------------------------------------
+
+
+@router.post("/ocr")
+async def ocr_qualification(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_editor),
+):
+    """Upload a certificate/license image and get OCR-extracted fields.
+
+    The image is analyzed and key fields (name, cert_number, issuing_authority,
+    dates) are returned for auto-filling the qualification form.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No file provided")
+
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File too large (max 10MB)")
+
+    result = await analyze_document_image(
+        file_bytes=content,
+        filename=file.filename,
+        doc_type="qualification",
+    )
+    return result
