@@ -121,9 +121,9 @@ export default function HistoryBids() {
     try {
       const res = await client.post(`/bid/index-history/${id}`)
       setVectorized((prev) => new Set(prev).add(id))
-      message.success(`向量化完成：${res.data.sections_indexed} 个章节片段已入库`)
+      message.success(`训练AI完成：${res.data.sections_indexed} 个章节片段已入库`)
     } catch (err: any) {
-      message.error(err.response?.data?.detail || '向量化失败')
+      message.error(err.response?.data?.detail || '训练AI失败')
     } finally {
       setVectorizing((p) => ({ ...p, [id]: false }))
     }
@@ -151,7 +151,7 @@ export default function HistoryBids() {
       key: 'actions',
       render: (_: unknown, record: Project) =>
         vectorized.has(record.id) ? (
-          <Tag color="blue">已向量化</Tag>
+          <Tag color="blue">已完成训练</Tag>
         ) : (
           <Button
             size="small"
@@ -159,7 +159,7 @@ export default function HistoryBids() {
             loading={vectorizing[record.id]}
             onClick={() => handleVectorize(record.id)}
           >
-            向量化
+            训练AI
           </Button>
         ),
 
