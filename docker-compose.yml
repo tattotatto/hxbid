@@ -30,6 +30,8 @@ services:
       UPLOAD_DIR: /app/uploads
       OUTPUT_DIR: /app/outputs
       TEMPLATE_DIR: /app/templates
+      VECTOR_STORE_ENABLED: "false"
+      HF_ENDPOINT: https://hf-mirror.com
     volumes:
       - uploads:/app/uploads
       - outputs:/app/outputs
