@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
-import { Table, Button, Modal, Form, Input, DatePicker, Popconfirm, message, Space, Upload, Row, Col } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined } from '@ant-design/icons'
+import { useEffect, useState, useRef } from 'react'
+import { Table, Button, Modal, Form, Input, DatePicker, Popconfirm, message, Space, Upload, Row, Col, Image } from 'antd'
+import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined, ScanOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
 import client from '../../api/client'
@@ -22,14 +22,14 @@ export default function Qualifications() {
   const [editing, setEditing] = useState<Qualification | null>(null)
   const [confirmLoading, setConfirmLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string>('')
   const [form] = Form.useForm()
 
   const fetchData = async () => {
     setLoading(true)
-    try {
-      const res = await client.get('/qualifications/')
-      setData(res.data)
-    } catch { message.error('获取资质列表失败') }
+    try { const res = await client.get('/qualifications/'); setData(res.data) }
+    catch { message.error('获取资质列表失败') }
     finally { setLoading(false) }
   }
 
@@ -38,6 +38,8 @@ export default function Qualifications() {
   const handleAdd = () => {
     setEditing(null)
     form.resetFields()
+    setUploadedFile(null)
+    setPreviewUrl('')
     setModalOpen(true)
   }
 
@@ -48,15 +50,14 @@ export default function Qualifications() {
       issue_date: record.issue_date ? dayjs(record.issue_date) : null,
       expiry_date: record.expiry_date ? dayjs(record.expiry_date) : null,
     })
+    setUploadedFile(null)
+    setPreviewUrl('')
     setModalOpen(true)
   }
 
   const handleDelete = async (id: number) => {
-    try {
-      await client.delete(`/qualifications/${id}`)
-      message.success('资质已删除')
-      fetchData()
-    } catch { message.error('删除资质失败') }
+    try { await client.delete(`/qualifications/${id}`); message.success('资质已删除'); fetchData() }
+    catch { message.error('删除资质失败') }
   }
 
   const handleSubmit = async () => {
@@ -81,31 +82,33 @@ export default function Qualifications() {
     finally { setConfirmLoading(false) }
   }
 
-  // Auto OCR on image upload — only fill empty fields
-  const handleOcr = async (file: File) => {
+  // OCR the uploaded file — only fills empty fields
+  const handleOcr = async () => {
+    if (!uploadedFile) {
+      message.warning('请先上传资质证书图片')
+      return
+    }
     setOcrLoading(true)
     const fd = new FormData()
-    fd.append('file', file)
+    fd.append('file', uploadedFile)
     try {
       const res = await client.post('/qualifications/ocr', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       const d = res.data
       const current = form.getFieldsValue()
-      // Only fill fields that are currently empty
       if (!current.name && d.name) form.setFieldValue('name', d.name)
       if (!current.cert_number && d.cert_number) form.setFieldValue('cert_number', d.cert_number)
       if (!current.issuing_authority && d.issuing_authority) form.setFieldValue('issuing_authority', d.issuing_authority)
       if (!current.issue_date && d.issue_date) form.setFieldValue('issue_date', dayjs(d.issue_date))
       if (!current.expiry_date && d.expiry_date) form.setFieldValue('expiry_date', dayjs(d.expiry_date))
-
       if (d.ocr_text && d.ocr_text.length > 10) {
-        message.success('识别完成，空白字段已自动填充，请核对修正')
+        message.success('识别完成，空白字段已填充，请核对')
       } else {
-        message.info('图片已上传，未能识别文字，请手动填写')
+        message.info('未能识别到文字，请手动填写')
       }
     } catch (err: any) {
-      message.error(err.response?.data?.detail || '识别失败，请手动填写')
+      message.error(err.response?.data?.detail || '识别失败')
     } finally { setOcrLoading(false) }
   }
 
@@ -146,16 +149,34 @@ export default function Qualifications() {
         destroyOnClose
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
-          <Form.Item label="资质证书图片（上传即自动识别填充）" help="上传资质证书图片，系统自动识别名称、编号等信息填入下方空白字段">
-            <Upload
-              accept="image/*"
-              showUploadList={false}
-              beforeUpload={(file) => { handleOcr(file); return false }}
-            >
-              <Button icon={<UploadOutlined />} loading={ocrLoading}>
-                上传图片自动识别
-              </Button>
-            </Upload>
+          <Form.Item label="资质证书图片">
+            <Row gutter={8}>
+              <Col>
+                <Upload
+                  accept="image/*"
+                  showUploadList={false}
+                  beforeUpload={(file) => {
+                    setUploadedFile(file)
+                    setPreviewUrl(URL.createObjectURL(file))
+                    return false
+                  }}
+                >
+                  <Button icon={<UploadOutlined />}>
+                    {uploadedFile ? '更换图片' : '上传图片'}
+                  </Button>
+                </Upload>
+              </Col>
+              <Col>
+                <Button icon={<ScanOutlined />} loading={ocrLoading} onClick={handleOcr}>
+                  OCR 识别
+                </Button>
+              </Col>
+            </Row>
+            {previewUrl && (
+              <div style={{ marginTop: 8 }}>
+                <Image src={previewUrl} width={200} style={{ border: '1px solid #eee', borderRadius: 4 }} />
+              </div>
+            )}
           </Form.Item>
           <Form.Item label="资质名称" name="name" rules={[{ required: true }]}>
             <Input placeholder="如：保安服务许可证" />

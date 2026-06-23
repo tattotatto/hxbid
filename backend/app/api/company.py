@@ -118,7 +118,45 @@ async def update_company(
 
 
 # ---------------------------------------------------------------------------
-# POST /company/ocr  — OCR analyze business license or ID card
+# POST /company/ocr-existing  — OCR an already-uploaded image by path
+# ---------------------------------------------------------------------------
+
+
+@router.post("/ocr-existing")
+async def ocr_existing_image(
+    data: dict,
+    current_user: User = Depends(require_editor),
+):
+    """OCR an already-uploaded company document image.
+
+    Request: {"image_path": "uploads/company/xxx.jpg", "doc_type": "business_license"}
+    """
+    image_path = data.get("image_path", "")
+    doc_type = data.get("doc_type", "business_license")
+
+    if not image_path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="image_path is required")
+
+    full_path = Path(image_path)
+    if not full_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image not found: {image_path}",
+        )
+
+    with open(full_path, "rb") as f:
+        file_bytes = f.read()
+
+    result = await analyze_document_image(
+        file_bytes=file_bytes,
+        filename=full_path.name,
+        doc_type=doc_type,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# POST /company/ocr  — OCR analyze uploaded file directly
 # ---------------------------------------------------------------------------
 
 
