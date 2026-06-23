@@ -21,14 +21,19 @@ PROVIDERS = {
     "deepseek": {
         "label": "DeepSeek",
         "models": ["deepseek-chat", "deepseek-reasoner"],
+        "vision": False,
     },
     "openai": {
         "label": "OpenAI",
         "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+        "vision": True,
+        "vision_model": "gpt-4o",
     },
     "tongyi": {
         "label": "通义千问",
         "models": ["qwen-plus", "qwen-max", "qwen-turbo", "qwen-long"],
+        "vision": True,
+        "vision_model": "qwen-plus",
     },
 }
 
@@ -157,6 +162,87 @@ class AIAdapter:
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+    # ------------------------------------------------------------------
+    # Vision completion (for image-based document analysis)
+    # ------------------------------------------------------------------
+
+    async def chat_completion_vision(
+        self,
+        image_base64: str,
+        prompt: str,
+        provider: str | None = None,
+        temperature: float = 0.1,
+        max_tokens: int = 800,
+        response_format: Dict[str, str] | None = None,
+    ) -> str:
+        """Send an image + text prompt to a vision-capable model.
+
+        Tries the configured provider first. If it doesn't support vision,
+        falls back to OpenAI or TongYi (whichever has an API key configured).
+
+        Args:
+            image_base64: Base64-encoded image (without data: prefix).
+            prompt: Text instruction for the model.
+            provider: Specific provider override.
+            temperature: Model temperature.
+            max_tokens: Max response tokens.
+            response_format: Optional {"type": "json_object"}.
+        """
+        p = provider or settings.AI_PROVIDER
+
+        # Check if current provider supports vision
+        if p not in PROVIDERS or not PROVIDERS[p].get("vision"):
+            # Fall back to the first configured vision-capable provider
+            for fallback in ("openai", "tongyi"):
+                api_key, _url, _model = self._get_provider_config(fallback)
+                if api_key:
+                    p = fallback
+                    logger.info("Vision: falling back to %s (configured)", p)
+                    break
+            else:
+                raise ValueError(
+                    "No vision-capable provider configured. "
+                    "Set OPENAI_API_KEY or TONGYI_API_KEY in .env"
+                )
+
+        client = self._get_client(p)
+        vision_model = PROVIDERS[p].get("vision_model", self.get_model(p))
+
+        # Detect image MIME type from base64 header
+        image_url = f"data:image/jpeg;base64,{image_base64}"
+
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        }]
+
+        kwargs: Dict[str, Any] = {
+            "model": vision_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if response_format:
+            kwargs["response_format"] = response_format
+
+        response = await client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
+
+    def supports_vision(self, provider: str | None = None) -> bool:
+        """Check if a provider (or current) supports vision API."""
+        p = provider or settings.AI_PROVIDER
+        if p in PROVIDERS and PROVIDERS[p].get("vision"):
+            return True
+        # Check if any fallback is available
+        for fb in ("openai", "tongyi"):
+            api_key, _url, _model = self._get_provider_config(fb)
+            if api_key:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Connectivity test
