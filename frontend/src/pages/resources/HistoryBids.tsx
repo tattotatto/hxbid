@@ -38,12 +38,7 @@ export default function HistoryBids() {
   const [uploadFileSize, setUploadFileSize] = useState(0)
   const [bidName, setBidName] = useState('')
   const [vectorizing, setVectorizing] = useState<Record<string, boolean>>({})
-  const [vectorized, setVectorized] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem('hxbid_vectorized')
-      return new Set(saved ? JSON.parse(saved) : [])
-    } catch { return new Set() }
-  })
+  const [vectorized, setVectorized] = useState<Set<string>>(new Set())
   const xhrRef = useRef<XMLHttpRequest | null>(null)
 
   const fetchProjects = async () => {
@@ -61,7 +56,13 @@ export default function HistoryBids() {
     }
   }
 
-  useEffect(() => { fetchProjects() }, [])
+  useEffect(() => { fetchProjects(); fetchIndexed() }, [])
+
+  const fetchIndexed = () => {
+    client.get('/bid/indexed-projects').then((res) => {
+      setVectorized(new Set(res.data.indexed_ids || []))
+    }).catch(() => {})
+  }
 
   const handleUpload: UploadProps['customRequest'] = (options) => {
     const { file, onSuccess, onError } = options as any
@@ -119,9 +120,7 @@ export default function HistoryBids() {
     setVectorizing((p) => ({ ...p, [id]: true }))
     try {
       const res = await client.post(`/bid/index-history/${id}`)
-      const updated = new Set(vectorized).add(id)
-      setVectorized(updated)
-      localStorage.setItem('hxbid_vectorized', JSON.stringify([...updated]))
+      setVectorized((prev) => new Set(prev).add(id))
       message.success(`向量化完成：${res.data.sections_indexed} 个章节片段已入库`)
     } catch (err: any) {
       message.error(err.response?.data?.detail || '向量化失败')

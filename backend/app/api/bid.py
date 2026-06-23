@@ -629,6 +629,31 @@ async def get_vector_stats():
 # ---------------------------------------------------------------------------
 
 
+@router.get("/indexed-projects")
+async def get_indexed_projects(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return set of project IDs that have chunks in the vector store."""
+    if not vector_store.is_available():
+        return {"indexed_ids": []}
+    try:
+        stats = vector_store.get_collection_stats()
+        if stats["total_chunks"] == 0:
+            return {"indexed_ids": []}
+        # Fetch all metadata to find unique project IDs
+        all_data = vector_store._collection.get(include=["metadatas"])
+        project_ids = set()
+        if all_data and all_data["metadatas"]:
+            for meta in all_data["metadatas"]:
+                pid = meta.get("project_id", "")
+                if pid:
+                    project_ids.add(pid)
+        return {"indexed_ids": list(project_ids)}
+    except Exception:
+        return {"indexed_ids": []}
+
+
 @router.post("/index-history/{project_id}")
 async def index_history_bid(
     project_id: str,
