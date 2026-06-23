@@ -35,6 +35,7 @@ from app.services.notification import send_notification
 from app.services.rag import assemble_chapter_context
 from app.services.render_engine import export_to_pdf, render_bid_to_docx
 from app.services.vector_store import vector_store
+from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
 from app.models.template import BidTemplate
 
