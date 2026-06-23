@@ -1,12 +1,9 @@
 """宏曦标书 - OCR & Document Image Analysis Service.
 
-Extracts structured information from uploaded certificate/license images
-using preprocessing-enhanced OCR (Tesseract) + AI parsing (DeepSeek).
-
-Key improvements for Chinese document accuracy:
-- Image preprocessing: grayscale, contrast, binarization, sharpening
-- Multipass OCR: tries multiple PSM modes and picks the best result
-- AI error correction: prompts tuned to handle OCR garbling of Chinese
+Strategy (optimized for Chinese certificate/license images):
+1. Try original image first — Tesseract handles clean scans well
+2. Only if text is sparse, apply conservative preprocessing as fallback
+3. AI parses OCR output with error-correction awareness
 
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
@@ -32,7 +29,6 @@ UPLOAD_DIR = Path(settings.UPLOAD_DIR)
 
 
 def save_ocr_image(file_bytes: bytes, filename: str, subdir: str = "ocr") -> str:
-    """Save uploaded image bytes and return relative path."""
     sub_path = UPLOAD_DIR / subdir
     sub_path.mkdir(parents=True, exist_ok=True)
     ext = Path(filename).suffix if filename else ".jpg"
@@ -44,80 +40,54 @@ def save_ocr_image(file_bytes: bytes, filename: str, subdir: str = "ocr") -> str
 
 
 # ---------------------------------------------------------------------------
-# Image preprocessing (Pillow)
+# Conservative image preprocessing (only as fallback)
 # ---------------------------------------------------------------------------
 
 
-def _preprocess_image(image_path: str) -> Optional[str]:
-    """Enhance image for better OCR: grayscale, contrast, sharpen, binarize.
-
-    Returns path to the preprocessed image, or None on failure.
+def _preprocess_fallback(image_path: str) -> Optional[str]:
+    """Conservative enhancement: only grayscale + moderate contrast.
+    No binarization — avoids destroying thin Chinese strokes.
     """
     try:
-        from PIL import Image, ImageEnhance, ImageFilter
+        from PIL import Image, ImageEnhance
 
         img = Image.open(image_path)
-
-        # Convert to grayscale
         if img.mode != "L":
             img = img.convert("L")
 
-        # Increase contrast (factor > 1.0)
+        # Moderate contrast boost only
         enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(2.0)
+        img = enhancer.enhance(1.5)
 
-        # Sharpen
-        img = img.filter(ImageFilter.SHARPEN)
+        # Resize if too small
+        if img.width < 800:
+            ratio = 800 / img.width
+            img = img.resize((800, int(img.height * ratio)), Image.LANCZOS)
 
-        # Binarize using adaptive threshold approach:
-        # Convert to pure black & white with an aggressive threshold
-        # This removes noise and makes text crisp for Tesseract
-        img = img.point(lambda x: 0 if x < 140 else 255)
-
-        # Resize if too small (ensure at least 1000px width for good OCR)
-        if img.width < 1000:
-            ratio = 1000 / img.width
-            new_size = (1000, int(img.height * ratio))
-            img = img.resize(new_size, Image.LANCZOS)
-
-        # Save preprocessed version
-        preproc_path = image_path.rsplit(".", 1)[0] + "_ocr.png"
+        preproc_path = image_path.rsplit(".", 1)[0] + "_fb.png"
         img.save(preproc_path, "PNG")
         return preproc_path
-
     except Exception as exc:
-        logger.warning("Image preprocessing failed: %s", exc)
+        logger.warning("Fallback preprocessing failed: %s", exc)
         return None
 
 
 # ---------------------------------------------------------------------------
-# OCR via Tesseract
+# OCR
 # ---------------------------------------------------------------------------
 
 
 def _run_tesseract(image_path: str, psm: int = 3) -> Optional[str]:
-    """Run Tesseract with given PSM mode on an image.
-
-    Args:
-        image_path: Path to the image file.
-        psm: Page Segmentation Mode (3=auto, 6=uniform block, 4=single column).
-
-    Returns extracted text or None.
-    """
     try:
         import subprocess
         result = subprocess.run(
-            [
-                "tesseract", image_path, "stdout",
-                "-l", "chi_sim+chi_tra+eng",
-                "--psm", str(psm),
-                "-c", "tessedit_char_whitelist=",  # no whitelist — allow all
-            ],
+            ["tesseract", image_path, "stdout",
+             "-l", "chi_sim+chi_tra+eng",
+             "--psm", str(psm)],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
             text = result.stdout.strip()
-            # Filter out lines that are just noise
             lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 1]
             return "\n".join(lines) if lines else None
     except FileNotFoundError:
@@ -128,11 +98,9 @@ def _run_tesseract(image_path: str, psm: int = 3) -> Optional[str]:
 
 
 def _ocr_with_pytesseract(image_path: str, psm: int = 3) -> Optional[str]:
-    """OCR using pytesseract Python wrapper with custom config."""
     try:
         import pytesseract
         from PIL import Image
-
         img = Image.open(image_path)
         config = f"--psm {psm} -l chi_sim+chi_tra+eng"
         text = pytesseract.image_to_string(img, config=config)
@@ -146,81 +114,76 @@ def _ocr_with_pytesseract(image_path: str, psm: int = 3) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Multipass OCR — try multiple strategies, pick best
+# Smart OCR: original first, fallback only if needed
 # ---------------------------------------------------------------------------
 
 
 def extract_text_from_image(image_path: str) -> Optional[str]:
-    """Extract text using multipass OCR with preprocessing.
+    """OCR with original-first strategy.
 
-    Strategy:
-    1. Preprocess image (contrast + binarize + sharpen)
-    2. Run OCR on BOTH original AND preprocessed images
-    3. Try PSM 3 (auto) and PSM 6 (uniform block) on each
-    4. Return the result with the most text
+    1. Try original image with PSM 3 (auto) — best for clean document scans
+    2. Try original with PSM 6 (uniform block) — good for certificate layouts
+    3. Only if both yield < 30 chars, apply conservative preprocessing and retry
     """
-    best_text: Optional[str] = None
+    # --- Pass 1: Original image ---
+    for psm in (3, 6):
+        text = _ocr_with_pytesseract(image_path, psm)
+        if not text:
+            text = _run_tesseract(image_path, psm)
+        if text and len(text) >= 30:
+            logger.info("OCR: %d chars from original (PSM=%d)", len(text), psm)
+            return text
+
+    # If we got some text but not much, return what we have
+    best_text = None
     best_len = 0
+    for psm in (3, 6):
+        text = _ocr_with_pytesseract(image_path, psm)
+        if not text:
+            text = _run_tesseract(image_path, psm)
+        if text and len(text) > best_len:
+            best_text, best_len = text, len(text)
 
-    preproc_path = _preprocess_image(image_path)
-    images_to_try = [image_path]
-    if preproc_path:
-        images_to_try.append(preproc_path)
-
-    for img_path in images_to_try:
-        for psm in (3, 6, 4):
-            # Try pytesseract first, then CLI
-            text = _ocr_with_pytesseract(img_path, psm)
-            if not text:
-                text = _run_tesseract(img_path, psm)
-
-            if text and len(text) > best_len:
-                best_text = text
-                best_len = len(text)
+    # --- Pass 2: Conservative fallback (only if original gave < 30 chars) ---
+    if best_len < 30:
+        fb_path = _preprocess_fallback(image_path)
+        if fb_path:
+            for psm in (3, 6):
+                text = _ocr_with_pytesseract(fb_path, psm)
+                if not text:
+                    text = _run_tesseract(fb_path, psm)
+                if text and len(text) > best_len:
+                    best_text, best_len = text, len(text)
 
     if best_text:
-        logger.info("OCR extracted %d chars (best PSM)", best_len)
-
+        logger.info("OCR: %d chars returned", best_len)
     return best_text
 
 
 # ---------------------------------------------------------------------------
-# Enhanced AI field extraction — handles OCR errors
+# AI field extraction — with OCR error awareness
 # ---------------------------------------------------------------------------
 
 
-_COMMON_OCR_ERRORS = """
-常见OCR识别错误提示（供你修正参考）：
-- 中文形近字混淆：如"宫"→"官", "名"→"各", "称"→"秤", "码"→"玛"
-- 数字/字母混淆：如"0"↔"O", "1"↔"l", "9"↔"g", "S"↔"5"
-- 统一社会信用代码格式：18位数字+大写字母，如 91530100MA6K3XXXXX
-- 身份证号格式：18位数字，末位可能是X
-- 日期格式：通常为"2020年01月01日"或"2020-01-01"
-- OCR可能漏字、多字、错字，请结合上下文推断正确内容
-"""
+_OCR_HINTS = """注意：OCR识别中文证件时可能有以下错误，请结合上下文纠正：
+- 形近字如"宫"→"官"、"称"→"秤"、"码"→"玛"、"份"→"分"
+- 数字0↔字母O、9↔g、1↔l 混淆
+- 漏字、多字、断行错位"""
 
 
 async def parse_qualification_fields(ocr_text: str) -> Dict[str, Any]:
-    """Use AI to parse OCR text into structured qualification fields."""
-    prompt = f"""请从以下证件OCR文字中提取结构化信息。
+    prompt = f"""{_OCR_HINTS}
 
-{_COMMON_OCR_ERRORS}
+从以下证件OCR文字中提取信息，以JSON返回：
+{{"name":"证件名称","cert_number":"编号","issuing_authority":"颁发机构","issue_date":"发证日期YYYY-MM-DD","expiry_date":"到期日YYYY-MM-DD"}}
+无法确定的字段留空字符串。
 
-OCR原始文字：
-{ocr_text[:2500]}
-
-请提取（无法确定则留空）：
-- name: 证件/资质名称（例：保安服务许可证、营业执照、质量管理体系认证证书）
-- cert_number: 证书编号/许可号/注册号（注意：OCR易将数字0和字母O混淆，请凭经验推断）
-- issuing_authority: 颁发机构/发证机关/登记机关的全称
-- issue_date: 发证日期（转换为YYYY-MM-DD格式）
-- expiry_date: 有效期截止日期（转换为YYYY-MM-DD格式，注意区分"有效期至"和"签发日期"）
-
-直接返回JSON对象。"""
+OCR文字：
+{ocr_text[:2500]}"""
 
     try:
         messages = [
-            {"role": "system", "content": "你是证件信息提取专家。请根据上下文纠正OCR错误，精确提取每项信息。不确定的字段宁可留空也不乱填。"},
+            {"role": "system", "content": "你是证件信息提取专家。请精确提取，不确定的字段留空。"},
             {"role": "user", "content": prompt},
         ]
         response = await ai_adapter.chat_completion(
@@ -228,12 +191,10 @@ OCR原始文字：
             response_format={"type": "json_object"},
         )
         result = json.loads(response)
-
         for date_field in ("issue_date", "expiry_date"):
             val = result.get(date_field, "")
             if val and re.match(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}", str(val)):
                 result[date_field] = re.sub(r"[年月/]", "-", str(val)).replace("日", "")
-
         return {
             "name": str(result.get("name", "")).strip(),
             "cert_number": str(result.get("cert_number", "")).strip(),
@@ -243,32 +204,24 @@ OCR原始文字：
             "raw_text": ocr_text[:500],
         }
     except Exception as exc:
-        logger.warning("AI field extraction failed: %s", exc)
+        logger.warning("Qualification parse failed: %s", exc)
         return {"name": "", "cert_number": "", "issuing_authority": "",
-                "issue_date": "", "expiry_date": "", "raw_text": ocr_text[:500], "error": str(exc)}
+                "issue_date": "", "expiry_date": "", "raw_text": ocr_text[:500]}
 
 
 async def parse_business_license_fields(ocr_text: str) -> Dict[str, Any]:
-    """Parse OCR text from a business license image."""
-    prompt = f"""请从以下营业执照OCR文字中提取关键信息。
+    prompt = f"""{_OCR_HINTS}
 
-{_COMMON_OCR_ERRORS}
+从营业执照OCR文字中提取，JSON格式：
+{{"company_name":"企业名称","business_license_number":"统一社会信用代码(18位)","legal_rep_name":"法定代表人姓名","address":"住所/经营场所","issue_date":"成立日期YYYY-MM-DD"}}
+无法确定则留空。
 
-OCR原始文字：
-{ocr_text[:2500]}
-
-提取字段（无法确定则留空）：
-- company_name: 企业名称（注意：通常在第一行，格式如"XX有限公司"/"XX有限责任公司"）
-- business_license_number: 统一社会信用代码（18位，通常标有"统一社会信用代码"字样）
-- legal_rep_name: 法定代表人姓名（标有"法定代表人"字样的后面2-3个中文字）
-- address: 住所/经营场所地址（完整的地址信息）
-- issue_date: 成立日期（YYYY-MM-DD，注意区分"成立日期"和"核准日期"）
-
-直接返回JSON。"""
+OCR文字：
+{ocr_text[:2500]}"""
 
     try:
         messages = [
-            {"role": "system", "content": "你是营业执照信息提取专家。请精确提取每项信息，利用上下文纠正OCR错误。"},
+            {"role": "system", "content": "你是营业执照信息提取专家。"},
             {"role": "user", "content": prompt},
         ]
         response = await ai_adapter.chat_completion(
@@ -277,32 +230,23 @@ OCR原始文字：
         )
         return json.loads(response)
     except Exception as exc:
-        logger.warning("Business license parsing failed: %s", exc)
+        logger.warning("Business license parse failed: %s", exc)
         return {}
 
 
 async def parse_id_card_fields(ocr_text: str) -> Dict[str, Any]:
-    """Parse OCR text from an ID card image."""
-    prompt = f"""请从以下身份证OCR文字中提取关键信息。
+    prompt = f"""{_OCR_HINTS}
 
-{_COMMON_OCR_ERRORS}
-身份证OCR常见问题：正面有姓名、性别、民族、出生日期、住址、身份证号；背面有签发机关和有效期限。
+从身份证OCR文字中提取，JSON格式：
+{{"name":"姓名","id_number":"身份证号(18位)","address":"住址","gender":"性别","birth_date":"出生日期YYYY-MM-DD"}}
+无法确定则留空。
 
-OCR原始文字：
-{ocr_text[:2500]}
-
-提取字段（无法确定则留空）：
-- name: 姓名（2-4个中文字，通常在"姓名"字样后面）
-- id_number: 公民身份号码（18位数字，末位可能为X）
-- address: 住址（完整地址）
-- gender: 性别（男/女）
-- birth_date: 出生日期（YYYY-MM-DD，通常紧挨姓名下方）
-
-直接返回JSON。"""
+OCR文字：
+{ocr_text[:2500]}"""
 
     try:
         messages = [
-            {"role": "system", "content": "你是身份证信息提取专家。请精确提取。"},
+            {"role": "system", "content": "你是身份证信息提取专家。"},
             {"role": "user", "content": prompt},
         ]
         response = await ai_adapter.chat_completion(
@@ -311,12 +255,12 @@ OCR原始文字：
         )
         return json.loads(response)
     except Exception as exc:
-        logger.warning("ID card parsing failed: %s", exc)
+        logger.warning("ID card parse failed: %s", exc)
         return {}
 
 
 # ---------------------------------------------------------------------------
-# Master OCR pipeline
+# Master pipeline
 # ---------------------------------------------------------------------------
 
 
@@ -325,13 +269,6 @@ async def analyze_document_image(
     filename: str,
     doc_type: str = "qualification",
 ) -> Dict[str, Any]:
-    """Full pipeline: save → preprocess → multipass OCR → AI parse.
-
-    Args:
-        file_bytes: Raw image bytes.
-        filename: Original filename.
-        doc_type: "qualification" | "business_license" | "id_card".
-    """
     image_path = save_ocr_image(file_bytes, filename)
     ocr_text = extract_text_from_image(image_path)
 
