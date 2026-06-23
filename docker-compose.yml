@@ -22,6 +22,8 @@ services:
       DATABASE_URL_SYNC: postgresql+psycopg2://hongxi:hongxi123@db:5432/hongxi_bid
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TONGYI_API_KEY: ${TONGYI_API_KEY:-}
       WECOM_WEBHOOK_URL: ${WECOM_WEBHOOK_URL:-}
       DINGTALK_WEBHOOK_URL: ${DINGTALK_WEBHOOK_URL:-}
       CORS_ORIGINS: '["http://localhost"]'

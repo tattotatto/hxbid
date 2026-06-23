@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # TongYi / Qwen (阿里通义千问, OpenAI-compatible endpoint)
     TONGYI_API_KEY: str = ""
     TONGYI_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    TONGYI_MODEL: str = "qwen-plus"
+    TONGYI_MODEL: str = "qwen3.7-plus"
 
     AI_TEMPERATURE: float = 0.7
     AI_MAX_TOKENS: int = 4096

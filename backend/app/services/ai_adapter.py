@@ -31,9 +31,9 @@ PROVIDERS = {
     },
     "tongyi": {
         "label": "通义千问",
-        "models": ["qwen-plus", "qwen-max", "qwen-turbo", "qwen-long"],
+        "models": ["qwen3.7-plus", "qwen-plus", "qwen-max", "qwen-turbo", "qwen-long"],
         "vision": True,
-        "vision_model": "qwen-plus",
+        "vision_model": "qwen3.7-plus",
     },
 }
 
