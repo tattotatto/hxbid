@@ -47,7 +47,7 @@ services:
     ports:
       - "8888:80"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - outputs:/usr/share/nginx/html/outputs:ro
     depends_on:
       - frontend
