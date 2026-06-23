@@ -38,6 +38,12 @@ export default function HistoryBids() {
   const [uploadFileSize, setUploadFileSize] = useState(0)
   const [bidName, setBidName] = useState('')
   const [vectorizing, setVectorizing] = useState<Record<string, boolean>>({})
+  const [vectorized, setVectorized] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('hxbid_vectorized')
+      return new Set(saved ? JSON.parse(saved) : [])
+    } catch { return new Set() }
+  })
   const xhrRef = useRef<XMLHttpRequest | null>(null)
 
   const fetchProjects = async () => {
@@ -113,6 +119,9 @@ export default function HistoryBids() {
     setVectorizing((p) => ({ ...p, [id]: true }))
     try {
       const res = await client.post(`/bid/index-history/${id}`)
+      const updated = new Set(vectorized).add(id)
+      setVectorized(updated)
+      localStorage.setItem('hxbid_vectorized', JSON.stringify([...updated]))
       message.success(`向量化完成：${res.data.sections_indexed} 个章节片段已入库`)
     } catch (err: any) {
       message.error(err.response?.data?.detail || '向量化失败')
@@ -141,16 +150,20 @@ export default function HistoryBids() {
     {
       title: '操作',
       key: 'actions',
-      render: (_: unknown, record: Project) => (
-        <Button
-          size="small"
-          icon={<DeploymentUnitOutlined />}
-          loading={vectorizing[record.id]}
-          onClick={() => handleVectorize(record.id)}
-        >
-          向量化
-        </Button>
-      ),
+      render: (_: unknown, record: Project) =>
+        vectorized.has(record.id) ? (
+          <Tag color="blue">已向量化</Tag>
+        ) : (
+          <Button
+            size="small"
+            icon={<DeploymentUnitOutlined />}
+            loading={vectorizing[record.id]}
+            onClick={() => handleVectorize(record.id)}
+          >
+            向量化
+          </Button>
+        ),
+
     },
   ]
 
