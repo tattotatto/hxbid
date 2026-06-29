@@ -20,7 +20,9 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.config import settings
 from app.database import async_session, get_db
+from app.models.company_profile import CompanyProfile
 from app.models.project import BidProject, ProjectChapter
+from app.models.qualification import Qualification
 from app.models.user import User
 from app.schemas.bid import ExportRequest, ExportResponse, GenerateRequest, ParseResponse
 from app.services.ai_pipeline import (
@@ -501,8 +503,50 @@ async def export_bid(
         content = c.final_content or c.ai_generated_content
         chapters_payload.append({"title": c.title, "content": content})
 
+    # -- Collect uploaded images for attachment section --
+    attachments = []
+
+    # Company profile images
+    cp_result = await db.execute(
+        select(CompanyProfile).order_by(CompanyProfile.updated_at.desc()).limit(1)
+    )
+    cp = cp_result.scalar_one_or_none()
+    if cp:
+        if cp.business_license_image:
+            attachments.append({
+                "path": cp.business_license_image,
+                "label": f"营业执照 — {cp.company_name or ''}",
+            })
+        if cp.legal_rep_id_front_image:
+            attachments.append({
+                "path": cp.legal_rep_id_front_image,
+                "label": "法定代表人身份证（正面）",
+            })
+        if cp.legal_rep_id_back_image:
+            attachments.append({
+                "path": cp.legal_rep_id_back_image,
+                "label": "法定代表人身份证（反面）",
+            })
+
+    # Qualification certificate images
+    qual_result = await db.execute(
+        select(Qualification).where(Qualification.attachment_path.isnot(None))
+        .where(Qualification.attachment_path != "")
+        .order_by(Qualification.updated_at.desc())
+    )
+    for q in qual_result.scalars():
+        attachments.append({
+            "path": q.attachment_path,
+            "label": f"{q.name} — {q.cert_number or ''}",
+        })
+
     # -- Render .docx --
-    docx_path = render_bid_to_docx(chapters_payload, project.name, style_config=style_config)
+    docx_path = render_bid_to_docx(
+        chapters_payload,
+        project.name,
+        style_config=style_config,
+        attachments=attachments if attachments else None,
+    )
     docx_filename = Path(docx_path).name
 
     # -- Optionally render .pdf --
@@ -515,7 +559,10 @@ async def export_bid(
     await db.flush()
 
     # -- Build download URLs relative to the API prefix --
-    base = f"{request.base_url}api/v1/bid/download/"
+    # Use relative URLs so the browser resolves them against the current origin.
+    # Absolute URLs built from request.base_url can break behind reverse proxies
+    # (e.g. nginx stripping the port from the Host header).
+    base = "/api/v1/bid/download/"
     return ExportResponse(
         docx_url=f"{base}{docx_filename}",
         pdf_url=f"{base}{Path(pdf_path).name}" if pdf_path else "",

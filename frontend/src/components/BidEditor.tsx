@@ -12,6 +12,30 @@ import {
 } from '@ant-design/icons'
 import type { ReactNode } from 'react'
 
+/**
+ * Convert AI-generated plain text to HTML paragraphs for the TipTap editor.
+ *
+ * The AI outputs content with ``\n\n`` as paragraph separators and ``\n`` as
+ * soft line breaks.  TipTap is an HTML editor — feeding it raw plain text
+ * causes every line break to collapse into a space, which makes the editor
+ * show a single wall of cramped text.
+ *
+ * Conversely, if the content already looks like HTML (e.g. previously saved
+ * by the editor), we return it unchanged.
+ */
+function plainTextToHTML(text: string): string {
+  if (!text) return ''
+  // Already HTML (saved from previous editor session)
+  if (/<[^>]+>/.test(text)) return text
+
+  return text
+    .split(/\n\n+/)          // blank lines → paragraph boundaries
+    .map((para) => para.trim())
+    .filter(Boolean)
+    .map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`)
+    .join('')
+}
+
 interface BidEditorProps {
   content: string
   onChange: (html: string) => void
@@ -32,7 +56,7 @@ export default function BidEditor({
         placeholder: '在此编辑标书内容...',
       }),
     ],
-    content,
+    content: plainTextToHTML(content),
     onUpdate: ({ editor: ed }) => {
       onChange(ed.getHTML())
     },
@@ -40,8 +64,11 @@ export default function BidEditor({
 
   // Sync content prop changes into the editor
   useEffect(() => {
-    if (editor && content !== editor.getHTML()) {
-      editor.commands.setContent(content)
+    if (editor) {
+      const html = plainTextToHTML(content)
+      if (html !== editor.getHTML()) {
+        editor.commands.setContent(html)
+      }
     }
   }, [content, editor])
 
@@ -106,6 +133,32 @@ export default function BidEditor({
 
       {/* Editor content area */}
       <div style={{ padding: 16, flex: 1 }}>
+        <style>{`
+          .ProseMirror {
+            min-height: 360px;
+            outline: none;
+            font-size: 15px;
+            line-height: 1.8;
+            color: #000;
+          }
+          .ProseMirror p {
+            margin: 0 0 8px 0;
+            text-indent: 2em;
+          }
+          .ProseMirror p:last-child {
+            margin-bottom: 0;
+          }
+          .ProseMirror h1 {
+            font-size: 18px;
+            font-weight: bold;
+            margin: 16px 0 8px;
+          }
+          .ProseMirror h2 {
+            font-size: 16px;
+            font-weight: bold;
+            margin: 14px 0 6px;
+          }
+        `}</style>
         <EditorContent editor={editor} />
       </div>
     </div>
