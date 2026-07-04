@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     TONGYI_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     TONGYI_MODEL: str = "qwen3.7-plus"
 
+    AI_MODEL_OVERRIDE: str = ""  # Runtime model override (set via admin API / settings UI)
+
     AI_TEMPERATURE: float = 0.7
     AI_MAX_TOKENS: int = 4096
 

@@ -84,7 +84,13 @@ class AIAdapter:
         return self._clients[p]
 
     def get_model(self, provider: str | None = None) -> str:
-        """Return the model name for the current (or specified) provider."""
+        """Return the model name for the current (or specified) provider.
+
+        If AI_MODEL_OVERRIDE is set (via admin API / settings UI), it takes
+        precedence over the provider's default model.
+        """
+        if settings.AI_MODEL_OVERRIDE:
+            return settings.AI_MODEL_OVERRIDE
         _api_key, _base_url, model = self._get_provider_config(provider)
         return model
 
@@ -106,6 +112,16 @@ class AIAdapter:
                 "configured": bool(api_key),
             })
         return result
+
+    @staticmethod
+    def set_model_override(model: str) -> None:
+        """Update the runtime model override.
+
+        Set to empty string to clear the override and fall back to the
+        provider's default model.
+        """
+        settings.AI_MODEL_OVERRIDE = model
+        logger.info("AI model override set to '%s'", model or "(cleared)")
 
     # ------------------------------------------------------------------
     # Chat completion (non-streaming)
@@ -248,8 +264,12 @@ class AIAdapter:
     # Connectivity test
     # ------------------------------------------------------------------
 
-    async def test_connection(self, provider: str) -> Dict[str, Any]:
+    async def test_connection(self, provider: str, model: str | None = None) -> Dict[str, Any]:
         """Test connectivity to a provider with a simple ping message.
+
+        Args:
+            provider: Provider ID (deepseek, openai, tongyi).
+            model: Optional custom model name to test. Falls back to get_model().
 
         Returns:
             {"ok": bool, "latency_ms": float, "error": str | None}
@@ -257,10 +277,10 @@ class AIAdapter:
         import time
         try:
             client = self._get_client(provider)
-            model = self.get_model(provider)
+            test_model = model or self.get_model(provider)
             start = time.monotonic()
             response = await client.chat.completions.create(
-                model=model,
+                model=test_model,
                 messages=[{"role": "user", "content": "ping"}],
                 max_tokens=5,
             )
@@ -268,14 +288,14 @@ class AIAdapter:
             return {
                 "ok": True,
                 "latency_ms": round(latency, 1),
-                "model": model,
+                "model": test_model,
                 "error": None,
             }
         except Exception as exc:
             return {
                 "ok": False,
                 "latency_ms": 0,
-                "model": self.get_model(provider) if provider in PROVIDERS else "unknown",
+                "model": model or self.get_model(provider) if provider in PROVIDERS else "unknown",
                 "error": str(exc),
             }
 

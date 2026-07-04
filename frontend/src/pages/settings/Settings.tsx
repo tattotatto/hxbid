@@ -15,6 +15,7 @@ const SETTINGS_STORAGE_KEY = 'settings'
 
 interface AISettings {
   ai_provider: string
+  ai_model: string
   api_key: string
   temperature: number
 }
@@ -245,7 +246,7 @@ export default function Settings() {
 
   return (
     <div>
-      <Card title="AI 模型配置" style={{ maxWidth: 600, marginBottom: 24 }}>
+      <Card title="AI 模型配置" style={{ marginBottom: 24 }}>
         <AIModelConfig />
       </Card>
 
@@ -613,6 +614,7 @@ function AIModelConfig() {
   const [loading, setLoading] = useState(true)
   const [testing, setTesting] = useState<Record<string, boolean>>({})
   const [testResults, setTestResults] = useState<Record<string, any>>({})
+  const [saving, setSaving] = useState(false)
   const [form] = Form.useForm()
 
   useEffect(() => {
@@ -628,10 +630,22 @@ function AIModelConfig() {
       .finally(() => setLoading(false))
   }, [])
 
+  // When provider changes, auto-fill the model field with that provider's default
+  const handleProviderChange = (providerId: string) => {
+    const provider = providers.find((p) => p.id === providerId)
+    if (provider) {
+      form.setFieldsValue({ ai_model: provider.default_model })
+    }
+  }
+
   const handleTest = async (providerId: string) => {
     setTesting((p) => ({ ...p, [providerId]: true }))
     try {
-      const res = await client.post('/admin/ai/test', { provider: providerId })
+      const model = form.getFieldValue('ai_model')
+      const res = await client.post('/admin/ai/test', {
+        provider: providerId,
+        model: model || undefined,
+      })
       setTestResults((p) => ({ ...p, [providerId]: res.data }))
     } catch {
       setTestResults((p) => ({ ...p, [providerId]: { ok: false, error: '请求失败' } }))
@@ -640,32 +654,48 @@ function AIModelConfig() {
     }
   }
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const values = form.getFieldsValue()
     saveSettings({ ai: values })
-    message.success('AI 配置已保存（当前会话生效，需重启服务以全局应用）')
+
+    // Also push the model override to the backend so it takes effect immediately
+    setSaving(true)
+    try {
+      await client.put('/admin/ai/model', { model: values.ai_model || '' })
+      message.success('AI 配置已保存，模型已生效')
+    } catch {
+      message.success('AI 配置已保存（模型将在服务重启后生效）')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
     <>
-      <Form form={form} layout="vertical" initialValues={{ ai_provider: 'deepseek', temperature: 0.7 }}>
-        <Form.Item label="当前提供商" name="ai_provider">
-          <Select
-            options={providers.map((p) => ({
-              value: p.id,
-              label: `${p.label} ${p.configured ? '✅' : '⚠️ 未配置'}`,
-            }))}
-          />
-        </Form.Item>
-        <Form.Item label="Temperature" name="temperature">
-          <Input type="number" min={0} max={2} step={0.1} />
-        </Form.Item>
-        <Form.Item>
-          <Button type="primary" onClick={handleSave}>保存配置</Button>
-        </Form.Item>
+      <Form form={form} layout="vertical" initialValues={{ ai_provider: 'deepseek', ai_model: '', temperature: 0.7 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px 20px', alignItems: 'flex-start' }}>
+          <Form.Item label="当前提供商" name="ai_provider" style={{ minWidth: 180, flex: '1 1 auto', marginBottom: 0 }}>
+            <Select
+              options={providers.map((p) => ({
+                value: p.id,
+                label: `${p.label} ${p.configured ? '✅' : '⚠️ 未配置'}`,
+              }))}
+              onChange={handleProviderChange}
+            />
+          </Form.Item>
+          <Form.Item label="模型" name="ai_model" style={{ minWidth: 200, flex: '2 1 auto', marginBottom: 0 }}>
+            <Input placeholder="输入模型名称，留空则使用默认模型" />
+          </Form.Item>
+          <Form.Item label="Temperature" name="temperature" style={{ width: 120, flex: '0 0 auto', marginBottom: 0 }}>
+            <Input type="number" min={0} max={2} step={0.1} />
+          </Form.Item>
+          <Form.Item style={{ flex: '0 0 auto', marginBottom: 0, alignSelf: 'flex-end' }}>
+            <Button type="primary" onClick={handleSave} loading={saving}>保存配置</Button>
+          </Form.Item>
+        </div>
       </Form>
 
-      <Descriptions title="提供商状态" size="small" column={1} style={{ marginTop: 16 }}>
+      <Descriptions title="提供商状态" size="small" column={{ xs: 1, sm: 1, md: 2, lg: 3 }} style={{ marginTop: 20 }}>
         {providers.map((p) => {
           const tr = testResults[p.id]
           return (
@@ -677,12 +707,12 @@ function AIModelConfig() {
               </Space>
             }>
               <Space direction="vertical" size={4}>
-                <span>模型：{p.default_model}</span>
+                <span>默认模型：{p.default_model}</span>
                 <span>可用：{p.models.join(', ')}</span>
                 {tr && (
                   <span style={{ color: tr.ok ? '#52c41a' : '#ff4d4f' }}>
                     {tr.ok ? (
-                      <><CheckCircleOutlined /> 连接正常 ({tr.latency_ms}ms)</>
+                      <><CheckCircleOutlined /> 连接正常 ({tr.latency_ms}ms, {tr.model})</>
                     ) : (
                       <><CloseCircleOutlined /> {tr.error}</>
                     )}

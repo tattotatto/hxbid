@@ -140,6 +140,24 @@ async def list_providers(
     return ai_adapter.list_providers()
 
 
+@router.put("/ai/model")
+async def set_model_override(
+    data: dict,
+    current_user: User = Depends(require_editor),
+):
+    """Update the AI model override at runtime.
+
+    Request: {"model": "gpt-4.1"}  or  {"model": ""} to clear.
+    """
+    model = data.get("model", "")
+    ai_adapter.set_model_override(model)
+    return {
+        "message": "Model override updated",
+        "model": model or None,
+        "effective_model": ai_adapter.get_model(),
+    }
+
+
 @router.post("/ai/test")
 async def test_provider(
     data: dict,
@@ -147,9 +165,10 @@ async def test_provider(
 ):
     """Test connectivity to an AI provider.
 
-    Request: {"provider": "deepseek" | "openai" | "tongyi"}
+    Request: {"provider": "deepseek" | "openai" | "tongyi", "model": "custom-model" (optional)}
     """
     provider = data.get("provider", "deepseek")
     if provider not in ("deepseek", "openai", "tongyi"):
         return {"ok": False, "error": f"Unknown provider: {provider}"}
-    return await ai_adapter.test_connection(provider)
+    custom_model = data.get("model")
+    return await ai_adapter.test_connection(provider, model=custom_model)
