@@ -245,12 +245,12 @@ export default function Settings() {
   }
 
   return (
-    <div>
-      <Card title="AI 模型配置" style={{ marginBottom: 24 }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'flex-start' }}>
+      <Card title="AI 模型配置" style={{ flex: '1 1 420px', minWidth: 380 }}>
         <AIModelConfig />
       </Card>
 
-      <Card title="通知配置" style={{ maxWidth: 600, marginBottom: 24 }}>
+      <Card title="通知配置" style={{ flex: '1 1 340px', minWidth: 300 }}>
         <Form form={notifyForm} layout="vertical">
           <Form.Item label="企业微信 Webhook" name="wecom_webhook">
             <Input placeholder="企业微信机器人 Webhook URL" />
@@ -266,7 +266,7 @@ export default function Settings() {
         </Form>
       </Card>
 
-      <Card title="向量知识库" style={{ maxWidth: 600 }}>
+      <Card title="向量知识库" style={{ flex: '1 1 340px', minWidth: 300 }}>
         <p style={{ color: '#666', marginBottom: 16 }}>
           向量知识库用于存储历史标书章节的语义索引，在生成新标书时自动检索相似内容作为参考素材。
         </p>
@@ -347,7 +347,7 @@ export default function Settings() {
       {/* Template Management */}
       <Card
         title="排版模板管理"
-        style={{ maxWidth: 600 }}
+        style={{ flex: '1 1 420px', minWidth: 380 }}
         extra={
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreateTemplate}>
             新建模板
@@ -542,7 +542,7 @@ function RuleList() {
   const pendingRules = rules.filter((r: any) => !r.is_active)
 
   return (
-    <Card title="编辑反馈规则" style={{ maxWidth: 600, marginTop: 24 }}>
+    <Card title="编辑反馈规则" style={{ flex: '1 1 420px', minWidth: 380 }}>
       <p style={{ color: '#666', marginBottom: 16 }}>
         系统从每次人工编辑中学习写作规则。同类编辑模式出现 ≥3 次后自动升级为生成约束，
         在后续 AI 生成中生效。
@@ -751,7 +751,7 @@ function DatasetExporter() {
   }
 
   return (
-    <Card title="LoRA 微调数据导出" style={{ maxWidth: 600, marginTop: 24 }}>
+    <Card title="LoRA 微调数据导出" style={{ flex: '1 1 420px', minWidth: 380 }}>
       <p style={{ color: '#666', marginBottom: 16 }}>
         将人工编辑定稿的标书章节导出为微调训练数据集，用于 LoRA 微调 DeepSeek 等开源模型。
         导出格式兼容 OpenAI Fine-tuning API、Unsloth、LLaMA-Factory 等工具。
