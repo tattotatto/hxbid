@@ -587,6 +587,135 @@ def _insert_image(doc, image_path, label, style, *, no_rotate=False, max_width=N
     p_label.paragraph_format.space_after = Pt(12)
 
 
+def _add_company_footer(doc, style):
+    """Append a company information bar at the bottom of the document.
+
+    Layout (3-column borderless table):
+      Left:   company logo + company name
+      Center: address
+      Right:  website
+    """
+    from app.models.company_profile import CompanyProfile
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    # Load company profile from the sync DB
+    try:
+        sync_url = settings.DATABASE_URL_SYNC
+        engine = create_engine(sync_url)
+        with Session(engine) as session:
+            result = session.execute(select(CompanyProfile).limit(1))
+            profile = result.scalar_one_or_none()
+    except Exception:
+        profile = None
+
+    company_name = profile.company_name if profile else ""
+    address = profile.address if profile else ""
+    website = profile.website if profile else ""
+    logo_path = profile.logo_image if profile else ""
+
+    if not company_name and not address and not website and not logo_path:
+        return  # nothing to show
+
+    # Spacer before footer
+    doc.add_paragraph()
+
+    # Thin decorative line
+    p_line = doc.add_paragraph()
+    p_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_line = p_line.add_run("—" * 40)
+    _set_run_font(run_line, style["body_font_name"], Pt(8))
+    p_line.paragraph_format.space_after = Pt(6)
+
+    # 3-column table
+    table = doc.add_table(rows=1, cols=3)
+    table.autofit = True
+
+    # Remove all borders
+    tbl = table._tbl
+    tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement("w:tblPr")
+    tblBorders = OxmlElement("w:tblBorders")
+    for border_name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        border_el = OxmlElement(f"w:{border_name}")
+        border_el.set(qn("w:val"), "nil")
+        tblBorders.append(border_el)
+    tblPr.append(tblBorders)
+
+    # ── Left cell: logo + company name ──
+    left_cell = table.cell(0, 0)
+    # Remove cell borders
+    _remove_cell_borders(left_cell)
+
+    if logo_path:
+        logo_full = Path(logo_path)
+        if not logo_full.is_absolute():
+            logo_full = Path.cwd() / logo_full
+        if logo_full.exists():
+            try:
+                pil_logo = PILImage.open(str(logo_full))
+                if pil_logo.mode not in ("RGB", "L"):
+                    pil_logo = pil_logo.convert("RGB")
+                # Scale logo to ~0.8 cm height
+                logo_h_px = int(0.8 / Cm(1) * pil_logo.height) if pil_logo.height > 0 else pil_logo.height
+                ratio = 0.8 / (pil_logo.height / 37.795) if pil_logo.height > 0 else 1
+                new_w = int(pil_logo.width * ratio) if ratio < 1 else pil_logo.width
+                if ratio < 1:
+                    pil_logo = pil_logo.resize((new_w, int(pil_logo.height * ratio)), PILImage.LANCZOS)
+                buf = std_io.BytesIO()
+                pil_logo.save(buf, format="PNG")
+                buf.seek(0)
+                logo_p = left_cell.paragraphs[0]
+                logo_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                logo_run = logo_p.add_run()
+                logo_run.add_picture(buf, width=Cm(1.2))
+                # Company name next to logo
+                name_run = logo_p.add_run(f"  {company_name}")
+                _set_run_font(name_run, style["body_font_name"], Pt(10))
+            except Exception:
+                _set_company_info_text(left_cell.paragraphs[0], company_name, style)
+        else:
+            _set_company_info_text(left_cell.paragraphs[0], company_name, style)
+    else:
+        _set_company_info_text(left_cell.paragraphs[0], company_name, style)
+
+    # ── Center cell: address ──
+    center_cell = table.cell(0, 1)
+    _remove_cell_borders(center_cell)
+    cp = center_cell.paragraphs[0]
+    cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if address:
+        addr_run = cp.add_run(f"地址：{address}")
+        _set_run_font(addr_run, style["body_font_name"], Pt(9))
+
+    # ── Right cell: website ──
+    right_cell = table.cell(0, 2)
+    _remove_cell_borders(right_cell)
+    rp = right_cell.paragraphs[0]
+    rp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    if website:
+        web_run = rp.add_run(website)
+        _set_run_font(web_run, style["body_font_name"], Pt(9))
+        web_run.font.color.rgb = RGBColor(0x33, 0x66, 0xCC)  # link blue
+
+
+def _set_company_info_text(paragraph, text, style):
+    """Helper: set centred company name text in a paragraph."""
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = paragraph.add_run(text)
+    _set_run_font(run, style["body_font_name"], Pt(10))
+
+
+def _remove_cell_borders(cell):
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcBorders = OxmlElement("w:tcBorders")
+    for border_name in ("top", "left", "bottom", "right"):
+        border_el = OxmlElement(f"w:{border_name}")
+        border_el.set(qn("w:val"), "nil")
+        tcBorders.append(border_el)
+    tcPr.append(tcBorders)
+
+
 def _add_attachments_section(doc, attachments, style):
     """Add a "资质证书附件" section with all available images.
 
@@ -925,6 +1054,9 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
     if attachments:
         _insert_page_break(doc)
         _add_attachments_section(doc, attachments, style)
+
+    # ── Company footer bar (logo + name | address | website) ──
+    _add_company_footer(doc, style)
 
     # ── Save to OUTPUT_DIR ──
     output_dir = Path(settings.OUTPUT_DIR)

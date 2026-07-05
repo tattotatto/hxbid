@@ -78,6 +78,8 @@ async def update_company(
     address: str = Form(""),
     contact_phone: str = Form(""),
     notes: str = Form(""),
+    website: str = Form(""),
+    logo_image: UploadFile | None = File(None),
     business_license_image: UploadFile | None = File(None),
     legal_rep_id_front_image: UploadFile | None = File(None),
     legal_rep_id_back_image: UploadFile | None = File(None),
@@ -99,12 +101,15 @@ async def update_company(
         "address": address,
         "contact_phone": contact_phone,
         "notes": notes,
+        "website": website,
     }
     for field, value in field_map.items():
         if value:
             setattr(profile, field, value)
 
     # Image uploads
+    if logo_image and logo_image.filename:
+        profile.logo_image = _save_upload(logo_image)
     if business_license_image and business_license_image.filename:
         profile.business_license_image = _save_upload(business_license_image)
     if legal_rep_id_front_image and legal_rep_id_front_image.filename:

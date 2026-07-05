@@ -18,6 +18,7 @@ class CompanyUpdate(BaseModel):
     address: Optional[str] = Field(None, max_length=500)
     contact_phone: Optional[str] = Field(None, max_length=20)
     notes: Optional[str] = None
+    website: Optional[str] = Field(None, max_length=200)
 
 
 class CompanyRead(BaseModel):
@@ -33,6 +34,8 @@ class CompanyRead(BaseModel):
     address: str
     contact_phone: str
     notes: str
+    logo_image: str
+    website: str
     created_at: datetime
     updated_at: datetime
 

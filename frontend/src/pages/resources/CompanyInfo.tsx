@@ -160,6 +160,9 @@ export default function CompanyInfo() {
               <Form.Item label="联系电话" name="contact_phone">
                 <Input />
               </Form.Item>
+              <Form.Item label="公司网站" name="website">
+                <Input placeholder="例如：www.hongxi.com" />
+              </Form.Item>
               <Form.Item label="备注" name="notes">
                 <Input.TextArea rows={2} />
               </Form.Item>
@@ -170,6 +173,9 @@ export default function CompanyInfo() {
         <Col span={12}>
           <Card title="证照图片" style={{ marginBottom: 24 }}>
             <Form layout="vertical">
+              <ImageField label="公司 Logo" value={profile?.logo_image}
+                imageField="logo_image" docType="logo" />
+              <Divider />
               <ImageField label="营业执照" value={profile?.business_license_image}
                 imageField="business_license_image" docType="business_license" />
               <Divider />

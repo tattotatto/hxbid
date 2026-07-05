@@ -75,6 +75,16 @@ class CompanyProfile(Base):
         nullable=False,
         default="",
     )
+    logo_image: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        default="",
+    )
+    website: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+        default="",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
