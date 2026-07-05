@@ -222,7 +222,13 @@ async def upload_id_front(
             pass  # OCR is best-effort
 
     await db.flush()
-    return {"path": path, "name": personnel.name, "id_card": personnel.id_card}
+    return {
+        "path": path,
+        "name": personnel.name,
+        "gender": personnel.gender,
+        "id_card": personnel.id_card,
+        "address": personnel.address,
+    }
 
 
 @router.post("/{p_id}/upload-id-back")

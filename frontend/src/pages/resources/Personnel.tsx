@@ -62,7 +62,7 @@ export default function Personnel() {
 
   // ── Create flow ──
 
-  const openCreate = () => {
+  const openCreate = async () => {
     form.resetFields()
     setStep(0)
     setCreatingId(null)
@@ -70,31 +70,56 @@ export default function Personnel() {
     setIdBackUploaded(false)
     setHealthUploaded([])
     setCertificates([])
-    setModalOpen(true)
-  }
-
-  // Step 1: create bare personnel then upload ID cards
-  const handleStep1 = async () => {
-    const values = await form.validateFields()
-    setCreating(true)
+    // Immediately create bare personnel record so ID card upload in step 0 has an ID to use
     try {
       const res = await client.post('/personnel/', {
         name: '',
         gender: '',
         id_card: '',
-        education: values.education || '',
-        phone: values.phone || '',
+        education: '',
+        phone: '',
         address: '',
-        id_valid_from: values.id_valid_from || '',
-        id_valid_to: values.id_valid_to || '',
-        tags: values.tags || '',
+        id_valid_from: '',
+        id_valid_to: '',
+        tags: '',
         experiences: [],
         certificates: [],
       })
       setCreatingId(res.data.id)
-      setStep(1)
+      setModalOpen(true)
     } catch (err: any) {
       message.error(err.response?.data?.detail || '创建失败')
+      return
+    }
+  }
+
+  const handleCancel = async () => {
+    // Clean up bare personnel record if user abandons the flow
+    if (creatingId) {
+      try { await client.delete(`/personnel/${creatingId}`) } catch { /* best-effort */ }
+    }
+    setModalOpen(false)
+  }
+
+  // Step 1 → Step 2: save all form fields to personnel record
+  const handleStep1 = async () => {
+    const values = await form.validateFields()
+    setCreating(true)
+    try {
+      await client.put(`/personnel/${creatingId}`, {
+        name: values.name || '',
+        gender: values.gender || '',
+        id_card: values.id_card || '',
+        education: values.education || '',
+        phone: values.phone || '',
+        address: values.address || '',
+        id_valid_from: values.id_valid_from || '',
+        id_valid_to: values.id_valid_to || '',
+        tags: values.tags || '',
+      })
+      setStep(1)
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '保存失败')
     } finally { setCreating(false) }
   }
 
@@ -111,8 +136,6 @@ export default function Personnel() {
       const res = await client.post(endpoint, fd, { headers: { 'Content-Type': 'multipart/form-data' } })
 
       // Fill form with OCR results
-      if (res.data.name) form.setFieldValue('name', res.data.name)
-      if (res.data.id_card) form.setFieldValue('id_card', res.data.id_card)
       const d = res.data
       if (d.name) form.setFieldValue('name', d.name)
       if (d.gender) form.setFieldValue('gender', d.gender)
@@ -177,16 +200,19 @@ export default function Personnel() {
 
   const handleFinish = async () => {
     if (!creatingId) return
-    // Update name from form
+    // Final safety update: persist all form fields
     const values = form.getFieldsValue()
     try {
       await client.put(`/personnel/${creatingId}`, {
-        name: values.name,
-        gender: values.gender,
-        id_card: values.id_card,
-        address: values.address,
-        id_valid_from: values.id_valid_from,
-        id_valid_to: values.id_valid_to,
+        name: values.name || '',
+        gender: values.gender || '',
+        id_card: values.id_card || '',
+        education: values.education || '',
+        phone: values.phone || '',
+        address: values.address || '',
+        id_valid_from: values.id_valid_from || '',
+        id_valid_to: values.id_valid_to || '',
+        tags: values.tags || '',
       })
     } catch { /* non-critical */ }
     setModalOpen(false)
@@ -236,10 +262,10 @@ export default function Personnel() {
       <Modal
         title={step === 0 ? '添加人员 — 身份证信息' : '添加人员 — 上传证照'}
         open={modalOpen}
-        onCancel={() => setModalOpen(false)}
+        onCancel={handleCancel}
         footer={
           step === 0 ? [
-            <Button key="cancel" onClick={() => setModalOpen(false)}>取消</Button>,
+            <Button key="cancel" onClick={handleCancel}>取消</Button>,
             <Button key="next" type="primary" loading={creating} onClick={handleStep1}>下一步</Button>,
           ] : [
             <Button key="back" onClick={() => setStep(0)}>上一步</Button>,
