@@ -33,11 +33,12 @@ class ExperienceRead(ExperienceCreate):
 class CertificateCreate(BaseModel):
     """Schema for creating a personnel certificate entry."""
 
-    cert_name: str = Field(max_length=200)
+    cert_name: str = Field(default="", max_length=200)
     cert_number: str = Field(default="", max_length=100)
     issuing_authority: str = Field(default="", max_length=200)
     issue_date: Optional[date] = None
     expiry_date: Optional[date] = None
+    attachment_path: str = Field(default="", max_length=500)
 
 
 class CertificateRead(CertificateCreate):
@@ -50,12 +51,16 @@ class CertificateRead(CertificateCreate):
 
 
 class PersonnelCreate(BaseModel):
-    """Schema for creating a personnel record with nested experiences and certificates."""
+    """Schema for creating a personnel record."""
 
-    name: str = Field(max_length=50)
+    name: str = Field(default="", max_length=50)
+    gender: str = Field(default="", max_length=10)
     id_card: str = Field(default="", max_length=18)
     education: str = Field(default="", max_length=100)
     phone: str = Field(default="", max_length=20)
+    address: str = Field(default="", max_length=500)
+    id_valid_from: str = Field(default="", max_length=20)
+    id_valid_to: str = Field(default="", max_length=20)
     tags: str = Field(default="", max_length=500)
     experiences: List[ExperienceCreate] = Field(default_factory=list)
     certificates: List[CertificateCreate] = Field(default_factory=list)
@@ -65,9 +70,13 @@ class PersonnelUpdate(BaseModel):
     """Schema for updating a personnel record (basic fields only)."""
 
     name: Optional[str] = Field(default=None, max_length=50)
+    gender: Optional[str] = Field(default=None, max_length=10)
     id_card: Optional[str] = Field(default=None, max_length=18)
     education: Optional[str] = Field(default=None, max_length=100)
     phone: Optional[str] = Field(default=None, max_length=20)
+    address: Optional[str] = Field(default=None, max_length=500)
+    id_valid_from: Optional[str] = Field(default=None, max_length=20)
+    id_valid_to: Optional[str] = Field(default=None, max_length=20)
     tags: Optional[str] = Field(default=None, max_length=500)
 
 
@@ -76,9 +85,17 @@ class PersonnelRead(BaseModel):
 
     id: str
     name: str
+    gender: str
+    id_card: str
     education: str
     phone: str
+    address: str
+    id_valid_from: str
+    id_valid_to: str
     tags: str
+    id_front_image: str
+    id_back_image: str
+    health_report_images_json: str
     experiences: List[ExperienceRead] = []
     certificates: List[CertificateRead] = []
     created_at: datetime

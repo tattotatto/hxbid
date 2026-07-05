@@ -31,6 +31,11 @@ class Personnel(Base):
         nullable=False,
         default="",
     )
+    gender: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        default="",
+    )
     education: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
@@ -41,10 +46,40 @@ class Personnel(Base):
         nullable=False,
         default="",
     )
+    address: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        default="",
+    )
     tags: Mapped[str] = mapped_column(
         String(500),
         nullable=False,
         default="",
+    )
+    id_valid_from: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="",
+    )
+    id_valid_to: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="",
+    )
+    id_front_image: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        default="",
+    )
+    id_back_image: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        default="",
+    )
+    health_report_images_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -167,6 +202,11 @@ class PersonnelCertificate(Base):
     expiry_date: Mapped[date] = mapped_column(
         Date,
         nullable=True,
+    )
+    attachment_path: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        default="",
     )
 
     # Relationships
