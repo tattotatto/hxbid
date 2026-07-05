@@ -19,4 +19,5 @@ chromadb==0.5.23
 sentence-transformers==3.0.1
 pytesseract==0.3.13
 Pillow==12.2.0
+pypdfium2==4.30.0
 olefile==0.47

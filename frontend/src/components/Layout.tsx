@@ -12,6 +12,7 @@ import {
   LogoutOutlined,
   UserOutlined,
   BankOutlined,
+  ProfileOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 import Copyright from './Copyright'
@@ -62,6 +63,11 @@ function buildMenuItems(): MenuItem[] {
           key: '/resources/history',
           icon: <HistoryOutlined />,
           label: '历史标书',
+        },
+        {
+          key: '/resources/contracts',
+          icon: <ProfileOutlined />,
+          label: '历史合同',
         },
         {
           key: '/resources/company',

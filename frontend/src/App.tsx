@@ -11,6 +11,7 @@ import HistoryBids from './pages/resources/HistoryBids'
 import Settings from './pages/settings/Settings'
 import UserManagement from './pages/admin/UserManagement'
 import CompanyInfo from './pages/resources/CompanyInfo'
+import Contracts from './pages/resources/Contracts'
 
 function App() {
   const token = localStorage.getItem('token')
@@ -30,6 +31,7 @@ function App() {
         <Route path="resources/personnel" element={<Personnel />} />
         <Route path="resources/history" element={<HistoryBids />} />
         <Route path="resources/company" element={<CompanyInfo />} />
+        <Route path="resources/contracts" element={<Contracts />} />
         <Route path="settings" element={<Settings />} />
         <Route path="admin/users" element={<UserManagement />} />
       </Route>

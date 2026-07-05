@@ -11,6 +11,7 @@ from app.models.project_resource import ProjectQualification, ProjectPersonnel
 from app.models.template import BidTemplate
 from app.models.edit_rule import EditRule
 from app.models.company_profile import CompanyProfile
+from app.models.contract import Contract
 
 __all__ = [
     "User",
@@ -25,4 +26,5 @@ __all__ = [
     "BidTemplate",
     "EditRule",
     "CompanyProfile",
+    "Contract",
 ]
