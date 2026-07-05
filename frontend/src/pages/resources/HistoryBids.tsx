@@ -44,7 +44,7 @@ export default function HistoryBids() {
   const fetchProjects = async () => {
     setLoading(true)
     try {
-      const res = await client.get('/projects/')
+      const res = await client.get('/projects/?include_archived=true')
       const filtered = (res.data as Project[]).filter((p) =>
         RELEVANT_STATUSES.includes(p.status),
       )

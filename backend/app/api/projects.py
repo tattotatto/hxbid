@@ -40,13 +40,22 @@ async def _get_project_with_chapters(
 async def list_projects(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    include_archived: bool = False,
 ):
-    """List all projects with their chapters, ordered by creation time descending."""
-    result = await db.execute(
+    """List projects with their chapters, ordered by creation time descending.
+
+    By default, archived projects (historical bids uploaded for AI learning)
+    are excluded. Set ``include_archived=true`` to include them.
+    """
+    stmt = (
         select(BidProject)
         .options(selectinload(BidProject.chapters))
         .order_by(BidProject.created_at.desc())
     )
+    if not include_archived:
+        stmt = stmt.where(BidProject.status != "archived")
+
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
