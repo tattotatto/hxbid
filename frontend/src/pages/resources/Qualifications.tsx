@@ -102,7 +102,8 @@ export default function Qualifications() {
       if (!current.issuing_authority && d.issuing_authority) form.setFieldValue('issuing_authority', d.issuing_authority)
       if (!current.issue_date && d.issue_date) form.setFieldValue('issue_date', dayjs(d.issue_date))
       if (!current.expiry_date && d.expiry_date) form.setFieldValue('expiry_date', dayjs(d.expiry_date))
-      if (d.ocr_text && d.ocr_text.length > 10) {
+      const hasResult = d.name || d.cert_number || d.issuing_authority || (d.ocr_text && d.ocr_text.length > 10)
+      if (hasResult) {
         message.success('识别完成，空白字段已填充，请核对')
       } else {
         message.info('未能识别到文字，请手动填写')

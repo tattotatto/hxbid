@@ -78,7 +78,8 @@ export default function CompanyInfo() {
         if (!current.legal_rep_name && d.name) form.setFieldValue('legal_rep_name', d.name)
         if (!current.legal_rep_id_number && d.id_number) form.setFieldValue('legal_rep_id_number', d.id_number)
       }
-      if (d.ocr_text && d.ocr_text.length > 10) {
+      const hasResult = d.company_name || d.business_license_number || d.legal_rep_name || d.name || d.id_number || (d.ocr_text && d.ocr_text.length > 10)
+      if (hasResult) {
         message.success(label + '识别完成，空白字段已填充')
       } else {
         message.info(label + '：未能识别到文字内容')
