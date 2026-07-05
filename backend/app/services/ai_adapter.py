@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 PROVIDERS = {
     "deepseek": {
         "label": "DeepSeek",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "vision": False,
     },
     "openai": {
