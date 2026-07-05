@@ -34,6 +34,7 @@ from app.services.anti_ai import analyze_chapter, analyze_project_chapters, repo
 from app.services.document_parser import parse_document
 from app.services.edit_analyzer import analyze_chapter_edits, edit_analysis_to_dict
 from app.services.notification import send_notification
+from app.services.collection import get_collected_resources
 from app.services.rag import assemble_chapter_context
 from app.services.render_engine import export_to_pdf, render_bid_to_docx
 from app.services.vector_store import vector_store
@@ -86,7 +87,7 @@ async def upload_and_parse(
         name=project_name or requirements.get("project_name") or file.filename or "未命名项目",
         original_file_path=str(saved_path.absolute()),
         parsed_requirements_json=json.dumps(requirements, ensure_ascii=False),
-        status="parsed",
+        status="collecting",
         created_by=current_user.id,
     )
     db.add(project)
@@ -204,6 +205,12 @@ async def generate_bid(
             detail="Project not found",
         )
 
+    if project.status == "collecting":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先完成信息搜集再生成标书",
+        )
+
     requirements = json.loads(project.parsed_requirements_json)
 
     # -- Ensure outline exists --
@@ -278,13 +285,36 @@ async def generate_bid(
                     source_summary = {}
 
                     try:
-                        similar_chapters, matched_qualifications, matched_personnel, source_summary = \
-                            await assemble_chapter_context(
-                                chapter_title=ch["title"],
-                                requirements=requirements,
-                                project_id=project_id,
-                                db=gen_db,
-                            )
+                        # If project has collected resources, use them directly
+                        collected = await get_collected_resources(project_id, gen_db)
+                        if collected["qualifications"] or collected["personnel"]:
+                            # Use collected qualifications (still do vector search for similar chapters)
+                            try:
+                                from app.services.rag import retrieve_similar_chapters
+                                similar_chapters = await retrieve_similar_chapters(
+                                    chapter_title=ch["title"],
+                                    requirements=requirements,
+                                    project_id=project_id,
+                                )
+                            except Exception:
+                                similar_chapters = []
+                            matched_qualifications = collected["qualifications"]
+                            matched_personnel = collected["personnel"]
+                            source_summary = {
+                                "similar_count": len(similar_chapters),
+                                "qual_count": len(matched_qualifications),
+                                "personnel_count": len(matched_personnel),
+                                "similar_titles": [s.get("title", "") for s in similar_chapters[:5]],
+                            }
+                        else:
+                            # Fallback: keyword-based RAG matching
+                            similar_chapters, matched_qualifications, matched_personnel, source_summary = \
+                                await assemble_chapter_context(
+                                    chapter_title=ch["title"],
+                                    requirements=requirements,
+                                    project_id=project_id,
+                                    db=gen_db,
+                                )
                     except Exception:
                         source_summary = {"similar_count": 0, "qual_count": 0, "personnel_count": 0}
 

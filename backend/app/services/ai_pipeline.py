@@ -131,6 +131,27 @@ def _requirements_summary(requirements: dict) -> str:
     if special:
         parts.append(f"特殊要求：{'；'.join(special)}")
 
+    # New structured fields for the information-collection step
+    required_docs = requirements.get("required_documents", [])
+    if required_docs:
+        doc_names = [d["name"] if isinstance(d, dict) else str(d) for d in required_docs]
+        parts.append(f"需提供证件：{'；'.join(doc_names)}")
+
+    required_personnel = requirements.get("required_personnel", [])
+    if required_personnel:
+        personnel_desc = []
+        for p in required_personnel:
+            if isinstance(p, dict):
+                role = p.get("role", "")
+                certs = p.get("certifications", [])
+                cnt = p.get("count", 1)
+                cert_str = f"（需持{'、'.join(certs)}）" if certs else ""
+                cnt_str = f" x{cnt}" if cnt > 1 else ""
+                personnel_desc.append(f"{role}{cert_str}{cnt_str}")
+            else:
+                personnel_desc.append(str(p))
+        parts.append(f"人员配置：{'；'.join(personnel_desc)}")
+
     return "\n".join(parts)
 
 
@@ -167,6 +188,12 @@ async def parse_bid_requirements(document_text: str) -> dict:
 - evaluation_criteria: 评标办法/评标标准（字符串）
 - special_requirements: 特殊要求列表（字符串数组，如保密要求、特殊设备等）
 - bid_sections: 招标文件要求的标书章节/组成部分列表（字符串数组，按招标文件规定的顺序排列）
+- required_documents: 招标文件明确要求提供的证件/资质文件列表（对象数组，每个对象包含 name 证件名称 和 category 类别）
+  例如：[{{"name": "营业执照", "category": "company"}}, {{"name": "保安服务许可证", "category": "qualification"}}]
+  category 取值为: "company"（公司基础证照）、"qualification"（专业资质证书）、"financial"（财务证明）、"other"
+- required_personnel: 招标文件要求配置的项目人员列表（对象数组，每个对象包含 role 岗位名称、certifications 持证要求数组、count 需求人数）
+  例如：[{{"role": "项目负责人", "certifications": ["保安师证"], "count": 1}}]
+  count 默认为 1
 
 注意：
 - 所有字段都必须存在，未提及的字段使用空字符串或空数组
@@ -197,6 +224,8 @@ async def parse_bid_requirements(document_text: str) -> dict:
             "evaluation_criteria": "",
             "special_requirements": [],
             "bid_sections": [],
+            "required_documents": [],
+            "required_personnel": [],
         }
 
     # Ensure all expected keys are present with sane defaults
@@ -210,6 +239,8 @@ async def parse_bid_requirements(document_text: str) -> dict:
         "evaluation_criteria": "",
         "special_requirements": [],
         "bid_sections": [],
+        "required_documents": [],
+        "required_personnel": [],
     }
     for key, default in defaults.items():
         if key not in result:

@@ -76,6 +76,16 @@ class BidProject(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    project_qualifications: Mapped[list["ProjectQualification"]] = relationship(
+        "ProjectQualification",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    project_personnel: Mapped[list["ProjectPersonnel"]] = relationship(
+        "ProjectPersonnel",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<BidProject(id={self.id!r}, name={self.name!r}, status={self.status!r})>"

@@ -25,6 +25,7 @@ import {
 import client from '../../api/client'
 import GenerationProgress from '../../components/GenerationProgress'
 import BidEditor from '../../components/BidEditor'
+import CollectionStep from './CollectionStep'
 
 interface Chapter {
   id: string
@@ -66,6 +67,7 @@ interface AiTraceInfo {
 const steps = [
   { title: '上传招标文件' },
   { title: 'AI 解析' },
+  { title: '信息搜集' },
   { title: 'AI 生成' },
   { title: '在线编辑' },
   { title: '导出' },
@@ -74,9 +76,10 @@ const steps = [
 const statusStepMap: Record<string, number> = {
   draft: 0,
   parsed: 1,
-  generating: 2,
-  review: 3,
-  exported: 4,
+  collecting: 2,
+  generating: 3,
+  review: 4,
+  exported: 5,
 }
 
 export default function ProjectWorkflow() {
@@ -462,7 +465,7 @@ export default function ProjectWorkflow() {
             icon={<ThunderboltOutlined />}
             loading={generating}
             onClick={handleGenerate}
-            disabled={generating}
+            disabled={generating || project.status === 'collecting'}
           >
             一键生成标书
           </Button>
@@ -517,6 +520,14 @@ export default function ProjectWorkflow() {
           ) : null}
         </Space>
       </Card>
+
+      {/* Information Collection step */}
+      {project.status === 'collecting' && (
+        <CollectionStep
+          projectId={id!}
+          onComplete={() => { fetchProject() }}
+        />
+      )}
 
       {/* Generation progress */}
       {generating && (
