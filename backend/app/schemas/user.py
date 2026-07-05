@@ -15,6 +15,7 @@ class UserCreate(BaseModel):
     username: str = Field(min_length=2, max_length=50)
     password: str = Field(min_length=6, max_length=100)
     display_name: str = Field(default="", max_length=100)
+    role: Optional[str] = None  # admin can specify role when creating
 
 
 class UserRead(BaseModel):
@@ -43,6 +44,13 @@ class UserUpdate(BaseModel):
     display_name: Optional[str] = Field(None, max_length=100)
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    password: Optional[str] = Field(None, min_length=6, max_length=100)
+
+
+class UserPasswordReset(BaseModel):
+    """Schema for admin resetting a user's password."""
+
+    password: str = Field(min_length=6, max_length=100)
 
 
 class Token(BaseModel):

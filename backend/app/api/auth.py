@@ -64,7 +64,7 @@ async def register(
         username=data.username,
         password_hash=get_password_hash(data.password),
         display_name=data.display_name or data.username,
-        role="admin" if is_first_user else "editor",
+        role="admin" if is_first_user else (data.role if data.role in ("admin", "editor", "viewer") else "editor"),
     )
     db.add(user)
     await db.flush()

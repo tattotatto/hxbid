@@ -12,9 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import UserRead, UserUpdate
+from app.schemas.user import UserPasswordReset, UserRead, UserUpdate
 from app.services.ai_adapter import ai_adapter
 from app.utils.permissions import require_admin, require_editor
+from app.utils.security import get_password_hash
 
 router = APIRouter()
 
@@ -93,11 +94,36 @@ async def update_user(
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
-        setattr(user, field, value)
+        if field == "password":
+            user.password_hash = get_password_hash(value)
+        else:
+            setattr(user, field, value)
 
     await db.flush()
     await db.refresh(user)
     return user
+
+
+# ---------------------------------------------------------------------------
+# PUT /users/{user_id}/password  — Reset user password
+# ---------------------------------------------------------------------------
+
+
+@router.put("/users/{user_id}/password")
+async def reset_user_password(
+    user_id: str,
+    data: UserPasswordReset,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Reset a user's password (admin only)."""
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.password_hash = get_password_hash(data.password)
+    await db.flush()
+    return {"message": "Password reset successfully"}
 
 
 # ---------------------------------------------------------------------------

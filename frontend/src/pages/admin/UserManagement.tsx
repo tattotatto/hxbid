@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Card, Table, Tag, Button, Modal, Select, message, Space, Popconfirm } from 'antd'
-import { UserAddOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons'
+import { Card, Table, Tag, Button, Modal, Select, message, Space, Popconfirm, Input, Form } from 'antd'
+import { UserAddOutlined, EditOutlined, DeleteOutlined, KeyOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import client from '../../api/client'
 
@@ -28,10 +28,24 @@ const roleLabelMap: Record<string, string> = {
 export default function UserManagement() {
   const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
+
+  // Create user modal
+  const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [createForm] = Form.useForm()
+  const [creating, setCreating] = useState(false)
+
+  // Edit user modal
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
   const [editRole, setEditRole] = useState('')
+  const [editDisplayName, setEditDisplayName] = useState('')
   const [saving, setSaving] = useState(false)
+
+  // Reset password modal
+  const [pwdModalOpen, setPwdModalOpen] = useState(false)
+  const [pwdUser, setPwdUser] = useState<User | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [resetting, setResetting] = useState(false)
 
   const fetchUsers = () => {
     setLoading(true)
@@ -46,18 +60,47 @@ export default function UserManagement() {
     fetchUsers()
   }, [])
 
-  const openEditRole = (user: User) => {
+  // ── Create user ──
+
+  const handleCreate = async () => {
+    const values = await createForm.validateFields()
+    setCreating(true)
+    try {
+      await client.post('/auth/register', {
+        username: values.username,
+        password: values.password,
+        display_name: values.display_name || values.username,
+        role: values.role || 'editor',
+      })
+      message.success(`用户「${values.username}」已创建`)
+      setCreateModalOpen(false)
+      createForm.resetFields()
+      fetchUsers()
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '创建失败')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  // ── Edit user ──
+
+  const openEditModal = (user: User) => {
     setEditingUser(user)
     setEditRole(user.role)
+    setEditDisplayName(user.display_name || '')
     setEditModalOpen(true)
   }
 
-  const handleSaveRole = async () => {
+  const handleSaveEdit = async () => {
     if (!editingUser) return
     setSaving(true)
     try {
-      await client.put(`/admin/users/${editingUser.id}`, { role: editRole })
-      message.success('角色已更新')
+      await client.put(`/admin/users/${editingUser.id}`, {
+        role: editRole,
+        display_name: editDisplayName,
+      })
+      message.success('用户信息已更新')
       setEditModalOpen(false)
       fetchUsers()
     } catch (err: any) {
@@ -66,6 +109,30 @@ export default function UserManagement() {
       setSaving(false)
     }
   }
+
+  // ── Reset password ──
+
+  const openResetPwd = (user: User) => {
+    setPwdUser(user)
+    setNewPassword('')
+    setPwdModalOpen(true)
+  }
+
+  const handleResetPwd = async () => {
+    if (!pwdUser || !newPassword) return
+    setResetting(true)
+    try {
+      await client.put(`/admin/users/${pwdUser.id}/password`, { password: newPassword })
+      message.success(`「${pwdUser.username}」密码已重置`)
+      setPwdModalOpen(false)
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '重置失败')
+    } finally {
+      setResetting(false)
+    }
+  }
+
+  // ── Toggle active ──
 
   const handleToggleActive = async (user: User) => {
     try {
@@ -76,6 +143,8 @@ export default function UserManagement() {
       message.error(err.response?.data?.detail || '操作失败')
     }
   }
+
+  // ── Delete ──
 
   const handleDelete = async (userId: string) => {
     try {
@@ -132,9 +201,16 @@ export default function UserManagement() {
           <Button
             size="small"
             icon={<EditOutlined />}
-            onClick={() => openEditRole(record)}
+            onClick={() => openEditModal(record)}
           >
-            角色
+            编辑
+          </Button>
+          <Button
+            size="small"
+            icon={<KeyOutlined />}
+            onClick={() => openResetPwd(record)}
+          >
+            密码
           </Button>
           <Button
             size="small"
@@ -158,7 +234,15 @@ export default function UserManagement() {
       <Card
         title="用户管理"
         extra={
-          <Tag color="red">仅管理员可见</Tag>
+          <Space>
+            <Button type="primary" icon={<UserAddOutlined />} onClick={() => {
+              createForm.resetFields()
+              setCreateModalOpen(true)
+            }}>
+              添加用户
+            </Button>
+            <Tag color="red">仅管理员可见</Tag>
+          </Space>
         }
         style={{ marginBottom: 24 }}
       >
@@ -171,12 +255,45 @@ export default function UserManagement() {
         />
       </Card>
 
+      {/* Create user modal */}
       <Modal
-        title={`修改角色 — ${editingUser?.username}`}
+        title="添加用户"
+        open={createModalOpen}
+        onOk={handleCreate}
+        onCancel={() => setCreateModalOpen(false)}
+        confirmLoading={creating}
+        okText="创建"
+      >
+        <Form form={createForm} layout="vertical">
+          <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }, { min: 2, max: 50 }]}>
+            <Input placeholder="登录用户名" />
+          </Form.Item>
+          <Form.Item label="密码" name="password" rules={[{ required: true, message: '请输入密码' }, { min: 6, max: 100 }]}>
+            <Input.Password placeholder="至少6位" />
+          </Form.Item>
+          <Form.Item label="显示名" name="display_name">
+            <Input placeholder="用户显示名称，留空则使用用户名" />
+          </Form.Item>
+          <Form.Item label="角色" name="role" initialValue="editor">
+            <Select
+              options={[
+                { value: 'editor', label: '编辑者 (editor) — 可创建/编辑/删除资源' },
+                { value: 'viewer', label: '观察者 (viewer) — 仅可查看' },
+                { value: 'admin', label: '管理员 (admin) — 全部权限' },
+              ]}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* Edit user modal */}
+      <Modal
+        title={`编辑用户 — ${editingUser?.username}`}
         open={editModalOpen}
-        onOk={handleSaveRole}
+        onOk={handleSaveEdit}
         onCancel={() => setEditModalOpen(false)}
         confirmLoading={saving}
+        okText="保存"
       >
         <div style={{ marginBottom: 16 }}>
           当前角色：
@@ -184,15 +301,44 @@ export default function UserManagement() {
             {roleLabelMap[editingUser?.role || ''] || editingUser?.role}
           </Tag>
         </div>
-        <Select
-          value={editRole}
-          onChange={setEditRole}
-          style={{ width: '100%' }}
-          options={[
-            { value: 'admin', label: '管理员 (admin) — 全部权限' },
-            { value: 'editor', label: '编辑者 (editor) — 可创建/编辑/删除资源' },
-            { value: 'viewer', label: '观察者 (viewer) — 仅可查看' },
-          ]}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 4 }}>显示名</div>
+          <Input
+            value={editDisplayName}
+            onChange={(e) => setEditDisplayName(e.target.value)}
+            placeholder="显示名称"
+          />
+        </div>
+        <div>
+          <div style={{ marginBottom: 4 }}>角色</div>
+          <Select
+            value={editRole}
+            onChange={setEditRole}
+            style={{ width: '100%' }}
+            options={[
+              { value: 'admin', label: '管理员 (admin) — 全部权限' },
+              { value: 'editor', label: '编辑者 (editor) — 可创建/编辑/删除资源' },
+              { value: 'viewer', label: '观察者 (viewer) — 仅可查看' },
+            ]}
+          />
+        </div>
+      </Modal>
+
+      {/* Reset password modal */}
+      <Modal
+        title={`重置密码 — ${pwdUser?.username}`}
+        open={pwdModalOpen}
+        onOk={handleResetPwd}
+        onCancel={() => setPwdModalOpen(false)}
+        confirmLoading={resetting}
+        okText="重置"
+      >
+        <div style={{ marginBottom: 8 }}>为新密码：</div>
+        <Input.Password
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          placeholder="输入新密码（至少6位）"
+          minLength={6}
         />
       </Modal>
     </div>
