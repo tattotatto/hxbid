@@ -1,56 +1,87 @@
 version: '3.8'
+
 services:
   db:
     image: postgres:15-alpine
+    container_name: hongxi-db
     environment:
-      POSTGRES_USER: hongxi
-      POSTGRES_PASSWORD: hongxi123
-      POSTGRES_DB: hongxi_bid
+      POSTGRES_USER: ${POSTGRES_USER:-hongxi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hongxi123}
+      POSTGRES_DB: ${POSTGRES_DB:-hongxi_bid}
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hongxi -d hongxi_bid"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hongxi} -d ${POSTGRES_DB:-hongxi_bid}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 15s
 
   backend:
     build: ./backend
+    container_name: hongxi-backend
     environment:
-      DATABASE_URL: postgresql+asyncpg://hongxi:hongxi123@db:5432/hongxi_bid
-      DATABASE_URL_SYNC: postgresql+psycopg2://hongxi:hongxi123@db:5432/hongxi_bid
+      # Database
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hongxi}:${POSTGRES_PASSWORD:-hongxi123}@db:5432/${POSTGRES_DB:-hongxi_bid}
+      DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-hongxi}:${POSTGRES_PASSWORD:-hongxi123}@db:5432/${POSTGRES_DB:-hongxi_bid}
+      # Auth
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      # AI Provider
+      AI_PROVIDER: ${AI_PROVIDER:-deepseek}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
       TONGYI_API_KEY: ${TONGYI_API_KEY:-}
-      WECOM_WEBHOOK_URL: ${WECOM_WEBHOOK_URL:-}
-      DINGTALK_WEBHOOK_URL: ${DINGTALK_WEBHOOK_URL:-}
-      CORS_ORIGINS: '["http://localhost"]'
+      TONGYI_BASE_URL: ${TONGYI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      TONGYI_MODEL: ${TONGYI_MODEL:-qwen3.7-plus}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.7}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-4096}
+      # File paths
       UPLOAD_DIR: /app/uploads
       OUTPUT_DIR: /app/outputs
       TEMPLATE_DIR: /app/templates
-      VECTOR_STORE_ENABLED: "true"
-      EMBEDDING_MODEL: /app/bge-base-zh-v1.5
+      # Vector Store
+      VECTOR_STORE_ENABLED: ${VECTOR_STORE_ENABLED:-true}
+      CHROMA_PERSIST_DIR: /app/chroma_data
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-/app/bge-base-zh-v1.5}
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:8888"]}
+      # Notifications
+      WECOM_WEBHOOK_URL: ${WECOM_WEBHOOK_URL:-}
+      DINGTALK_WEBHOOK_URL: ${DINGTALK_WEBHOOK_URL:-}
     volumes:
       - uploads:/app/uploads
       - outputs:/app/outputs
+      - chroma_data:/app/chroma_data
       - ./bge-base-zh-v1.5:/app/bge-base-zh-v1.5:ro
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   frontend:
     build: ./frontend
+    container_name: hongxi-frontend
     depends_on:
       - backend
     restart: unless-stopped
 
   nginx:
     image: nginx:alpine
+    container_name: hongxi-nginx
     ports:
-      - "8888:80"
+      - "${NGINX_PORT:-8888}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - outputs:/usr/share/nginx/html/outputs:ro
@@ -58,8 +89,14 @@ services:
       - frontend
       - backend
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --timeout=3 http://127.0.0.1:80/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 volumes:
   pgdata:
   uploads:
   outputs:
+  chroma_data:
