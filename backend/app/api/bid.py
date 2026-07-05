@@ -521,11 +521,13 @@ async def export_bid(
             attachments.append({
                 "path": cp.legal_rep_id_front_image,
                 "label": "法定代表人身份证（正面）",
+                "type": "id_card",
             })
         if cp.legal_rep_id_back_image:
             attachments.append({
                 "path": cp.legal_rep_id_back_image,
                 "label": "法定代表人身份证（反面）",
+                "type": "id_card",
             })
 
     # Qualification certificate images

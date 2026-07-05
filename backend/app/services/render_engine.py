@@ -520,16 +520,19 @@ IMAGE_MAX_WIDTH = Cm(14)
 IMAGE_MAX_HEIGHT = Cm(20)
 
 
-def _insert_image(doc, image_path, label, style):
+def _insert_image(doc, image_path, label, style, *, no_rotate=False, max_width=None):
     """Insert a single image into the document.
 
     - Portrait images (height >= width) are inserted as-is.
     - Landscape images (width > height) are rotated 90° clockwise so they
-      fit the portrait page orientation of a bid document.
+      fit the portrait page orientation, unless *no_rotate* is True.
 
-    The image is scaled to fit within ``IMAGE_MAX_WIDTH`` while preserving
-    aspect ratio.  A centred label is placed below the image.
+    The image is scaled to fit within *max_width* (or ``IMAGE_MAX_WIDTH``)
+    while preserving aspect ratio.  A centred label is placed below the image.
     """
+    if max_width is None:
+        max_width = IMAGE_MAX_WIDTH
+
     full_path = Path(image_path)
     if not full_path.is_absolute():
         full_path = Path.cwd() / full_path
@@ -554,11 +557,11 @@ def _insert_image(doc, image_path, label, style):
 
     is_landscape = pil_img.width > pil_img.height
 
-    if is_landscape:
+    if is_landscape and not no_rotate:
         pil_img = pil_img.rotate(270, expand=True)  # 270° CW = portrait
 
     # ── Scale to fit page width ──
-    max_px = int(IMAGE_MAX_WIDTH / Cm(1) * 37.795)  # rough px at ~96 dpi
+    max_px = int(max_width / Cm(1) * 37.795)  # rough px at ~96 dpi
     if pil_img.width > max_px:
         ratio = max_px / pil_img.width
         new_h = int(pil_img.height * ratio)
@@ -590,9 +593,10 @@ def _add_attachments_section(doc, attachments, style):
     Parameters
     ----------
     attachments : list[dict]
-        Each dict: {"path": str, "label": str}
+        Each dict: {"path": str, "label": str, "type": str (optional)}
         path — absolute or relative filesystem path to the image
         label — description for the document (e.g. "营业执照")
+        type — "id_card" for ID cards (no rotation, placed side-by-side in pairs)
     """
     if not attachments:
         return
@@ -607,11 +611,111 @@ def _add_attachments_section(doc, attachments, style):
             bold=True,
         )
 
-    for att in attachments:
+    i = 0
+    while i < len(attachments):
+        att = attachments[i]
         path = att.get('path', '')
         label = att.get('label', '附件')
-        if path:
-            _insert_image(doc, path, label, style)
+        att_type = att.get('type', '')
+
+        if not path:
+            i += 1
+            continue
+
+        # ── ID card pair: place two side-by-side ──
+        if att_type == 'id_card' and i + 1 < len(attachments) and attachments[i + 1].get('type') == 'id_card':
+            next_att = attachments[i + 1]
+            next_path = next_att.get('path', '')
+            next_label = next_att.get('label', '附件')
+
+            # Half-width for each image to fit two side by side
+            half_width = Cm(6.8)
+
+            # Build in-memory images for both ID cards
+            img_bufs = []
+            img_labels = []
+            for img_path, img_label in [(path, label), (next_path, next_label)]:
+                fp = Path(img_path)
+                if not fp.is_absolute():
+                    fp = Path.cwd() / fp
+                if not fp.exists():
+                    img_bufs.append(None)
+                    img_labels.append(img_label)
+                    continue
+                try:
+                    pil_img = PILImage.open(str(fp))
+                except Exception:
+                    img_bufs.append(None)
+                    img_labels.append(img_label)
+                    continue
+                if pil_img.mode not in ('RGB', 'L'):
+                    pil_img = pil_img.convert('RGB')
+                # No rotation for ID cards
+                max_px = int(half_width / Cm(1) * 37.795)
+                if pil_img.width > max_px:
+                    ratio = max_px / pil_img.width
+                    pil_img = pil_img.resize((max_px, int(pil_img.height * ratio)), PILImage.LANCZOS)
+                buf = std_io.BytesIO()
+                pil_img.save(buf, format='PNG')
+                buf.seek(0)
+                img_bufs.append(buf)
+                img_labels.append(img_label)
+
+            # Create a 1-row 2-column borderless table
+            table = doc.add_table(rows=1, cols=2)
+            table.autofit = True
+
+            for col_idx, (buf, lbl) in enumerate(zip(img_bufs, img_labels)):
+                cell = table.cell(0, col_idx)
+                # Remove cell borders
+                tc = cell._tc
+                tcPr = tc.get_or_add_tcPr()
+                tcBorders = OxmlElement('w:tcBorders')
+                for border_name in ('top', 'left', 'bottom', 'right'):
+                    border_el = OxmlElement(f'w:{border_name}')
+                    border_el.set(qn('w:val'), 'nil')
+                    tcBorders.append(border_el)
+                tcPr.append(tcBorders)
+
+                if buf is None:
+                    p = cell.paragraphs[0]
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = p.add_run(f'[图片缺失: {lbl}]')
+                    _set_run_font(run, style['body_font_name'], Pt(10))
+                else:
+                    # Get image width from buffer
+                    buf.seek(0)
+                    check = PILImage.open(buf)
+                    width_in = check.width / 96.0
+                    buf.seek(0)
+
+                    p = cell.paragraphs[0]
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = p.add_run()
+                    run.add_picture(buf, width=Inches(min(width_in, 2.7)))
+
+                    # Label below image in cell
+                    p2 = cell.add_paragraph(lbl)
+                    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    r2 = p2.add_run(lbl)
+                    _set_run_font(r2, style['body_font_name'], Pt(10))
+
+            # Remove table borders
+            tbl = table._tbl
+            tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement('w:tblPr')
+            tblBorders = OxmlElement('w:tblBorders')
+            for border_name in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+                border_el = OxmlElement(f'w:{border_name}')
+                border_el.set(qn('w:val'), 'nil')
+                tblBorders.append(border_el)
+            tblPr.append(tblBorders)
+
+            i += 2
+            continue
+
+        # ── Regular (non-ID-card) attachment ──
+        _insert_image(doc, path, label, style, no_rotate=(att_type == 'id_card'))
+        i += 1
 
     # spacer after all attachments
     doc.add_paragraph()
