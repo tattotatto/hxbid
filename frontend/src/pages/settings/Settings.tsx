@@ -695,7 +695,7 @@ function AIModelConfig() {
         </div>
       </Form>
 
-      <Descriptions title="提供商状态" size="small" column={{ xs: 1, sm: 1, md: 2, lg: 3 }} style={{ marginTop: 20 }}>
+      <Descriptions title="提供商状态" size="small" column={1} style={{ marginTop: 20 }}>
         {providers.map((p) => {
           const tr = testResults[p.id]
           return (
