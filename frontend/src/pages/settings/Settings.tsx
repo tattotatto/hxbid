@@ -673,26 +673,24 @@ function AIModelConfig() {
   return (
     <>
       <Form form={form} layout="vertical" initialValues={{ ai_provider: 'deepseek', ai_model: '', temperature: 0.7 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px 20px', alignItems: 'flex-start' }}>
-          <Form.Item label="当前提供商" name="ai_provider" style={{ minWidth: 180, flex: '1 1 auto', marginBottom: 0 }}>
-            <Select
-              options={providers.map((p) => ({
-                value: p.id,
-                label: `${p.label} ${p.configured ? '✅' : '⚠️ 未配置'}`,
-              }))}
-              onChange={handleProviderChange}
-            />
-          </Form.Item>
-          <Form.Item label="模型" name="ai_model" style={{ minWidth: 200, flex: '2 1 auto', marginBottom: 0 }}>
-            <Input placeholder="输入模型名称，留空则使用默认模型" />
-          </Form.Item>
-          <Form.Item label="Temperature" name="temperature" style={{ width: 120, flex: '0 0 auto', marginBottom: 0 }}>
-            <Input type="number" min={0} max={2} step={0.1} />
-          </Form.Item>
-          <Form.Item style={{ flex: '0 0 auto', marginBottom: 0, alignSelf: 'flex-end' }}>
-            <Button type="primary" onClick={handleSave} loading={saving}>保存配置</Button>
-          </Form.Item>
-        </div>
+        <Form.Item label="当前提供商" name="ai_provider">
+          <Select
+            options={providers.map((p) => ({
+              value: p.id,
+              label: `${p.label} ${p.configured ? '✅' : '⚠️ 未配置'}`,
+            }))}
+            onChange={handleProviderChange}
+          />
+        </Form.Item>
+        <Form.Item label="模型" name="ai_model">
+          <Input placeholder="输入模型名称，留空则使用默认模型" />
+        </Form.Item>
+        <Form.Item label="Temperature" name="temperature">
+          <Input type="number" min={0} max={2} step={0.1} />
+        </Form.Item>
+        <Form.Item>
+          <Button type="primary" onClick={handleSave} loading={saving}>保存配置</Button>
+        </Form.Item>
       </Form>
 
       <Descriptions title="提供商状态" size="small" column={1} style={{ marginTop: 20 }}>
