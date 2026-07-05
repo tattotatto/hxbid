@@ -27,7 +27,7 @@ services:
       DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-hongxi}:${POSTGRES_PASSWORD:-hongxi123}@db:5432/${POSTGRES_DB:-hongxi_bid}
       # Auth
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
       # AI Provider
       AI_PROVIDER: ${AI_PROVIDER:-deepseek}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}

@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # Auth
     SECRET_KEY: str = "change-me-in-production"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours — avoids forced logout during long tasks
 
     # AI / Multi-model support (DeepSeek, OpenAI, TongYi)
     AI_PROVIDER: str = "deepseek"
