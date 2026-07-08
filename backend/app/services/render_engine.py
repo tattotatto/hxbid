@@ -578,6 +578,33 @@ def _preprocess_content(content):
     return '\n'.join(cleaned)
 
 
+def _resolve_relative_path(image_path: str) -> Path | None:
+    """Resolve a stored image path to an absolute filesystem path.
+
+    Stored paths may or may not include the "uploads/" prefix depending on
+    when and how the image was uploaded. Tries multiple resolution strategies.
+
+    Returns the first existing path, or None if the file cannot be found.
+    """
+    p = Path(image_path)
+    if p.is_absolute():
+        return p if p.exists() else None
+
+    candidates = [
+        Path(settings.UPLOAD_DIR) / image_path,
+        Path.cwd() / image_path,
+    ]
+    # Also try stripping a leading "uploads/" prefix
+    s = str(image_path).replace("\\", "/")
+    if s.startswith("uploads/"):
+        candidates.append(Path(settings.UPLOAD_DIR) / s[len("uploads/"):])
+
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
 # ── Image insertion ───────────────────────────────────────────────────
 
 # A4 usable width after 3.17 cm margins on each side ≈ 14.66 cm ≈ 5.77 in
@@ -598,17 +625,9 @@ def _insert_image(doc, image_path, label, style, *, no_rotate=False, max_width=N
     if max_width is None:
         max_width = IMAGE_MAX_WIDTH
 
-    full_path = Path(image_path)
-    if not full_path.is_absolute():
-        # Image paths are stored relative to UPLOAD_DIR (e.g. "ocr/xxx.png")
-        # Resolve against UPLOAD_DIR first, fall back to cwd for backward compat
-        full_path = Path(settings.UPLOAD_DIR) / full_path
-        if not full_path.exists():
-            full_path = Path.cwd() / full_path
-
-    if not full_path.exists():
-        # Silently skip missing files — don't clutter the document
-        return
+    full_path = _resolve_relative_path(image_path)
+    if full_path is None:
+        return  # silently skip — file not found at any candidate path
 
     # ── Open with PIL to check orientation ──
     try:
@@ -714,12 +733,8 @@ def _add_company_footer(doc, style):
     _remove_cell_borders(left_cell)
 
     if logo_path:
-        logo_full = Path(logo_path)
-        if not logo_full.is_absolute():
-            logo_full = Path(settings.UPLOAD_DIR) / logo_full
-            if not logo_full.exists():
-                logo_full = Path.cwd() / logo_full
-        if logo_full.exists():
+        logo_full = _resolve_relative_path(logo_path)
+        if logo_full and logo_full.exists():
             try:
                 pil_logo = PILImage.open(str(logo_full))
                 if pil_logo.mode not in ("RGB", "L"):
@@ -833,10 +848,8 @@ def _add_attachments_section(doc, attachments, style):
             img_bufs = []
             img_labels = []
             for img_path, img_label in [(path, label), (next_path, next_label)]:
-                fp = Path(img_path)
-                if not fp.is_absolute():
-                    fp = Path.cwd() / fp
-                if not fp.exists():
+                fp = _resolve_relative_path(img_path)
+                if fp is None:
                     img_bufs.append(None)
                     img_labels.append(img_label)
                     continue
