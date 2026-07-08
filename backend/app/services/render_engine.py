@@ -603,17 +603,15 @@ def _insert_image(doc, image_path, label, style, *, no_rotate=False, max_width=N
         full_path = Path.cwd() / full_path
 
     if not full_path.exists():
-        # Log and skip missing files gracefully
-        p_missing = doc.add_paragraph(f'[图片缺失: {label} — {image_path}]')
-        _set_run_font(p_missing.add_run(''), style['body_font_name'], Pt(10))
+        # Silently skip missing files — don't clutter the document
         return
 
     # ── Open with PIL to check orientation ──
     try:
         pil_img = PILImage.open(str(full_path))
     except Exception:
-        p_bad = doc.add_paragraph(f'[无法读取图片: {label}]')
-        _set_run_font(p_bad.add_run(''), style['body_font_name'], Pt(10))
+        # Silently skip unreadable images
+        return
         return
 
     # Convert RGBA/CMYK/etc. to RGB for JPEG-in-docx compatibility
@@ -917,7 +915,7 @@ def _add_attachments_section(doc, attachments, style):
 
 # ── Public API ────────────────────────────────────────────────────────
 
-def render_bid_to_docx(chapters, project_name, style_config=None, attachments=None, chapter_images=None, company_name=""):
+def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images=None, company_name=""):
     """Render bid chapters into a formatted ``.docx`` file.
 
     Parameters
@@ -928,9 +926,6 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
         Used on the cover page and in the output filename.
     style_config : dict | None
         Optional overrides merged on top of ``DEFAULT_STYLE``.
-    attachments : list[dict] | None
-        Optional list of image attachments to append. Each dict:
-        ``{"path": str, "label": str}``.
     chapter_images : list[list[dict]] | None
         Optional per-chapter images to insert inline. Same length as chapters.
         Each inner list contains ``{"path": str, "label": str}`` dicts.
@@ -1206,11 +1201,6 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
                 img_label = img.get("label", "")
                 if img_path:
                     _insert_image(doc, img_path, img_label, style)
-
-    # ── Attachments (qualification certificates, business license, etc.) ──
-    if attachments:
-        _insert_page_break(doc)
-        _add_attachments_section(doc, attachments, style)
 
     # ── Company footer bar (logo + name | address | website) ──
     _add_company_footer(doc, style)

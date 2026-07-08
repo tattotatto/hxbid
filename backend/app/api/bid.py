@@ -540,31 +540,31 @@ async def export_bid(
         content = c.final_content or c.ai_generated_content
         chapters_payload.append({"title": c.title, "content": content})
 
-    # -- Collect uploaded images for attachment section --
-    attachments = []
+    # -- Collect images for inline injection into chapters --
     # chapter_images: list of lists, one entry per chapter in chapters_payload,
     # each inner list contains {"path": str, "label": str} for inline images.
     chapter_images: list = [[] for _ in chapters_payload]
 
-    # ── Company profile images → always in final attachments ──
+    # ── Company profile images → injected inline in 资格审查部分 ──
     cp_result = await db.execute(
         select(CompanyProfile).order_by(CompanyProfile.updated_at.desc()).limit(1)
     )
     cp = cp_result.scalar_one_or_none()
+    company_images = []
     if cp:
         if cp.business_license_image:
-            attachments.append({
+            company_images.append({
                 "path": cp.business_license_image,
                 "label": f"营业执照 — {cp.company_name or ''}",
             })
         if cp.legal_rep_id_front_image:
-            attachments.append({
+            company_images.append({
                 "path": cp.legal_rep_id_front_image,
                 "label": "法定代表人身份证（正面）",
                 "type": "id_card",
             })
         if cp.legal_rep_id_back_image:
-            attachments.append({
+            company_images.append({
                 "path": cp.legal_rep_id_back_image,
                 "label": "法定代表人身份证（反面）",
                 "type": "id_card",
@@ -632,22 +632,23 @@ async def export_bid(
         }
         personnel_cert_images.append(pci)
 
+    # ── Combine all images for the 资格审查部分 chapter ──
+    # Company images (business license, ID cards) first, then qualification cert images
+    all_qual_section_images = company_images + qual_images
+
     # ── Inject qualification text + images into the 资格审查部分 chapter ──
     QUAL_CHAPTER_KEYWORDS = ["资格审查", "资格", "资质审查", "公司资质", "资质与业绩"]
     PERSONNEL_KEYWORDS = ["人员", "配置", "团队", "组织", "人力", "管理架构", "岗位"]
 
-    qual_chapter_found = False
     for idx, ch in enumerate(chapters_payload):
         title = ch.get("title", "")
 
-        # Inject structured qualification text and images
-        if not qual_chapter_found and any(kw in title for kw in QUAL_CHAPTER_KEYWORDS):
+        # Inject structured qualification text and inline images
+        if any(kw in title for kw in QUAL_CHAPTER_KEYWORDS):
             if qual_text_block:
                 ch["content"] = (ch.get("content") or "") + qual_text_block
-            if qual_images:
-                chapter_images[idx].extend(qual_images)
-                # Qualification images go inline — do NOT duplicate in final attachments
-            qual_chapter_found = True
+            if all_qual_section_images:
+                chapter_images[idx].extend(all_qual_section_images)
 
         # Personnel cert images → personnel-related chapters
         for kw in PERSONNEL_KEYWORDS:
@@ -655,16 +656,11 @@ async def export_bid(
                 chapter_images[idx].extend(personnel_cert_images)
                 break
 
-    # ── If no qualification chapter was found (unusual), put qual images in attachments ──
-    if not qual_chapter_found and qual_images:
-        attachments.extend(qual_images)
-
-    # -- Render .docx --
+    # -- Render .docx (no separate attachments section) --
     docx_path = render_bid_to_docx(
         chapters_payload,
         project.name,
         style_config=style_config,
-        attachments=attachments if attachments else None,
         chapter_images=chapter_images if any(chapter_images) else None,
         company_name=cp.company_name if cp else "",
     )
