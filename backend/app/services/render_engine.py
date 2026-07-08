@@ -407,16 +407,19 @@ def _process_italic(text):
 
 
 def _clean_lone_symbols(text):
-    """Remove orphaned markdown symbols from a line of text.
-
-    Handles: stray * # _ at line boundaries, multiple consecutive symbols.
-    """
-    # Remove leading/trailing stray asterisks that aren't part of ** pairs
+    """Remove all markdown formatting symbols from a line of text."""
+    # **bold** → bold (keep text, remove markers)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    # *italic* → italic
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text)
+    # Remove stray single * not part of any pair
     text = re.sub(r'(?<!\*)\*(?!\*)', '', text)
-    # Remove stray # at start of lines that aren't real headings
-    text = re.sub(r'^\#{1,2}(?![#\s])', '', text)
+    # Remove heading markers at line start (##, ###, etc.)
+    text = re.sub(r'^#{1,3}\s+', '', text)
     # Remove trailing # marks
     text = re.sub(r'\s*#+\s*$', '', text)
+    # Remove stray underscore emphasis
+    text = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', r'\1', text)
     # Collapse multiple spaces
     text = re.sub(r' {2,}', ' ', text)
     return text.strip()
