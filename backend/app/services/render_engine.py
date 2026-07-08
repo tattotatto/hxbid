@@ -600,7 +600,11 @@ def _insert_image(doc, image_path, label, style, *, no_rotate=False, max_width=N
 
     full_path = Path(image_path)
     if not full_path.is_absolute():
-        full_path = Path.cwd() / full_path
+        # Image paths are stored relative to UPLOAD_DIR (e.g. "ocr/xxx.png")
+        # Resolve against UPLOAD_DIR first, fall back to cwd for backward compat
+        full_path = Path(settings.UPLOAD_DIR) / full_path
+        if not full_path.exists():
+            full_path = Path.cwd() / full_path
 
     if not full_path.exists():
         # Silently skip missing files — don't clutter the document
@@ -712,7 +716,9 @@ def _add_company_footer(doc, style):
     if logo_path:
         logo_full = Path(logo_path)
         if not logo_full.is_absolute():
-            logo_full = Path.cwd() / logo_full
+            logo_full = Path(settings.UPLOAD_DIR) / logo_full
+            if not logo_full.exists():
+                logo_full = Path.cwd() / logo_full
         if logo_full.exists():
             try:
                 pil_logo = PILImage.open(str(logo_full))
