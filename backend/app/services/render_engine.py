@@ -651,7 +651,7 @@ def _render_id_card_pair(doc, front_path, front_label, back_path, back_label, st
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p_img.add_run()
         run.add_picture(buf, width=half_width)
-        p2 = cell.add_paragraph(label)
+        p2 = cell.add_paragraph()
         p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r2 = p2.add_run(label)
         _set_run_font(r2, style["body_font_name"], Pt(10))
@@ -1027,10 +1027,65 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     h_run = hp.add_run(style["header_text"])
     _set_run_font(h_run, style["heading1_font_name"], Pt(9))
 
-    # ── Footer (centred page number via PAGE field) ──
+    # ── Footer: company info line + page number ──
     footer = section.footer
     footer.is_linked_to_previous = False
-    fp = footer.paragraphs[0]
+
+    # Load company profile for footer
+    footer_company = ""
+    footer_address = ""
+    try:
+        from app.models.company_profile import CompanyProfile
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import Session
+        sync_url = settings.DATABASE_URL_SYNC
+        engine = create_engine(sync_url)
+        with Session(engine) as session:
+            result = session.execute(select(CompanyProfile).limit(1))
+            profile = result.scalar_one_or_none()
+            if profile:
+                footer_company = profile.company_name or ""
+                footer_address = profile.address or ""
+    except Exception:
+        pass
+
+    # Company info line (name left, address right) — borderless 2-col table
+    if footer_company or footer_address:
+        ft = footer.add_table(rows=1, cols=2, width=Cm(16))
+        ft.autofit = True
+        # Remove table borders
+        tbl = ft._tbl
+        tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement("w:tblPr")
+        tblBorders = OxmlElement("w:tblBorders")
+        for border_name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            border_el = OxmlElement(f"w:{border_name}")
+            border_el.set(qn("w:val"), "nil")
+            tblBorders.append(border_el)
+        tblPr.append(tblBorders)
+        # Remove cell borders
+        for cell in (ft.cell(0, 0), ft.cell(0, 1)):
+            tc = cell._tc
+            tcPr = tc.get_or_add_tcPr()
+            tcBorders = OxmlElement("w:tcBorders")
+            for bn in ("top", "left", "bottom", "right"):
+                be = OxmlElement(f"w:{bn}")
+                be.set(qn("w:val"), "nil")
+                tcBorders.append(be)
+            tcPr.append(tcBorders)
+        # Left: company name
+        lp = ft.cell(0, 0).paragraphs[0]
+        lp.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        lr = lp.add_run(footer_company)
+        _set_run_font(lr, style["body_font_name"], Pt(9))
+        # Right: address
+        rp = ft.cell(0, 1).paragraphs[0]
+        rp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        if footer_address:
+            rr = rp.add_run(f"地址：{footer_address}")
+            _set_run_font(rr, style["body_font_name"], Pt(9))
+
+    # Page number below company info
+    fp = footer.add_paragraph()
     _add_page_number(fp)
 
     # ── Cover page ──
@@ -1287,8 +1342,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
                 if img_path:
                     _insert_image(doc, img_path, img_label, style)
 
-    # ── Company footer bar (logo + name | address | website) ──
-    _add_company_footer(doc, style)
+    # Company info is now rendered in the page footer on every page
 
     # ── Save to OUTPUT_DIR ──
     output_dir = Path(settings.OUTPUT_DIR)
