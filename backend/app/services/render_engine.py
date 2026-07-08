@@ -712,7 +712,7 @@ def _insert_image(doc, image_path, label, style, *, no_rotate=False, max_width=N
     run_img.add_picture(buf, width=Inches(min(width_inches, 5.5)))
 
     # ── Label below image ──
-    p_label = doc.add_paragraph(label)
+    p_label = doc.add_paragraph()
     p_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run_label = p_label.add_run(label)
     _set_run_font(run_label, style['body_font_name'], Pt(10))
