@@ -515,6 +515,8 @@ async def export_bid(
             style_config["heading1_font_size"] = Pt(style_config.pop("heading1_font_size_pt"))
         if "heading2_font_size_pt" in style_config:
             style_config["heading2_font_size"] = Pt(style_config.pop("heading2_font_size_pt"))
+        if "heading3_font_size_pt" in style_config:
+            style_config["heading3_font_size"] = Pt(style_config.pop("heading3_font_size_pt"))
         if "margin_top_cm" in style_config:
             style_config["margin_top"] = Cm(style_config.pop("margin_top_cm"))
         if "margin_bottom_cm" in style_config:

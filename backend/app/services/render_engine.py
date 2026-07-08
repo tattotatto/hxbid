@@ -34,10 +34,12 @@ DEFAULT_STYLE = {
     "body_font_name": "宋体",          # 宋体
     "body_font_size": Pt(12),                   # 小四
     "body_line_spacing": 1.5,
-    "heading1_font_name": "黑体",       # 黑体
-    "heading1_font_size": Pt(16),               # 三号
-    "heading2_font_name": "黑体",       # 黑体
-    "heading2_font_size": Pt(14),               # 四号
+    "heading1_font_name": "黑体",       # 黑体 三号
+    "heading1_font_size": Pt(16),
+    "heading2_font_name": "黑体",       # 黑体 四号
+    "heading2_font_size": Pt(14),
+    "heading3_font_name": "楷体",       # 楷体 小四号加粗
+    "heading3_font_size": Pt(12),
     "margin_top": Cm(2.54),
     "margin_bottom": Cm(2.54),
     "margin_left": Cm(3.17),
@@ -209,8 +211,8 @@ def _add_toc_page(doc, chapters, style):
         )
 
     # ── Insert Word TOC field ──
-    # This creates the standard { TOC \o "1-2" \h \z } field that
-    # populates from Heading 1 and Heading 2 styles.
+    # This creates the standard { TOC \o "1-3" \h \z } field that
+    # populates from Heading 1, 2, and 3 styles.
     p_toc = doc.add_paragraph()
     p_toc.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
@@ -220,11 +222,11 @@ def _add_toc_page(doc, chapters, style):
     fld_begin.set(qn("w:fldCharType"), "begin")
     r_begin._element.append(fld_begin)
 
-    # instrText: TOC field code — collect Heading 1 and 2 entries
+    # instrText: TOC field code — collect Heading 1-3 entries
     r_instr = p_toc.add_run()
     instr = OxmlElement("w:instrText")
     instr.set(qn("xml:space"), "preserve")
-    instr.text = ' TOC \\o "1-2" \\h \\z '
+    instr.text = ' TOC \\o "1-3" \\h \\z '
     r_instr._element.append(instr)
 
     # fldChar separate
@@ -295,13 +297,13 @@ def _parse_table_cells(line):
 
 
 def _is_markdown_heading(line):
-    """Check if line is a markdown heading (# Title or ## Subtitle)."""
-    return bool(re.match(r'^#{1,2}\s+\S', line))
+    """Check if line is a markdown heading (# / ## / ### )."""
+    return bool(re.match(r'^#{1,3}\s+\S', line))
 
 
 def _get_heading_level_and_text(line):
-    """Extract heading level (1 or 2) and text from a markdown heading line."""
-    m = re.match(r'^(#{1,2})\s+(.+)$', line)
+    """Extract heading level (1-3) and text from a markdown heading line."""
+    m = re.match(r'^(#{1,3})\s+(.+)$', line)
     if m:
         level = len(m.group(1))
         text = m.group(2).strip()
@@ -1107,7 +1109,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
                 sc_table_keys = []
                 in_sc_table = False
 
-            # --- Markdown heading ---
+            # --- Markdown heading (levels 1-3) ---
             if _is_markdown_heading(stripped):
                 level, heading_text = _get_heading_level_and_text(stripped)
                 heading_text = _clean_lone_symbols(heading_text)
@@ -1121,13 +1123,22 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
                                 style["heading1_font_size"],
                                 bold=True,
                             )
-                    else:
+                    elif level == 2:
                         h_para = doc.add_heading(heading_text, level=2)
                         for run in h_para.runs:
                             _set_run_font(
                                 run,
                                 style["heading2_font_name"],
                                 style["heading2_font_size"],
+                                bold=True,
+                            )
+                    else:
+                        h_para = doc.add_heading(heading_text, level=3)
+                        for run in h_para.runs:
+                            _set_run_font(
+                                run,
+                                style["heading3_font_name"],
+                                style["heading3_font_size"],
                                 bold=True,
                             )
                 idx += 1
