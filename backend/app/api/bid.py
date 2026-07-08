@@ -598,6 +598,25 @@ async def export_bid(
                 "label": f"{q.name} — {q.cert_number or ''}",
             })
 
+    # ── Build structured company info text block ──
+    company_text_block = ""
+    if cp:
+        cp_parts = []
+        if cp.company_name:
+            cp_parts.append(f"公司名称：{cp.company_name}")
+        if cp.business_license_number:
+            cp_parts.append(f"统一社会信用代码：{cp.business_license_number}")
+        if cp.legal_rep_name:
+            cp_parts.append(f"法定代表人：{cp.legal_rep_name}")
+        if cp.address:
+            cp_parts.append(f"公司地址：{cp.address}")
+        if cp.contact_phone:
+            cp_parts.append(f"联系电话：{cp.contact_phone}")
+        if cp.website:
+            cp_parts.append(f"公司网站：{cp.website}")
+        if cp_parts:
+            company_text_block = "\n\n投标人基本情况表\n\n" + "\n".join(cp_parts) + "\n"
+
     # ── Build structured qualification text block ──
     qual_text_block = ""
     if qual_text_items:
@@ -643,10 +662,11 @@ async def export_bid(
     for idx, ch in enumerate(chapters_payload):
         title = ch.get("title", "")
 
-        # Inject structured qualification text and inline images
+        # Inject structured company info, qualification text and inline images
         if any(kw in title for kw in QUAL_CHAPTER_KEYWORDS):
-            if qual_text_block:
-                ch["content"] = (ch.get("content") or "") + qual_text_block
+            if company_text_block or qual_text_block:
+                injected = (company_text_block or "") + (qual_text_block or "")
+                ch["content"] = (ch.get("content") or "") + injected
             if all_qual_section_images:
                 chapter_images[idx].extend(all_qual_section_images)
 
