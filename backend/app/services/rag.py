@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.personnel import Personnel
 from app.models.qualification import Qualification
+from app.models.company_profile import CompanyProfile
 from app.services.vector_store import vector_store
 
 logger = logging.getLogger(__name__)
@@ -337,9 +338,9 @@ async def assemble_chapter_context(
 ) -> Tuple[List[Dict], List[Dict], List[Dict], Dict[str, Any]]:
     """Master RAG function — retrieve all context for one chapter.
 
-    Combines vector search, qualification matching, and personnel matching
-    into a single call. Returns the matched data plus a source summary
-    for the frontend.
+    Combines vector search, qualification matching, personnel matching,
+    and company profile into a single call. Returns the matched data plus
+    a source summary for the frontend.
 
     Args:
         chapter_title: Current chapter title.
@@ -354,12 +355,14 @@ async def assemble_chapter_context(
             "similar_count": int,
             "qual_count": int,
             "personnel_count": int,
+            "has_company": bool,
             "similar_titles": [str, ...],
         }
     """
     similar_chapters: List[Dict] = []
     matched_quals: List[Dict] = []
     matched_personnel: List[Dict] = []
+    company: dict | None = None
 
     # 1. Vector search for similar chapters
     try:
@@ -383,14 +386,34 @@ async def assemble_chapter_context(
     except Exception as exc:
         logger.warning("RAG personnel matching failed: %s", exc)
 
-    # 4. Build source summary for the frontend
+    # 4. Company profile
+    try:
+        cp_result = await db.execute(select(CompanyProfile).limit(1))
+        cp = cp_result.scalar_one_or_none()
+        if cp:
+            company = {
+                "company_name": cp.company_name or "",
+                "business_license_number": cp.business_license_number or "",
+                "legal_rep_name": cp.legal_rep_name or "",
+                "legal_rep_id_number": cp.legal_rep_id_number or "",
+                "address": cp.address or "",
+                "contact_phone": cp.contact_phone or "",
+                "website": cp.website or "",
+                "notes": cp.notes or "",
+            }
+    except Exception as exc:
+        logger.warning("RAG company profile fetch failed: %s", exc)
+
+    # 5. Build source summary for the frontend
     source_summary = {
         "similar_count": len(similar_chapters),
         "qual_count": len(matched_quals),
         "personnel_count": len(matched_personnel),
+        "has_company": company is not None,
         "similar_titles": [
             ch.get("title", "") for ch in similar_chapters[:5]
         ],
+        "company": company,
     }
 
     # 5. Smart truncation — keep total similar content under MAX chars

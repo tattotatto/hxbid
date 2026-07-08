@@ -290,7 +290,7 @@ async def get_collected_resources(
     project_id: str,
     db: AsyncSession,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Return collected qualifications and personnel for a project.
+    """Return collected qualifications, personnel, and company profile for a project.
 
     Used by the generation step to inject collected resources directly
     instead of running keyword-based RAG matching.
@@ -308,6 +308,7 @@ async def get_collected_resources(
             "name": q.name if q else pq.requirement_name,
             "cert_number": q.cert_number if q else "",
             "issuing_authority": q.issuing_authority if q else "",
+            "attachment_path": q.attachment_path if q else "",
             "source": "collected",
         })
 
@@ -329,4 +330,20 @@ async def get_collected_resources(
             "source": "collected",
         })
 
-    return {"qualifications": quals, "personnel": personnel}
+    # Company profile
+    cp_result = await db.execute(select(CompanyProfile).limit(1))
+    cp = cp_result.scalar_one_or_none()
+    company = None
+    if cp:
+        company = {
+            "company_name": cp.company_name or "",
+            "business_license_number": cp.business_license_number or "",
+            "legal_rep_name": cp.legal_rep_name or "",
+            "legal_rep_id_number": cp.legal_rep_id_number or "",
+            "address": cp.address or "",
+            "contact_phone": cp.contact_phone or "",
+            "website": cp.website or "",
+            "notes": cp.notes or "",
+        }
+
+    return {"qualifications": quals, "personnel": personnel, "company": company}

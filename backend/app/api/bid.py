@@ -282,6 +282,7 @@ async def generate_bid(
                     similar_chapters = []
                     matched_qualifications = []
                     matched_personnel = []
+                    company_profile = None
                     source_summary = {}
 
                     try:
@@ -300,10 +301,12 @@ async def generate_bid(
                                 similar_chapters = []
                             matched_qualifications = collected["qualifications"]
                             matched_personnel = collected["personnel"]
+                            company_profile = collected.get("company")
                             source_summary = {
                                 "similar_count": len(similar_chapters),
                                 "qual_count": len(matched_qualifications),
                                 "personnel_count": len(matched_personnel),
+                                "has_company": company_profile is not None,
                                 "similar_titles": [s.get("title", "") for s in similar_chapters[:5]],
                             }
                         else:
@@ -315,16 +318,17 @@ async def generate_bid(
                                     project_id=project_id,
                                     db=gen_db,
                                 )
+                            company_profile = source_summary.pop("company", None)
                     except Exception:
                         source_summary = {"similar_count": 0, "qual_count": 0, "personnel_count": 0}
 
-                    # Emit RAG source info to frontend
+                    # Emit RAG source info to frontend (company PII stripped)
                     yield {
                         "event": "rag_sources",
                         "data": json.dumps(
                             {
                                 "chapter_id": ch["id"],
-                                **source_summary,
+                                **{k: v for k, v in source_summary.items() if k != "company"},
                             },
                             ensure_ascii=False,
                         ),
@@ -337,6 +341,7 @@ async def generate_bid(
                             matched_qualifications=matched_qualifications,
                             matched_personnel=matched_personnel,
                             similar_chapters=[s["content"] for s in similar_chapters],
+                            company_profile=company_profile,
                         ):
                             full_content += chunk
                             yield {
@@ -535,8 +540,11 @@ async def export_bid(
 
     # -- Collect uploaded images for attachment section --
     attachments = []
+    # chapter_images: list of lists, one entry per chapter in chapters_payload,
+    # each inner list contains {"path": str, "label": str} for inline images.
+    chapter_images: list = [[] for _ in chapters_payload]
 
-    # Company profile images
+    # ── Company profile images → always in final attachments ──
     cp_result = await db.execute(
         select(CompanyProfile).order_by(CompanyProfile.updated_at.desc()).limit(1)
     )
@@ -560,17 +568,94 @@ async def export_bid(
                 "type": "id_card",
             })
 
-    # Qualification certificate images
-    qual_result = await db.execute(
-        select(Qualification).where(Qualification.attachment_path.isnot(None))
-        .where(Qualification.attachment_path != "")
-        .order_by(Qualification.updated_at.desc())
+    # ── ALL qualifications (with or without images) for structured text injection ──
+    # Previously only fetched quals with attachment_path, which meant
+    # qualifications without images were completely missing from the document.
+    all_quals_result = await db.execute(
+        select(Qualification).order_by(Qualification.updated_at.desc())
     )
-    for q in qual_result.scalars():
-        attachments.append({
-            "path": q.attachment_path,
-            "label": f"{q.name} — {q.cert_number or ''}",
-        })
+    all_quals = all_quals_result.scalars().all()
+
+    qual_images = []       # qualifications that have scannable images
+    qual_text_items = []   # all qualifications → structured text
+
+    for q in all_quals:
+        item = {
+            "name": q.name,
+            "cert_number": q.cert_number or "",
+            "issuing_authority": q.issuing_authority or "",
+            "issue_date": str(q.issue_date) if q.issue_date else "",
+            "expiry_date": str(q.expiry_date) if q.expiry_date else "",
+            "has_image": bool(q.attachment_path and q.attachment_path.strip()),
+        }
+        qual_text_items.append(item)
+
+        if item["has_image"]:
+            qual_images.append({
+                "path": q.attachment_path,
+                "label": f"{q.name} — {q.cert_number or ''}",
+            })
+
+    # ── Build structured qualification text block ──
+    qual_text_block = ""
+    if qual_text_items:
+        qual_text_block = "\n\n资质证书清单\n\n"
+        for i, q in enumerate(qual_text_items, 1):
+            qual_text_block += f"{i}. {q['name']}"
+            if q['cert_number']:
+                qual_text_block += f"（编号：{q['cert_number']}）"
+            qual_text_block += "\n"
+            if q['issuing_authority']:
+                qual_text_block += f"   发证机关：{q['issuing_authority']}\n"
+            if q['issue_date']:
+                qual_text_block += f"   颁发日期：{q['issue_date']}\n"
+            if q['expiry_date']:
+                qual_text_block += f"   有效期至：{q['expiry_date']}\n"
+            if q['has_image']:
+                qual_text_block += "   （证书扫描件见下方附图）\n"
+            qual_text_block += "\n"
+
+    # ── Personnel certificate images ──
+    from app.models.personnel import PersonnelCertificate
+    pc_result = await db.execute(
+        select(PersonnelCertificate).where(PersonnelCertificate.attachment_path.isnot(None))
+        .where(PersonnelCertificate.attachment_path != "")
+        .order_by(PersonnelCertificate.expiry_date.desc())
+    )
+    personnel_cert_images = []
+    for pc in pc_result.scalars():
+        pci = {
+            "path": pc.attachment_path,
+            "label": f"{pc.cert_name} — {pc.cert_number or ''}",
+        }
+        personnel_cert_images.append(pci)
+
+    # ── Inject qualification text + images into the 资格审查部分 chapter ──
+    QUAL_CHAPTER_KEYWORDS = ["资格审查", "资格", "资质审查", "公司资质", "资质与业绩"]
+    PERSONNEL_KEYWORDS = ["人员", "配置", "团队", "组织", "人力", "管理架构", "岗位"]
+
+    qual_chapter_found = False
+    for idx, ch in enumerate(chapters_payload):
+        title = ch.get("title", "")
+
+        # Inject structured qualification text and images
+        if not qual_chapter_found and any(kw in title for kw in QUAL_CHAPTER_KEYWORDS):
+            if qual_text_block:
+                ch["content"] = (ch.get("content") or "") + qual_text_block
+            if qual_images:
+                chapter_images[idx].extend(qual_images)
+                # Qualification images go inline — do NOT duplicate in final attachments
+            qual_chapter_found = True
+
+        # Personnel cert images → personnel-related chapters
+        for kw in PERSONNEL_KEYWORDS:
+            if kw in title:
+                chapter_images[idx].extend(personnel_cert_images)
+                break
+
+    # ── If no qualification chapter was found (unusual), put qual images in attachments ──
+    if not qual_chapter_found and qual_images:
+        attachments.extend(qual_images)
 
     # -- Render .docx --
     docx_path = render_bid_to_docx(
@@ -578,6 +663,8 @@ async def export_bid(
         project.name,
         style_config=style_config,
         attachments=attachments if attachments else None,
+        chapter_images=chapter_images if any(chapter_images) else None,
+        company_name=cp.company_name if cp else "",
     )
     docx_filename = Path(docx_path).name
 
