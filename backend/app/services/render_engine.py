@@ -247,13 +247,6 @@ def _add_toc_page(doc, chapters, style):
     fld_end.set(qn("w:fldCharType"), "end")
     r_end._element.append(fld_end)
 
-    # Also add a manual TOC listing for readers who don't update fields
-    doc.add_paragraph()
-    for ch in chapters:
-        p_entry = doc.add_paragraph()
-        run = p_entry.add_run(ch["title"])
-        _set_run_font(run, style["body_font_name"], Pt(12))
-
 
 def _safe_filename(name):
     """Turn *name* into a filesystem-safe slug (no path separators, etc.)."""
