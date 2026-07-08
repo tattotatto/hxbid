@@ -42,7 +42,7 @@ DEFAULT_STYLE = {
     "margin_bottom": Cm(2.54),
     "margin_left": Cm(3.17),
     "margin_right": Cm(3.17),
-    "header_text": "云南宏曦科技有限公司",
+    "header_text": "",
 }
 
 # Black colour constant — all text MUST be black in Chinese bid documents
@@ -131,7 +131,7 @@ def _add_page_number(paragraph):
     run_end._element.append(fld_end)
 
 
-def _add_cover_page(doc, project_name, style):
+def _add_cover_page(doc, project_name, style, company_name=""):
     """Append a regulated Chinese bid cover page to *doc*."""
     # ── Leading vertical space ──
     for _ in range(6):
@@ -159,7 +159,7 @@ def _add_cover_page(doc, project_name, style):
     # ── Company name (16 pt 黑体 bold, centred) ──
     p_company = doc.add_paragraph()
     p_company.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_company = p_company.add_run("云南宏曦科技有限公司")
+    r_company = p_company.add_run(company_name or "投标人名称")
     _set_run_font(r_company, style["heading1_font_name"], Pt(16), bold=True)
 
     doc.add_paragraph()
@@ -425,6 +425,76 @@ def _clean_lone_symbols(text):
     # Collapse multiple spaces
     text = re.sub(r' {2,}', ' ', text)
     return text.strip()
+
+
+# ── Semicolon key:value table detection ─────────────────────────────────
+
+def _is_semicolon_table_title(line):
+    """Check if line is a table title like 表1：xxx or 表X：xxx"""
+    stripped = line.strip()
+    return bool(re.match(r'^表[一二三四五六七八九十\d]+[：:]\s*\S', stripped))
+
+
+def _is_semicolon_table_row(line):
+    """Check if line is a semicolon-delimited key:value row.
+
+    Example: 姓名：张三；年龄：36岁；学历：本科；证书：消防员证
+    Must have at least 3 semicolons and at least 3 key:value pairs.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # Must contain semicolons with Chinese colon key:value patterns
+    # Count "字段：值" pairs separated by semicolons
+    parts = stripped.split('；')
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) < 3:
+        return False
+    # Each part should contain a Chinese colon separating key:value
+    kv_count = sum(1 for p in parts if '：' in p or ':' in p)
+    return kv_count >= 3
+
+
+def _parse_semicolon_table_row(line):
+    """Parse a semicolon key:value row into a list of values.
+
+    Example: 姓名：张三；年龄：36岁 → ['张三', '36岁']
+    Returns list of cell values (without keys).
+    """
+    stripped = line.strip()
+    parts = stripped.split('；')
+    parts = [p.strip() for p in parts if p.strip()]
+    values = []
+    for part in parts:
+        # Split on Chinese colon, take the value part
+        if '：' in part:
+            _, val = part.split('：', 1)
+        elif ':' in part:
+            _, val = part.split(':', 1)
+        else:
+            val = part
+        values.append(val.strip())
+    return values
+
+
+def _extract_semicolon_keys(line):
+    """Extract column header keys from a semicolon key:value row.
+
+    Example: 姓名：张三；年龄：36岁 → ['姓名', '年龄']
+    """
+    stripped = line.strip()
+    parts = stripped.split('；')
+    parts = [p.strip() for p in parts if p.strip()]
+    keys = []
+    for part in parts:
+        if '：' in part:
+            key, _ = part.split('：', 1)
+        elif ':' in part:
+            key, _ = part.split(':', 1)
+        else:
+            key = ''
+        keys.append(key.strip())
+    return keys
 
 
 # ── Table rendering ───────────────────────────────────────────────────
@@ -731,7 +801,7 @@ def _add_attachments_section(doc, attachments, style):
         return
 
     # ── Section heading ──
-    h = doc.add_heading("附件：资质证书及相关文件", level=1)
+    h = doc.add_heading("附件：证照及相关文件", level=1)
     for run in h.runs:
         _set_run_font(
             run,
@@ -852,7 +922,7 @@ def _add_attachments_section(doc, attachments, style):
 
 # ── Public API ────────────────────────────────────────────────────────
 
-def render_bid_to_docx(chapters, project_name, style_config=None, attachments=None):
+def render_bid_to_docx(chapters, project_name, style_config=None, attachments=None, chapter_images=None, company_name=""):
     """Render bid chapters into a formatted ``.docx`` file.
 
     Parameters
@@ -866,6 +936,11 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
     attachments : list[dict] | None
         Optional list of image attachments to append. Each dict:
         ``{"path": str, "label": str}``.
+    chapter_images : list[list[dict]] | None
+        Optional per-chapter images to insert inline. Same length as chapters.
+        Each inner list contains ``{"path": str, "label": str}`` dicts.
+    company_name : str
+        Company name for cover page and header. Pulled from CompanyProfile.
 
     Returns
     -------
@@ -875,6 +950,10 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
     style = dict(DEFAULT_STYLE)
     if style_config:
         style.update(style_config)
+    # Use company name as header_text default if not explicitly configured
+    # Also strip any legacy hardcoded default that may still exist in old templates
+    if not style.get("header_text") or style.get("header_text") == "云南宏曦科技有限公司":
+        style["header_text"] = company_name
 
     doc = Document()
 
@@ -900,7 +979,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
     _add_page_number(fp)
 
     # ── Cover page ──
-    _add_cover_page(doc, project_name, style)
+    _add_cover_page(doc, project_name, style, company_name)
 
     # ── Table of Contents ──
     _add_toc_page(doc, chapters, style)
@@ -930,8 +1009,13 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
 
         # Parse content line-by-line, accumulating table rows
         lines = content.split('\n')
-        table_rows = []       # accumulates rows for the current table
-        table_header = True   # first row of a table block is header
+        table_rows = []       # accumulates rows for pipe tables
+        table_header = True   # first row of a pipe table block is header
+
+        # Semicolon key:value table state
+        sc_table_rows = []    # accumulates rows for semicolon tables
+        sc_table_keys = []    # keys extracted from the first row
+        in_sc_table = False   # currently inside a semicolon table block
 
         idx = 0
         while idx < len(lines):
@@ -940,14 +1024,64 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
 
             # --- Empty line ---
             if not stripped:
-                # Flush any pending table
+                # Flush any pending pipe table
                 if table_rows:
                     _render_table(doc, table_rows, style)
                     table_rows = []
                     table_header = True
+                # Flush any pending semicolon table
+                if sc_table_rows:
+                    _render_table(doc, sc_table_rows, style)
+                    sc_table_rows = []
+                    sc_table_keys = []
+                    in_sc_table = False
                 doc.add_paragraph()
                 idx += 1
                 continue
+
+            # --- Semicolon table title (render as centred bold body text) ---
+            if _is_semicolon_table_title(stripped):
+                # Flush any pending tables first
+                if table_rows:
+                    _render_table(doc, table_rows, style)
+                    table_rows = []
+                    table_header = True
+                if sc_table_rows:
+                    _render_table(doc, sc_table_rows, style)
+                    sc_table_rows = []
+                    sc_table_keys = []
+                    in_sc_table = False
+                # Render table title as body paragraph (centred, bold)
+                p_title = doc.add_paragraph()
+                _set_paragraph_spacing(p_title, style["body_line_spacing"])
+                p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run_title = p_title.add_run(stripped)
+                _set_run_font(run_title, style["body_font_name"], style["body_font_size"], bold=True)
+                in_sc_table = True
+                sc_table_rows = []
+                sc_table_keys = []
+                idx += 1
+                continue
+
+            # --- Semicolon table row (when inside a semicolon table block) ---
+            if in_sc_table and _is_semicolon_table_row(stripped):
+                vals = _parse_semicolon_table_row(stripped)
+                if not sc_table_keys:
+                    # First row: extract keys as header
+                    sc_table_keys = _extract_semicolon_keys(stripped)
+                    sc_table_rows.append(sc_table_keys)
+                sc_table_rows.append(vals)
+                idx += 1
+                continue
+
+            # --- Not in semicolon table anymore if we reach here ---
+            if in_sc_table and not _is_semicolon_table_row(stripped):
+                # End of semicolon table block
+                if sc_table_rows:
+                    _render_table(doc, sc_table_rows, style)
+                sc_table_rows = []
+                sc_table_keys = []
+                in_sc_table = False
 
             # --- Table row (accumulate, don't render yet) ---
             if _is_table_row(stripped):
@@ -967,6 +1101,11 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
                 _render_table(doc, table_rows, style)
                 table_rows = []
                 table_header = True
+            if sc_table_rows:
+                _render_table(doc, sc_table_rows, style)
+                sc_table_rows = []
+                sc_table_keys = []
+                in_sc_table = False
 
             # --- Markdown heading ---
             if _is_markdown_heading(stripped):
@@ -1040,15 +1179,29 @@ def render_bid_to_docx(chapters, project_name, style_config=None, attachments=No
                 _add_body_paragraph(doc, cleaned, style)
             idx += 1
 
-        # --- End of chapter: flush any remaining table ---
+        # --- End of chapter: flush any remaining tables ---
         if table_rows:
             _render_table(doc, table_rows, style)
+        if sc_table_rows:
+            _render_table(doc, sc_table_rows, style)
             table_rows = []
             table_header = True
 
         # Note: page breaks are now inserted BEFORE each new chapter
         # (see _insert_page_break() at the top of the loop), which
         # guarantees each chapter starts on its own page.
+
+        # ── Insert chapter-specific images (qualifications, certificates) ──
+        if chapter_images and i < len(chapter_images) and chapter_images[i]:
+            # Add a small gap before images
+            spacer = doc.add_paragraph()
+            spacer.paragraph_format.space_before = Pt(6)
+            spacer.paragraph_format.space_after = Pt(6)
+            for img in chapter_images[i]:
+                img_path = img.get("path", "")
+                img_label = img.get("label", "")
+                if img_path:
+                    _insert_image(doc, img_path, img_label, style)
 
     # ── Attachments (qualification certificates, business license, etc.) ──
     if attachments:
