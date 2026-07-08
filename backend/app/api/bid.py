@@ -598,8 +598,9 @@ async def export_bid(
                 "label": f"{q.name} — {q.cert_number or ''}",
             })
 
-    # ── Build structured company info text block ──
+    # ── Build structured company info text block with inline images ──
     company_text_block = ""
+    embedded_images = set()  # track (path, label) of images already embedded inline
     if cp:
         cp_parts = []
         if cp.company_name:
@@ -617,7 +618,26 @@ async def export_bid(
         if cp_parts:
             company_text_block = "\n\n投标人基本情况表\n\n" + "\n".join(cp_parts) + "\n"
 
-    # ── Build structured qualification text block ──
+        # Business license image — inline right after company info
+        if cp.business_license_image and cp.business_license_image.strip():
+            company_text_block += f"\n[IMG:{cp.business_license_image}|营业执照 — {cp.company_name or ''}]\n"
+            embedded_images.add(cp.business_license_image)
+
+        # ID card images — side-by-side pair
+        front = cp.legal_rep_id_front_image or ""
+        back = cp.legal_rep_id_back_image or ""
+        if front.strip() and back.strip():
+            company_text_block += f"\n[IDPAIR:{front}|法定代表人身份证（正面）|{back}|法定代表人身份证（反面）]\n"
+            embedded_images.add(front)
+            embedded_images.add(back)
+        elif front.strip():
+            company_text_block += f"\n[IMG:{front}|法定代表人身份证（正面）]\n"
+            embedded_images.add(front)
+        elif back.strip():
+            company_text_block += f"\n[IMG:{back}|法定代表人身份证（反面）]\n"
+            embedded_images.add(back)
+
+    # ── Build structured qualification text block with inline images ──
     qual_text_block = ""
     if qual_text_items:
         qual_text_block = "\n\n资质证书清单\n\n"
@@ -633,7 +653,12 @@ async def export_bid(
             if q['expiry_date']:
                 qual_text_block += f"   有效期至：{q['expiry_date']}\n"
             if q['has_image']:
-                qual_text_block += "   （证书扫描件见下方附图）\n"
+                # Find the matching qual_image entry
+                for qi in qual_images:
+                    if qi['label'].startswith(q['name']):
+                        qual_text_block += f"\n[IMG:{qi['path']}|{qi['label']}]\n"
+                        embedded_images.add(qi['path'])
+                        break
             qual_text_block += "\n"
 
     # ── Personnel certificate images ──
@@ -651,11 +676,12 @@ async def export_bid(
         }
         personnel_cert_images.append(pci)
 
-    # ── Combine all images for the 资格审查部分 chapter ──
-    # Company images (business license, ID cards) first, then qualification cert images
-    all_qual_section_images = company_images + qual_images
+    # ── Only add images to chapter_images that weren't already embedded inline ──
+    remaining_images = [img for img in (company_images + qual_images)
+                        if img['path'] not in embedded_images]
+    all_qual_section_images = remaining_images
 
-    # ── Inject qualification text + images into the 资格审查部分 chapter ──
+    # ── Inject company info + qualification text into the 资格审查部分 chapter ──
     QUAL_CHAPTER_KEYWORDS = ["资格审查", "资格", "资质审查", "公司资质", "资质与业绩"]
     PERSONNEL_KEYWORDS = ["人员", "配置", "团队", "组织", "人力", "管理架构", "岗位"]
 

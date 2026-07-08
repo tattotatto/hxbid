@@ -612,6 +612,52 @@ IMAGE_MAX_WIDTH = Cm(14)
 IMAGE_MAX_HEIGHT = Cm(20)
 
 
+def _render_id_card_pair(doc, front_path, front_label, back_path, back_label, style):
+    """Render front and back of an ID card side-by-side in a 2-column table."""
+    half_width = Cm(6.8)
+    fp_front = _resolve_relative_path(front_path)
+    fp_back = _resolve_relative_path(back_path)
+    if fp_front is None and fp_back is None:
+        return
+    table = doc.add_table(rows=1, cols=2)
+    table.autofit = True
+    tbl = table._tbl
+    tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement("w:tblPr")
+    tblBorders = OxmlElement("w:tblBorders")
+    for border_name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        border_el = OxmlElement(f"w:{border_name}")
+        border_el.set(qn("w:val"), "nil")
+        tblBorders.append(border_el)
+    tblPr.append(tblBorders)
+    for col_idx, (fp, label) in enumerate([(fp_front, front_label), (fp_back, back_label)]):
+        cell = table.cell(0, col_idx)
+        _remove_cell_borders(cell)
+        if fp is None:
+            continue
+        try:
+            pil_img = PILImage.open(str(fp))
+        except Exception:
+            continue
+        if pil_img.mode not in ("RGB", "L"):
+            pil_img = pil_img.convert("RGB")
+        max_px = int(half_width / Cm(1) * 37.795)
+        if pil_img.width > max_px:
+            ratio = max_px / pil_img.width
+            pil_img = pil_img.resize((max_px, int(pil_img.height * ratio)), PILImage.LANCZOS)
+        buf = std_io.BytesIO()
+        pil_img.save(buf, format="PNG")
+        buf.seek(0)
+        p_img = cell.paragraphs[0]
+        p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p_img.add_run()
+        run.add_picture(buf, width=half_width)
+        p2 = cell.add_paragraph(label)
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p2.add_run(label)
+        _set_run_font(r2, style["body_font_name"], Pt(10))
+    doc.add_paragraph()
+
+
 def _insert_image(doc, image_path, label, style, *, no_rotate=False, max_width=None):
     """Insert a single image into the document.
 
@@ -1115,6 +1161,26 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
                 sc_table_rows = []
                 sc_table_keys = []
                 in_sc_table = False
+
+            # --- Inline ID card pair: [IDPAIR:front_path|front_label|back_path|back_label] ---
+            if stripped.startswith('[IDPAIR:') and stripped.endswith(']'):
+                inner = stripped[8:-1]
+                parts = inner.split('|')
+                if len(parts) >= 4:
+                    _render_id_card_pair(doc, parts[0], parts[1], parts[2], parts[3], style)
+                idx += 1
+                continue
+
+            # --- Inline image marker: [IMG:path|label] ---
+            if stripped.startswith('[IMG:') and stripped.endswith(']'):
+                inner = stripped[5:-1]
+                parts = inner.split('|', 1)
+                img_path = parts[0]
+                img_label = parts[1] if len(parts) > 1 else ''
+                if img_path:
+                    _insert_image(doc, img_path, img_label, style)
+                idx += 1
+                continue
 
             # --- Markdown heading (levels 1-3) ---
             if _is_markdown_heading(stripped):
