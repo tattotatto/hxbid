@@ -50,7 +50,32 @@ class Settings(BaseSettings):
     AI_MODEL_OVERRIDE: str = ""  # Runtime model override (set via admin API / settings UI)
 
     AI_TEMPERATURE: float = 0.7
-    AI_MAX_TOKENS: int = 4096
+    AI_MAX_TOKENS: int = 4096  # legacy default; multi-level gen uses per-section budgets
+
+    # === Multi-level Bid Generation ===
+    GENERATION_DEEP_OUTLINE_ENABLED: bool = True
+    GENERATION_MAX_OUTLINE_DEPTH: int = 4
+    GENERATION_MIN_LEAF_SECTIONS: int = 50
+    GENERATION_MAX_LEAF_SECTIONS: int = 300
+    GENERATION_LEGACY_MODE: bool = False  # True = use old flat outline
+
+    # Token budgets by section category
+    GENERATION_TOKEN_BUDGET_TINY: int = 1536
+    GENERATION_TOKEN_BUDGET_SMALL: int = 4096
+    GENERATION_TOKEN_BUDGET_MEDIUM: int = 8192
+    GENERATION_TOKEN_BUDGET_LARGE: int = 16384
+    GENERATION_TOKEN_BUDGET_XLARGE: int = 32768
+    GENERATION_TOKEN_BUDGET_TOTAL: int = 2_000_000
+
+    # 逐节生成重试配置
+    GENERATION_MAX_RETRIES: int = 2
+    GENERATION_RETRY_DELAY_BASE: float = 1.0
+    GENERATION_SECTION_TIMEOUT: int = 180  # 单个小节最大秒数
+
+    # Reference context limits (per-section, not per-chapter)
+    GENERATION_REF_MAX_CHARS_PER_SOURCE: int = 8000   # was 3000
+    GENERATION_REF_MAX_TOTAL_CHARS: int = 32000        # was 8000
+    GENERATION_REF_CONTEXT_RATIO: float = 0.18         # 18% of token budget for refs
 
     # File paths
     UPLOAD_DIR: str = "uploads"
