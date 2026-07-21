@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+*.egg
+venv/
+.venv/
+env/
+*.log
+.mypy_cache/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+outputs/
+*.md
+!README.md
+task-*-report.md
+素材/
+docs/
+
+# Claude
+.claude/

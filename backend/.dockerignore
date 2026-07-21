@@ -1,0 +1,35 @@
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+*.egg
+venv/
+.venv/
+env/
+*.log
+.mypy_cache/
+.pytest_cache/
+.python-version
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+chroma_data/
+outputs/
+uploads/
+templates/
+
+# Tests
+tests/
+test_*.py
