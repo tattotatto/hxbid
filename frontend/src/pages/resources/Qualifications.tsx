@@ -24,6 +24,7 @@ export default function Qualifications() {
   const [ocrLoading, setOcrLoading] = useState(false)
   const [uploadedFile, setUploadedFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string>('')
+  const [ocrImagePath, setOcrImagePath] = useState<string>('')
   const [form] = Form.useForm()
 
   const fetchData = async () => {
@@ -40,6 +41,7 @@ export default function Qualifications() {
     form.resetFields()
     setUploadedFile(null)
     setPreviewUrl('')
+    setOcrImagePath('')
     setModalOpen(true)
   }
 
@@ -51,7 +53,16 @@ export default function Qualifications() {
       expiry_date: record.expiry_date ? dayjs(record.expiry_date) : null,
     })
     setUploadedFile(null)
-    setPreviewUrl('')
+    // Show existing attachment image if present
+    if (record.attachment_path) {
+      setOcrImagePath(record.attachment_path)
+      // Normalise path: strip leading "uploads/" if present (old format)
+      const cleanPath = record.attachment_path.replace(/^uploads\//, '')
+      setPreviewUrl(`/uploads/${cleanPath}`)
+    } else {
+      setOcrImagePath('')
+      setPreviewUrl('')
+    }
     setModalOpen(true)
   }
 
@@ -68,6 +79,7 @@ export default function Qualifications() {
         ...values,
         issue_date: values.issue_date ? values.issue_date.format('YYYY-MM-DD') : null,
         expiry_date: values.expiry_date ? values.expiry_date.format('YYYY-MM-DD') : null,
+        attachment_path: ocrImagePath,
       }
       if (editing) {
         await client.put(`/qualifications/${editing.id}`, payload)
@@ -82,7 +94,7 @@ export default function Qualifications() {
     finally { setConfirmLoading(false) }
   }
 
-  // OCR the uploaded file — only fills empty fields
+  // OCR the uploaded file — only fills empty fields, saves image path for attachment
   const handleOcr = async () => {
     if (!uploadedFile) {
       message.warning('请先上传资质证书图片')
@@ -102,11 +114,20 @@ export default function Qualifications() {
       if (!current.issuing_authority && d.issuing_authority) form.setFieldValue('issuing_authority', d.issuing_authority)
       if (!current.issue_date && d.issue_date) form.setFieldValue('issue_date', dayjs(d.issue_date))
       if (!current.expiry_date && d.expiry_date) form.setFieldValue('expiry_date', dayjs(d.expiry_date))
-      const hasResult = d.name || d.cert_number || d.issuing_authority || (d.ocr_text && d.ocr_text.length > 10)
-      if (hasResult) {
+      // Save the image path so it gets persisted as attachment_path when saving
+      if (d.image_path) {
+        setOcrImagePath(d.image_path)
+      }
+      const hasTextResult = d.name || d.cert_number || d.issuing_authority
+      const hasOcrText = d.ocr_text && d.ocr_text.length > 10
+      if (hasTextResult) {
         message.success('识别完成，空白字段已填充，请核对')
+      } else if (hasOcrText) {
+        message.warning('图片已保存，但未能自动提取字段。OCR原始文字：' + d.ocr_text.substring(0, 100))
+      } else if (d.image_path) {
+        message.info('图片已保存，自动识别未提取到文字（可能是图片清晰度不足），请手动填写各字段')
       } else {
-        message.info('未能识别到文字，请手动填写')
+        message.info('识别完成，请手动填写各字段')
       }
     } catch (err: any) {
       message.error(err.response?.data?.detail || '识别失败')

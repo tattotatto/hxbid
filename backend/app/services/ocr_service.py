@@ -30,7 +30,9 @@ def save_ocr_image(file_bytes: bytes, filename: str, subdir: str = "ocr") -> str
     filepath = sub_path / saved_name
     with open(filepath, "wb") as f:
         f.write(file_bytes)
-    return str(filepath.relative_to(Path.cwd()))
+    # Return path relative to UPLOAD_DIR (NOT cwd), so the /uploads/ endpoint
+    # can resolve it correctly: os.path.join(UPLOAD_DIR, "ocr/xxx.png")
+    return str(filepath.relative_to(UPLOAD_DIR))
 
 
 # ---------------------------------------------------------------------------

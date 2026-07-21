@@ -33,7 +33,7 @@ DEFAULT_STYLE_CONFIG = {
     "margin_bottom_cm": 2.54,
     "margin_left_cm": 3.17,
     "margin_right_cm": 3.17,
-    "header_text": "云南宏曦科技有限公司",
+    "header_text": "",
     "footer_text": "第 X 页 / 共 Y 页",
 }
 

@@ -220,9 +220,19 @@ export default function ProjectWorkflow() {
 
               switch (currentEvent) {
                 case 'status': {
+                  // Deep pipeline: phase-based status updates
+                  if (data.phase) {
+                    if (data.total_leaf_sections) {
+                      setTotal(data.total_leaf_sections)
+                    }
+                    if (data.message) {
+                      setCurrentChapter(data.message)
+                    }
+                    break
+                  }
+                  // Legacy pipeline: chapter-based status
                   setTotal(data.total)
                   setCurrentChapter(data.chapter_id)
-                  // Add chapter to SSE tracking list if new
                   setSseChapters((prev) => {
                     const exists = prev.some((c) => c.id === data.chapter_id)
                     if (exists) return prev
@@ -233,8 +243,41 @@ export default function ProjectWorkflow() {
                   })
                   break
                 }
+                case 'outline_generated': {
+                  // Deep pipeline: outline is ready
+                  setTotal(data.total_leaf_sections || data.total_parts || 0)
+                  setCurrentChapter(`大纲已生成：${data.total_leaf_sections} 个子章节，预计 ${data.estimated_pages} 页`)
+                  break
+                }
+                case 'subsection_status': {
+                  // Deep pipeline: subsection progress
+                  setCompleted(data.completed || 0)
+                  if (data.total) setTotal(data.total)
+                  if (data.current_title) {
+                    setCurrentChapter(data.current_title)
+                  }
+                  // Add to SSE chapter list for visual tracking
+                  const subId = `sub_${data.completed}_${data.current_title || ''}`
+                  setSseChapters((prev) => {
+                    // Keep list manageable: show last 20 items
+                    const next = [...prev, { id: subId, title: data.current_title || '', status: 'pending' }]
+                    return next.slice(-20)
+                  })
+                  break
+                }
+                case 'subsection_chunk': {
+                  // Deep pipeline: accumulate content per chapter
+                  if (data.chapter_id) {
+                    setChapterContent((prev) => ({
+                      ...prev,
+                      [data.chapter_id]:
+                        (prev[data.chapter_id] || '') + (data.text || ''),
+                    }))
+                  }
+                  break
+                }
                 case 'chunk': {
-                  // Accumulate content for this chapter
+                  // Legacy pipeline: chapter content
                   setChapterContent((prev) => ({
                     ...prev,
                     [data.chapter_id]:

@@ -34,7 +34,7 @@ def _save_upload(upload: UploadFile, subdir: str = "company") -> str:
     filepath = sub_path / filename
     with open(filepath, "wb") as f:
         f.write(upload.file.read())
-    return str(filepath.relative_to(Path.cwd()))
+    return str(filepath.relative_to(UPLOAD_DIR))
 
 
 async def _get_or_create_profile(db: AsyncSession) -> CompanyProfile:
@@ -42,7 +42,7 @@ async def _get_or_create_profile(db: AsyncSession) -> CompanyProfile:
     result = await db.execute(select(CompanyProfile).limit(1))
     profile = result.scalar_one_or_none()
     if not profile:
-        profile = CompanyProfile(company_name="云南宏曦科技有限公司")
+        profile = CompanyProfile(company_name="")
         db.add(profile)
         await db.flush()
         await db.refresh(profile)

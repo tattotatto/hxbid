@@ -57,8 +57,13 @@ app.include_router(api_router, prefix="/api/v1")
 async def serve_upload(file_path: str):
     """Serve uploaded files (images, attachments) from UPLOAD_DIR.
 
-    This replaces StaticFiles mount which has issues with Docker volume paths.
+    Handles two path conventions for backward compatibility:
+    - New format (relative to UPLOAD_DIR):  "ocr/xxx.png"
+    - Old format (relative to cwd):         "uploads/ocr/xxx.png"
     """
+    # Normalise: strip leading "uploads/" if present (old convention)
+    if file_path.startswith("uploads/") or file_path.startswith("uploads\\"):
+        file_path = file_path[8:]
     full_path = os.path.join(settings.UPLOAD_DIR, file_path)
     # Prevent directory traversal
     real_path = os.path.realpath(full_path)

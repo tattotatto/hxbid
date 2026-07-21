@@ -26,6 +26,7 @@ from app.models.qualification import Qualification
 from app.models.user import User
 from app.schemas.bid import ExportRequest, ExportResponse, GenerateRequest, ParseResponse
 from app.services.ai_pipeline import (
+    generate_bid_with_deep_outline,
     generate_chapter_with_materials,
     generate_outline,
     parse_bid_requirements,
@@ -259,6 +260,120 @@ async def generate_bid(
 
     # -- SSE event generator (runs after the handler returns) --
     async def event_generator():
+        # ── Deep generation mode (new pipeline) ──
+        if (
+            settings.GENERATION_DEEP_OUTLINE_ENABLED
+            and not settings.GENERATION_LEGACY_MODE
+        ):
+            async with async_session() as gen_db:
+                try:
+                    # Gather context (same as legacy)
+                    collected = None
+                    company_profile = None
+                    matched_qualifications = []
+                    matched_personnel = []
+                    try:
+                        collected = await get_collected_resources(project_id, gen_db)
+                    except Exception:
+                        pass
+                    if collected:
+                        matched_qualifications = collected.get("qualifications", [])
+                        matched_personnel = collected.get("personnel", [])
+                        company_profile = collected.get("company")
+                    else:
+                        try:
+                            from app.services.rag import assemble_chapter_context
+                            _, matched_qualifications, matched_personnel, source_summary = \
+                                await assemble_chapter_context(
+                                    chapter_title="项目整体",
+                                    requirements=requirements,
+                                    project_id=project_id,
+                                    db=gen_db,
+                                )
+                            company_profile = source_summary.get("company")
+                        except Exception:
+                            pass
+
+                    # Use the deep generation pipeline
+                    chapters_payload = None
+                    async for event in generate_bid_with_deep_outline(
+                        requirements=requirements,
+                        company_profile=company_profile,
+                        matched_qualifications=matched_qualifications,
+                        matched_personnel=matched_personnel,
+                        project_id=project_id,
+                        db=gen_db,
+                    ):
+                        yield event
+                        # Capture chapters_payload from the done event's data JSON
+                        if event.get("event") == "done":
+                            try:
+                                done_data = json.loads(event.get("data", "{}"))
+                                chapters_payload = done_data.get("chapters")
+                            except Exception:
+                                chapters_payload = None
+
+                    # Save generated chapters to DB
+                    if chapters_payload:
+                        for i, ch in enumerate(chapters_payload):
+                            try:
+                                # Find or create ProjectChapter record
+                                from sqlalchemy import select as sa_select
+                                result_ch = await gen_db.execute(
+                                    sa_select(ProjectChapter).where(
+                                        ProjectChapter.project_id == project_id,
+                                        ProjectChapter.order_index == i + 1,
+                                    )
+                                )
+                                db_ch = result_ch.scalar_one_or_none()
+                                if db_ch:
+                                    db_ch.ai_generated_content = ch.get("content", "")
+                                    db_ch.status = "generated"
+                                    db_ch.title = ch.get("title", db_ch.title)
+                                else:
+                                    db_ch = ProjectChapter(
+                                        project_id=project_id,
+                                        title=ch.get("title", f"第{i + 1}部分"),
+                                        order_index=i + 1,
+                                        ai_generated_content=ch.get("content", ""),
+                                        status="generated",
+                                    )
+                                    gen_db.add(db_ch)
+                            except Exception:
+                                pass
+                        await gen_db.commit()
+
+                    # Mark project for review
+                    try:
+                        db_proj = await gen_db.get(BidProject, project_id)
+                        if db_proj:
+                            db_proj.status = "review"
+                            await gen_db.commit()
+                    except Exception:
+                        pass
+
+                    return  # deep generation complete — exit event generator
+
+                except Exception as exc:
+                    logger.exception("Deep generation failed: %s", exc)
+                    try:
+                        await gen_db.rollback()
+                        db_proj = await gen_db.get(BidProject, project_id)
+                        if db_proj:
+                            db_proj.status = "error"
+                            await gen_db.commit()
+                    except Exception:
+                        pass
+                    yield {
+                        "event": "error",
+                        "data": json.dumps(
+                            {"message": f"生成失败（深度模式）: {exc}"},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    return
+
+        # ── Legacy generation mode (original pipeline) ──
         async with async_session() as gen_db:
             try:
                 for i, ch in enumerate(chapter_data):

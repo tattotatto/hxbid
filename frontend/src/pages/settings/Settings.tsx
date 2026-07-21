@@ -109,7 +109,7 @@ export default function Settings() {
         margin_bottom_cm: values.margin_bottom_cm || 2.54,
         margin_left_cm: values.margin_left_cm || 3.17,
         margin_right_cm: values.margin_right_cm || 3.17,
-        header_text: values.header_text || '云南宏曦科技有限公司',
+        header_text: values.header_text || '',
         footer_text: values.footer_text || '第 X 页 / 共 Y 页',
       },
     }
@@ -155,7 +155,7 @@ export default function Settings() {
       margin_bottom_cm: 2.54,
       margin_left_cm: 3.17,
       margin_right_cm: 3.17,
-      header_text: '云南宏曦科技有限公司',
+      header_text: '',
       footer_text: '第 X 页 / 共 Y 页',
     })
     setTemplateModalOpen(true)
@@ -177,7 +177,7 @@ export default function Settings() {
       margin_bottom_cm: tpl.style_config?.margin_bottom_cm || 2.54,
       margin_left_cm: tpl.style_config?.margin_left_cm || 3.17,
       margin_right_cm: tpl.style_config?.margin_right_cm || 3.17,
-      header_text: tpl.style_config?.header_text || '云南宏曦科技有限公司',
+      header_text: tpl.style_config?.header_text || '',
       footer_text: tpl.style_config?.footer_text || '第 X 页 / 共 Y 页',
     })
     setTemplateModalOpen(true)

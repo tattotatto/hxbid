@@ -17,6 +17,7 @@ class QualificationCreate(BaseModel):
     issuing_authority: str = Field(default="", max_length=200)
     issue_date: Optional[date] = None
     expiry_date: Optional[date] = None
+    attachment_path: str = Field(default="", max_length=500)
     notes: str = Field(default="", max_length=5000)
 
 
@@ -28,6 +29,7 @@ class QualificationUpdate(BaseModel):
     issuing_authority: Optional[str] = Field(default=None, max_length=200)
     issue_date: Optional[date] = None
     expiry_date: Optional[date] = None
+    attachment_path: Optional[str] = Field(default=None, max_length=500)
     notes: Optional[str] = Field(default=None, max_length=5000)
 
 

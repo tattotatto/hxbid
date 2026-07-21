@@ -23,7 +23,7 @@ from app.services.anti_ai import analyze_chapter, report_to_dict
 logger = logging.getLogger(__name__)
 
 # System prompt used for training context
-SYSTEM_PROMPT = """你是宏曦标书系统的AI助手，专注于为云南宏曦科技有限公司撰写保安/物业服务类投标文件。
+SYSTEM_PROMPT = """你是投标书撰写系统的AI助手，专注于为投标人撰写保安/物业服务类投标文件。
 
 写作规范：
 1. 使用中文标书行业地道表达，避免模板化连接词

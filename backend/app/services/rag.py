@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Max total chars for all retrieved similar chapter content combined
-MAX_SIMILAR_CONTENT_CHARS = 8000
+MAX_SIMILAR_CONTENT_CHARS = 32000  # was 8000 — increased for deep generation
+
+# Max chars per single reference source (was 3000)
+MAX_SOURCE_CHARS = 8000
 
 # Cosine distance threshold — results above this are discarded
 # (lower = more similar; 0.5–0.7 is a reasonable "maybe relevant" band)

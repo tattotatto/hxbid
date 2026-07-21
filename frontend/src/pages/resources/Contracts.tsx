@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { Card, Table, Button, Modal, Form, Input, InputNumber, Steps, Upload, Image, message, Space, Popconfirm, Tag } from 'antd'
-import { PlusOutlined, DeleteOutlined, UploadOutlined, InboxOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, UploadOutlined, InboxOutlined, EyeOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import type { UploadProps } from 'antd'
 import client from '../../api/client'
@@ -35,6 +35,10 @@ export default function Contracts() {
   // Image preview
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewSrc, setPreviewSrc] = useState('')
+
+  // Detail modal
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [detailContract, setDetailContract] = useState<Contract | null>(null)
 
   const fetchContracts = () => {
     setLoading(true)
@@ -155,11 +159,20 @@ export default function Contracts() {
     {
       title: '操作',
       key: 'actions',
-      width: 100,
+      width: 140,
       render: (_: any, r: Contract) => (
-        <Popconfirm title="确定删除此合同？" onConfirm={() => handleDelete(r.id)}>
-          <Button size="small" danger icon={<DeleteOutlined />} />
-        </Popconfirm>
+        <Space>
+          <Button
+            size="small"
+            icon={<EyeOutlined />}
+            onClick={() => { setDetailContract(r); setDetailOpen(true) }}
+          >
+            详情
+          </Button>
+          <Popconfirm title="确定删除此合同？" onConfirm={() => handleDelete(r.id)}>
+            <Button size="small" danger icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </Space>
       ),
     },
   ]
@@ -247,7 +260,7 @@ export default function Contracts() {
                   {uploadedPaths.map((p, i) => (
                     <Image
                       key={i}
-                      src={`/api/v1/bid/download/${p.split('/').pop()}`}
+                      src={`/uploads/${p.split('/').pop()}`}
                       width={100}
                       style={{ objectFit: 'cover', border: '1px solid #eee', borderRadius: 4 }}
                       fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
@@ -258,6 +271,42 @@ export default function Contracts() {
             )}
           </div>
         )}
+      </Modal>
+
+      {/* Detail Modal — show all contract images */}
+      <Modal
+        title={detailContract?.project_name || '合同详情'}
+        open={detailOpen}
+        onCancel={() => { setDetailOpen(false); setDetailContract(null) }}
+        footer={null}
+        width={800}
+        style={{ top: 20 }}
+      >
+        {detailContract && (() => {
+          let images: string[] = []
+          try { images = JSON.parse(detailContract.image_paths_json || '[]') } catch {}
+          if (images.length === 0) return <p style={{ color: '#999', textAlign: 'center' }}>暂无合同图片</p>
+          return (
+            <div style={{ maxHeight: '70vh', overflowY: 'auto', padding: '0 4px' }}>
+              {images.map((p, i) => (
+                <div key={i} style={{ marginBottom: 16, textAlign: 'center' }}>
+                  <div style={{
+                    color: '#888', fontSize: 12, marginBottom: 4,
+                    background: '#f5f5f5', padding: '2px 8px', borderRadius: 4,
+                    display: 'inline-block'
+                  }}>
+                    第 {i + 1} / {images.length} 页
+                  </div>
+                  <Image
+                    src={`/uploads/${p.split('/').pop()}`}
+                    style={{ maxWidth: '100%', border: '1px solid #eee', borderRadius: 4 }}
+                    fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+                  />
+                </div>
+              ))}
+            </div>
+          )
+        })()}
       </Modal>
     </div>
   )

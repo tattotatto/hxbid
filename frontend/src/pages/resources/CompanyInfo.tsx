@@ -17,7 +17,15 @@ export default function CompanyInfo() {
         setProfile(res.data)
         form.setFieldsValue(res.data)
       })
-      .catch(() => message.error('获取公司信息失败'))
+      .catch((err) => {
+        console.error('获取公司信息失败:', err)
+        const detail = err.response?.data?.detail
+        const msg = typeof detail === 'string' ? detail
+          : Array.isArray(detail) ? detail.map((d: any) => d.msg || JSON.stringify(d)).join('; ')
+          : err.response?.status === 500 ? '服务器内部错误，请联系管理员'
+          : '获取公司信息失败'
+        message.error(msg)
+      })
       .finally(() => setLoading(false))
   }
 
