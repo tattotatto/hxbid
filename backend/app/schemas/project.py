@@ -44,6 +44,7 @@ class ProjectRead(BaseModel):
     bid_result: str
     parsed_requirements_json: str
     outline_json: str
+    generation_state_json: str = ""
     chapters: List[ChapterRead] = []
     created_at: datetime
     updated_at: datetime

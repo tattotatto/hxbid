@@ -125,6 +125,12 @@ export default function ProjectWorkflow() {
   // Local chapter content edits
   const [chapterContent, setChapterContent] = useState<Record<string, string>>({})
 
+  // Retry failed sections
+  const [retrying, setRetrying] = useState(false)
+  const [failedSections, setFailedSections] = useState<
+    Array<{ path: string; title: string; error: string | null }>
+  >([])
+
   const fetchProject = useCallback(async () => {
     if (!id) return
     try {
@@ -142,6 +148,31 @@ export default function ProjectWorkflow() {
       // Set active chapter to first if not set
       if (chapters.length > 0 && !activeChapter) {
         setActiveChapter(chapters[0].id)
+      }
+
+      // Parse generation_state_json for failed sections
+      try {
+        const genStateStr = res.data.generation_state_json
+        if (genStateStr && genStateStr !== '{}') {
+          const genState = JSON.parse(genStateStr)
+          const sections = genState.sections || {}
+          const failed: Array<{ path: string; title: string; error: string | null }> = []
+          for (const [path, sec] of Object.entries(sections)) {
+            const s = sec as any
+            if (s.status === 'failed') {
+              failed.push({
+                path,
+                title: path.split(' > ').pop() || path,
+                error: s.error || null,
+              })
+            }
+          }
+          setFailedSections(failed)
+        } else {
+          setFailedSections([])
+        }
+      } catch {
+        setFailedSections([])
       }
     } catch {
       message.error('获取项目信息失败')
@@ -346,6 +377,147 @@ export default function ProjectWorkflow() {
     await fetchProject()
   }
 
+  const handleRetry = async () => {
+    if (!id) return
+    setRetrying(true)
+    setCompleted(0)
+    setCurrentChapter('正在重试失败章节...')
+    setSseChapters([])
+
+    const token = localStorage.getItem('token')
+    let response: Response
+
+    try {
+      response = await fetch('/api/v1/bid/generate/retry-failed', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ project_id: id }),
+      })
+    } catch {
+      message.error('重试请求失败')
+      setRetrying(false)
+      return
+    }
+
+    if (!response.ok) {
+      try {
+        const errData = await response.json()
+        message.error(errData.detail || '重试请求失败')
+      } catch {
+        message.error('重试请求失败')
+      }
+      setRetrying(false)
+      return
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) {
+      message.error('无法读取重试流')
+      setRetrying(false)
+      return
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        let currentEvent = ''
+        for (const line of lines) {
+          const trimmed = line.trim()
+
+          if (trimmed.startsWith('event: ')) {
+            currentEvent = trimmed.slice(7).trim()
+          } else if (trimmed.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(trimmed.slice(6))
+
+              switch (currentEvent) {
+                case 'status': {
+                  if (data.phase === 'retry') {
+                    setCurrentChapter(data.message || `正在重试 ${data.retry_count} 个失败章节...`)
+                  } else if (data.phase === 'generating') {
+                    if (data.total_leaf_sections) setTotal(data.total_leaf_sections)
+                    if (data.completed_leaf_sections) setCompleted(data.completed_leaf_sections)
+                    if (data.message) setCurrentChapter(data.message)
+                  } else if (data.message) {
+                    setCurrentChapter(data.message)
+                  }
+                  break
+                }
+                case 'outline_generated': {
+                  setTotal(data.total_leaf_sections || data.total_parts || 0)
+                  setCurrentChapter(`大纲已加载：${data.total_leaf_sections} 个子章节，已完成 ${data.completed_from_previous || 0} 个`)
+                  break
+                }
+                case 'subsection_status': {
+                  setCompleted(data.completed || 0)
+                  if (data.total) setTotal(data.total)
+                  if (data.current_title) {
+                    setCurrentChapter(data.current_title)
+                  }
+                  const subId = `retry_${data.completed}_${data.current_title || ''}`
+                  setSseChapters((prev) => {
+                    const next = [...prev, { id: subId, title: data.current_title || '', status: 'pending' }]
+                    return next.slice(-20)
+                  })
+                  break
+                }
+                case 'subsection_chunk': {
+                  if (data.chapter_id) {
+                    setChapterContent((prev) => ({
+                      ...prev,
+                      [data.chapter_id]:
+                        (prev[data.chapter_id] || '') + (data.text || ''),
+                    }))
+                  }
+                  break
+                }
+                case 'section_done': {
+                  setCompleted((prev) => prev + 1)
+                  setSseChapters((prev) =>
+                    prev.map((c) =>
+                      c.id === `retry_${data.index}_${data.title}`
+                        ? { ...c, status: 'generated' }
+                        : c,
+                    ),
+                  )
+                  break
+                }
+                case 'section_error': {
+                  message.warning(`${data.title || data.path}: ${data.error || '生成失败'}`)
+                  break
+                }
+                case 'done':
+                  break
+                case 'error':
+                  message.error(data.message || '重试过程中出现错误')
+                  break
+              }
+            } catch {
+              // Skip unparseable lines
+            }
+          }
+        }
+      }
+    } catch {
+      message.error('重试流读取失败')
+    }
+
+    setRetrying(false)
+    await fetchProject()
+  }
+
   const handleSave = async () => {
     if (!id || !activeChapter) return
     setSaving(true)
@@ -384,11 +556,21 @@ export default function ProjectWorkflow() {
       })
       const { docx_url, pdf_url } = res.data
 
+      // Use anchor-click pattern to avoid popup blocker after async await
+      const triggerDownload = (url: string) => {
+        const a = document.createElement('a')
+        a.href = url
+        a.style.display = 'none'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+      }
+
       if (docx_url) {
-        window.open(docx_url, '_blank')
+        triggerDownload(docx_url)
       }
       if (pdf_url) {
-        window.open(pdf_url, '_blank')
+        triggerDownload(pdf_url)
       }
 
       message.success('导出成功')
@@ -508,7 +690,7 @@ export default function ProjectWorkflow() {
             icon={<ThunderboltOutlined />}
             loading={generating}
             onClick={handleGenerate}
-            disabled={generating || project.status === 'collecting'}
+            disabled={generating || retrying || project.status === 'collecting'}
           >
             一键生成标书
           </Button>
@@ -526,7 +708,7 @@ export default function ProjectWorkflow() {
           <Button
             icon={<DownloadOutlined />}
             loading={exporting}
-            disabled={!hasChapters || generating}
+            disabled={!hasChapters || generating || retrying}
             onClick={handleExport}
           >
             导出 Word + PDF
@@ -573,8 +755,8 @@ export default function ProjectWorkflow() {
       )}
 
       {/* Generation progress */}
-      {generating && (
-        <Card title="生成进度" style={{ marginBottom: 24 }}>
+      {(generating || retrying) && (
+        <Card title={retrying ? '重试进度' : '生成进度'} style={{ marginBottom: 24 }}>
           <GenerationProgress
             chapters={sseChapters}
             currentChapter={currentChapter}
@@ -586,8 +768,50 @@ export default function ProjectWorkflow() {
         </Card>
       )}
 
+      {/* Failed sections warning with retry button */}
+      {!generating && !retrying && failedSections.length > 0 && (
+        <Card
+          title={
+            <Space>
+              <Tag color="error">{failedSections.length} 个章节生成失败</Tag>
+            </Space>
+          }
+          style={{ marginBottom: 24, borderColor: '#ff4d4f' }}
+          extra={
+            <Button
+              type="primary"
+              danger
+              icon={<ThunderboltOutlined />}
+              loading={retrying}
+              onClick={handleRetry}
+            >
+              重试失败章节
+            </Button>
+          }
+        >
+          <List
+            size="small"
+            dataSource={failedSections}
+            renderItem={(item) => (
+              <List.Item>
+                <List.Item.Meta
+                  title={item.title}
+                  description={
+                    item.error ? (
+                      <span style={{ color: '#ff4d4f' }}>{item.error}</span>
+                    ) : (
+                      '未知错误'
+                    )
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        </Card>
+      )}
+
       {/* Chapter editor tabs */}
-      {hasChapters && !generating && (
+      {hasChapters && !generating && !retrying && (
         <Card>
           {projectChapters.length > 0 ? (
             <Tabs

@@ -35,6 +35,7 @@ def assemble_chapter_content(
     node: dict,
     generated_sections: Dict[str, str],
     depth: int = 0,
+    parent_path: list | None = None,
 ) -> str:
     """Recursively assemble a node's content from its generated subsections.
 
@@ -49,6 +50,7 @@ def assemble_chapter_content(
             - depth: int
         generated_sections: Dict mapping " > ".join(path) → content string.
         depth: Current recursion depth (used for heading level).
+        parent_path: Accumulated path from root to this node (list of titles).
 
     Returns:
         Assembled markdown content string for this node and all descendants.
@@ -61,18 +63,23 @@ def assemble_chapter_content(
     node_depth = node.get("depth", depth)
     marker = HEADING_MARKERS.get(node_depth, "#### ")
 
+    # Build the full path for this node
+    if parent_path is None:
+        parent_path = []
+    node_path = parent_path + [title]
+
     if children:
         # Non-leaf: add heading, then recurse
         parts.append(f"\n\n{marker}{title}\n")
         for child in children:
             child_content = assemble_chapter_content(
-                child, generated_sections, depth + 1
+                child, generated_sections, depth + 1, node_path
             )
             if child_content.strip():
                 parts.append(child_content)
     else:
         # Leaf: retrieve generated content
-        path = _build_node_path(node)
+        path = " > ".join(node_path)
         content = generated_sections.get(path, "")
         if content.strip():
             parts.append(f"\n\n{marker}{title}\n")
@@ -189,13 +196,18 @@ def collect_sibling_summaries(
         List of "标题：摘要" strings.
     """
     summaries: List[str] = []
+    # Build parent path list for constructing leaf paths
+    parent_title_list = parent_node.get("path", [parent_node.get("title", "")]) \
+        if isinstance(parent_node.get("path"), list) else [parent_node.get("title", "")]
     for child in parent_node.get("children", []):
         child_title = child.get("title", "")
         if child.get("children"):
             # Non-leaf: just show the title
             summaries.append(f"{child_title}（含{len(child['children'])}个子章节）")
         else:
-            path = _build_node_path(child)
+            # Build full path: parent path + child title
+            child_path = parent_title_list + [child_title]
+            path = " > ".join(child_path)
             content = generated_sections.get(path, "")
             summary = generate_chapter_summary(content)
             summaries.append(f"{child_title}：{summary}")

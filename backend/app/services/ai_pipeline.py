@@ -14,6 +14,7 @@ import logging
 from typing import Any, AsyncIterator, Callable, Dict, List
 
 from app.config import settings
+from app.database import async_session
 from app.services.ai_adapter import ai_adapter
 from app.services.deid import deidentify_text
 
@@ -409,17 +410,17 @@ def _get_section_guidance(chapter_title: str) -> str:
         return """【本章节内容规范 — 资格审查部分】
 本章节用于证明投标人具备投标资格，必须包含：
 1. 投标人基本情况表（公司名称、统一社会信用代码、法定代表人、注册资本、成立时间、经营范围、公司简介）
-2. 营业执照扫描件说明（注明"营业执照副本复印件加盖公章附后"）
-3. 有效的保安服务许可证/行业资质证书扫描件说明（注明资质名称、编号、发证机关、有效期）
-4. 企业信誉情况承诺书（承诺：未被暂停投标资格、未列入严重失信名单、未列入行贿行为供应商名单）
-5. 项目人员承诺书（承诺人员数量、资质、劳动合同、社保、无犯罪记录等符合招标要求）
+2. 企业信誉情况承诺书（承诺：未被暂停投标资格、未列入严重失信名单、未列入行贿行为供应商名单）
+3. 项目人员承诺书（承诺人员数量、资质、劳动合同、社保、无犯罪记录等符合招标要求）
 
-注意：
-- 本章节重点展示公司资质证照（营业执照、经营许可证等），这些证照已在系统"公司资质"中上传
-- 如系统提供了资质证书资料，应逐一列出证书名称和编号
+【极其重要 — 证照图片处理规则】
+- 营业执照、保安服务许可证、其他资质证书的扫描图片将由系统自动嵌入到本章节开头
+- 你不需要描述证照内容，不需要写"附后""见附件"等字样，系统会自动处理
+- 你只需撰写基本情况表、承诺书等文字内容即可
 - 不得包含廉洁诚信承诺书（该承诺书在商务部分）
 - 不得包含与招标人干部职工不存在关联关系的承诺书（该承诺书在商务部分）
 - 企业信誉情况承诺书与廉洁诚信承诺书是不同的文件，不可混淆"""
+
 
     # -- 投标人认为需要提供的其他内容 / Other Materials --
     if _match_section(title_lower, ["其他", "其他内容", "投标人认为需要提供的"]):
@@ -451,6 +452,18 @@ def _get_section_guidance(chapter_title: str) -> str:
 6. 中标承诺（按期签约、缴纳履约担保、按期履约、不转包分包）
 7. 同意投标保证金没收情形
 8. 附投标人签章栏"""
+
+    # -- 类似项目业绩 / Project Performance Section --
+    if _match_section(title_lower, ["业绩", "类似项目", "项目经验", "成功案例", "既往项目"]):
+        return """【本章节内容规范 — 类似项目业绩】
+本章节展示投标人类似项目业绩，必须包含：
+1. 类似项目业绩一览表（使用上文"历史合同业绩数据"中的真实项目，包括项目名称、采购单位、合同金额、服务期限）
+2. 每个项目的详细情况说明
+
+严禁编造规则（最高优先级）：
+- 项目名称、采购单位、合同金额必须与上文"历史合同业绩数据"完全一致
+- 不得编造任何不存在的项目
+- 如果历史合同业绩数据为空，写明"暂无"而非编造"""
 
     # -- Catch-all: no specific guidance --
     return ""
@@ -649,6 +662,57 @@ async def generate_chapter_with_materials(
 # Generation state helpers
 # ---------------------------------------------------------------------------
 
+def _reconstruct_tree_from_leaves(leaves: list) -> list:
+    """Reconstruct a nested outline tree from a flat list of leaf sections.
+
+    Each leaf has a ``path`` (list of titles from root to leaf) plus
+    budget metadata. This rebuilds the tree structure that
+    ``build_final_chapters_payload`` expects, so resume mode can skip
+    outline regeneration.
+    """
+    tree: list = []
+    # Index: (depth, title) -> node dict
+    node_index: dict = {}
+
+    for leaf in leaves:
+        path = leaf.get("path", [])
+        if not path:
+            continue
+
+        # Ensure all ancestors exist in the tree
+        for depth, title in enumerate(path):
+            key = (depth, title)
+            if key not in node_index:
+                node = {
+                    "title": title,
+                    "depth": depth,
+                    "children": [],
+                    "max_tokens": leaf.get("max_tokens", 4096),
+                    "estimated_pages": leaf.get("estimated_pages", 1),
+                    "category_key": leaf.get("category_key", "medium"),
+                }
+                node_index[key] = node
+                if depth == 0:
+                    node["order_index"] = len(tree) + 1
+                    tree.append(node)
+                else:
+                    parent_key = (depth - 1, path[depth - 1])
+                    parent = node_index.get(parent_key)
+                    if parent and node not in parent["children"]:
+                        parent["children"].append(node)
+
+        # Mark leaf node (no children)
+        leaf_key = (len(path) - 1, path[-1])
+        leaf_node = node_index.get(leaf_key)
+        if leaf_node and not leaf.get("_is_placeholder"):
+            # Copy budget details from stored leaf
+            leaf_node["max_tokens"] = leaf.get("max_tokens", leaf_node.get("max_tokens", 4096))
+            leaf_node["estimated_pages"] = leaf.get("estimated_pages", leaf_node.get("estimated_pages", 1))
+            leaf_node["category_key"] = leaf.get("category_key", leaf_node.get("category_key", "medium"))
+
+    return tree
+
+
 def _init_generation_state(leaves: list) -> dict:
     """Initialize generation_state_json from flattened leaf list."""
     sections: Dict[str, dict] = {}
@@ -667,6 +731,7 @@ def _init_generation_state(leaves: list) -> dict:
         "total_leaves": len(leaves),
         "completed_leaves": 0,
         "sections": sections,
+        "leaves": leaves,  # store for resume — avoids regenerating outline
     }
 
 
@@ -701,6 +766,43 @@ def _update_generation_state(
         state["status"] = "completed"
 
 
+async def _gather_contract_data(db) -> str:
+    """Gather historical contract data for injection into AI prompt context.
+
+    Returns formatted text block with real project data, or empty string if no data.
+    """
+    try:
+        from app.models.contract import Contract
+        from sqlalchemy import select as sa_select
+
+        result = await db.execute(
+            sa_select(Contract).order_by(Contract.created_at.desc())
+        )
+        contracts = result.scalars().all()
+
+        if not contracts:
+            return ""
+
+        lines = ["【历史合同业绩数据 — 以下为真实项目数据，必须在标书中原样使用，严禁编造项目名称、金额等信息】"]
+        for i, c in enumerate(contracts, 1):
+            lines.append(f"{i}. 项目名称：{c.project_name}")
+            if c.procurement_unit:
+                lines.append(f"   采购单位：{c.procurement_unit}")
+            if c.contract_amount:
+                lines.append(f"   合同金额：{c.contract_amount}")
+            if c.service_period:
+                lines.append(f"   服务期限：{c.service_period}")
+            if c.notes:
+                lines.append(f"   备注：{c.notes[:200]}")
+            lines.append("")
+
+        lines.append("重要提醒：标书中涉及项目业绩时，必须使用以上真实项目数据，不得自行编造任何项目名称、金额等信息。")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("Failed to gather contract data: %s", exc)
+        return ""
+
+
 async def _generate_single_section_with_retry(
     leaf: dict,
     requirements: dict,
@@ -708,6 +810,7 @@ async def _generate_single_section_with_retry(
     reference_sections: list,
     max_retries: int = 2,
     retry_delay_base: float = 1.0,
+    extra_guidance: str = "",
 ) -> tuple:
     """Generate a single leaf section with retry.
 
@@ -735,6 +838,7 @@ async def _generate_single_section_with_retry(
                 sibling_summaries=sibling_summaries[:8],
                 reference_sections=reference_sections,
                 company_profile=company_profile,
+                extra_guidance=extra_guidance,
             ):
                 full_content += chunk
 
@@ -768,11 +872,15 @@ async def generate_bid_with_deep_outline(
     project_id: str = "",
     db=None,
     progress_callback: Callable | None = None,
+    resume: bool = False,
 ) -> AsyncIterator[dict]:
     """Generate a complete bid document — incremental per-section generation.
 
     No ThreadPoolExecutor. Each leaf section is generated sequentially in
     the main async context. Each section is persisted immediately.
+
+    When resume=True, leaves are loaded from the stored generation_state_json
+    and outline regeneration (Phase 1+2) is skipped.
     """
     from app.services.outline_engine import generate_deep_outline
     from app.services.subsection_generator import prepare_outline_tree, get_outline_stats
@@ -781,42 +889,68 @@ async def generate_bid_with_deep_outline(
     from app.services.rag import retrieve_similar_chapters
     from app.services.token_budget import collect_leaf_sections
     from app.models.project import BidProject
+    from sqlalchemy import select as sa_select
 
-    # ── Phase 1: Build reference outlines ──
-    reference_outlines = []
-    if db:
+    # ── Resume path: load leaves from stored generation_state ──
+    tree = None
+    stats = None
+    leaves = None
+
+    if resume:
+        if not db or not project_id:
+            raise ValueError("resume=True requires db and project_id")
+        result = await db.execute(
+            sa_select(BidProject).where(BidProject.id == project_id)
+        )
+        db_project = result.scalar_one_or_none()
+        if not db_project or not db_project.generation_state_json:
+            raise ValueError("No generation state found — cannot resume")
+        prev_state = json.loads(db_project.generation_state_json)
+        stored_leaves = prev_state.get("leaves")
+        if not stored_leaves:
+            raise ValueError("Generation state missing leaves data — cannot resume")
+        leaves = stored_leaves
+        # Reconstruct tree from leaves for assembly
+        tree = _reconstruct_tree_from_leaves(leaves)
+        stats = get_outline_stats(tree) if tree else {"total_leaf_sections": len(leaves), "estimated_pages": 0, "max_depth": 1}
+        logger.info("Resume mode: loaded %d leaves from stored state", len(leaves))
+
+    # ── Phase 1: Build reference outlines (skip on resume) ──
+    if not resume:
+        reference_outlines = []
+        if db:
+            try:
+                reference_outlines = await get_reference_outlines(db)
+            except Exception as exc:
+                logger.warning("Failed to load reference outlines: %s", exc)
+
+        # ── Phase 2: Generate deep outline ──
+        yield {
+            "event": "status",
+            "data": json.dumps({
+                "phase": "outline",
+                "message": "正在生成深度大纲结构...",
+            }, ensure_ascii=False),
+        }
+
+        tender_text = ""
         try:
-            reference_outlines = await get_reference_outlines(db)
-        except Exception as exc:
-            logger.warning("Failed to load reference outlines: %s", exc)
+            if requirements:
+                tender_text = json.dumps(requirements, ensure_ascii=False)
+        except Exception:
+            pass
 
-    # ── Phase 2: Generate deep outline ──
-    yield {
-        "event": "status",
-        "data": json.dumps({
-            "phase": "outline",
-            "message": "正在生成深度大纲结构...",
-        }, ensure_ascii=False),
-    }
+        deep_outline = await generate_deep_outline(
+            requirements=requirements,
+            reference_outlines=reference_outlines,
+            tender_text=tender_text,
+            min_leaves=settings.GENERATION_MIN_LEAF_SECTIONS,
+            max_leaves=settings.GENERATION_MAX_LEAF_SECTIONS,
+        )
 
-    tender_text = ""
-    try:
-        if requirements:
-            tender_text = json.dumps(requirements, ensure_ascii=False)
-    except Exception:
-        pass
-
-    deep_outline = await generate_deep_outline(
-        requirements=requirements,
-        reference_outlines=reference_outlines,
-        tender_text=tender_text,
-        min_leaves=settings.GENERATION_MIN_LEAF_SECTIONS,
-        max_leaves=settings.GENERATION_MAX_LEAF_SECTIONS,
-    )
-
-    tree = prepare_outline_tree(deep_outline, requirements)
-    stats = get_outline_stats(tree)
-    leaves = collect_leaf_sections(tree)
+        tree = prepare_outline_tree(deep_outline, requirements)
+        stats = get_outline_stats(tree)
+        leaves = collect_leaf_sections(tree)
 
     # ── Initialize generation state ──
     gen_state = _init_generation_state(leaves)
@@ -856,7 +990,7 @@ async def generate_bid_with_deep_outline(
 
     # ── Yield outline event ──
     yield {
-        "event": "outline_ready",
+        "event": "outline_generated",
         "data": json.dumps({
             "total_leaves": stats["total_leaf_sections"],
             "estimated_pages": stats["estimated_pages"],
@@ -866,146 +1000,356 @@ async def generate_bid_with_deep_outline(
         }, ensure_ascii=False),
     }
 
-    # ── Phase 3: Generate sections one by one (NO THREAD POOL) ──
-    yield {
-        "event": "status",
-        "data": json.dumps({
-            "phase": "generating",
-            "message": f"开始逐节生成（共 {stats['total_leaf_sections']} 个小节，已完成 {gen_state['completed_leaves']} 个）...",
-            "total_leaf_sections": stats["total_leaf_sections"],
-            "completed_leaf_sections": gen_state["completed_leaves"],
-        }, ensure_ascii=False),
-    }
+    # ── Phase 2.5: Gather contract + personnel data for context injection ──
+    contract_context = ""
+    if db:
+        try:
+            contract_context = await _gather_contract_data(db)
+            if contract_context:
+                logger.info("Gathered contract data: %d chars", len(contract_context))
+        except Exception as exc:
+            logger.warning("Failed to gather contract data: %s", exc)
+
+    # Build personnel context block from matched_personnel
+    personnel_context = ""
+    if matched_personnel:
+        lines = ["【可用项目人员 — 以下为真实人员数据，标书中涉及人员配置时必须使用，严禁编造姓名、证书等信息】"]
+        for p in matched_personnel:
+            if isinstance(p, dict):
+                name = p.get("name", "")
+                edu = p.get("education", "")
+                tags = p.get("tags", "")
+                certs = p.get("certificates", [])
+            else:
+                name = getattr(p, "name", "")
+                edu = getattr(p, "education", "")
+                tags = getattr(p, "tags", "")
+                certs = getattr(p, "certificates", [])
+            if not name:
+                continue
+            lines.append(f"  - {name}，学历{edu}，持证/特长：{tags}")
+            for c in certs:
+                if isinstance(c, dict):
+                    cn = c.get("cert_name", "")
+                else:
+                    cn = getattr(c, "cert_name", "")
+                if cn:
+                    lines.append(f"    证书：{cn}")
+        if len(lines) > 1:
+            lines.append("")
+            lines.append("重要提醒：标书中涉及人员配置时，只能使用以上真实人员数据，严禁编造任何人名或证书信息。")
+            personnel_context = "\n".join(lines)
+            logger.info("Built personnel context: %d chars, %d people", len(personnel_context), len(lines) - 2)
+
+    # ── Phase 3: Generate sections with configurable parallelism ──
+    resume_note = "（断点续传）" if resume else ""
+    parallel_workers = max(1, settings.GENERATION_PARALLEL_SECTIONS)
 
     # Collect sibling titles per section for anti-duplication
     all_titles = [leaf.get("title", "") for leaf in leaves]
-
     total = len(leaves)
+
+    # Keywords for sections that need contract/业绩 data
+    CONTRACT_KEYWORDS = ["业绩", "类似项目", "项目经验", "成功案例", "既往", "合同业绩",
+                         "投标人认为需要提供的其他", "其他内容", "其他材料"]
+    # Keywords for sections that need personnel data
+    PERSONNEL_CTX_KEYWORDS = ["人员", "配置", "团队", "组织", "人力", "管理架构", "岗位",
+                               "项目负责人", "项目经理", "拟投入", "技术负责人"]
+
+    # ── Identify pending sections (skip completed / max-retried) ──
+    pending_sections: list = []
     for idx, leaf in enumerate(leaves):
         path_key = " > ".join(leaf.get("path", []))
         sec_state = gen_state["sections"].get(path_key, {})
 
-        # Skip already completed
         if sec_state.get("status") == "done" and sec_state.get("content"):
             logger.info("Skipping already-completed section: %s", path_key)
             continue
 
-        # Skip sections that failed max retries (unless we're explicitly retrying)
         if sec_state.get("status") == "failed" and sec_state.get("retries", 0) >= settings.GENERATION_MAX_RETRIES + 1:
             continue
 
-        # ── Emit section_start ──
-        yield {
-            "event": "section_start",
-            "data": json.dumps({
-                "path": path_key,
-                "title": leaf.get("title", ""),
-                "index": idx + 1,
-                "total": total,
-                "depth": leaf.get("depth", 0),
-                "estimated_pages": leaf.get("estimated_pages", 1),
-            }, ensure_ascii=False),
-        }
+        leaf["_idx"] = idx
+        leaf["_path_key"] = path_key
+        # Pre-build sibling summaries (title-only, no content dependency)
+        leaf["sibling_summaries"] = [
+            f"{t}（详见该章节）" for t in all_titles if t != leaf.get("title", "")
+        ]
+        # Inject contract context for 业绩-related sections
+        title_lower = leaf.get("title", "").lower()
+        extra_parts = []
+        if contract_context and any(kw in title_lower for kw in CONTRACT_KEYWORDS):
+            extra_parts.append(contract_context)
+        if personnel_context and any(kw in title_lower for kw in PERSONNEL_CTX_KEYWORDS):
+            extra_parts.append(personnel_context)
+        if extra_parts:
+            leaf["_extra_guidance"] = "\n\n".join(extra_parts)
+        pending_sections.append(leaf)
 
-        # ── Update state to generating ──
-        _update_generation_state(gen_state, path_key, "generating")
-        if db:
-            try:
-                from sqlalchemy import select as sa_select
-                result = await db.execute(
-                    sa_select(BidProject).where(BidProject.id == project_id)
-                )
-                db_project = result.scalar_one_or_none()
-                if db_project:
-                    db_project.generation_state_json = json.dumps(gen_state, ensure_ascii=False)
-                    await db.commit()
-            except Exception:
-                pass
-
-        # ── Fetch reference sections via RAG ──
-        reference_sections: list = []
-        if db:
-            try:
+    # ── Pre-fetch RAG references for all pending sections ──
+    async def _fetch_rag(leaf: dict) -> list:
+        if not db:
+            return []
+        try:
+            async with async_session() as rag_db:
                 similar = await retrieve_similar_chapters(
                     chapter_title=leaf.get("title", ""),
                     requirements=requirements,
                     project_id=project_id,
                 )
-                reference_sections = [s.get("content", "") for s in similar if s.get("content")]
-            except Exception as exc:
-                logger.debug("RAG failed for '%s': %s", leaf.get("title", ""), exc)
+                return [s.get("content", "") for s in similar if s.get("content")]
+        except Exception as exc:
+            logger.debug("RAG failed for '%s': %s", leaf.get("title", ""), exc)
+            return []
 
-        # ── Build sibling summaries ──
-        sibling_summaries = [f"{t}（详见该章节）" for t in all_titles if t != leaf.get("title", "")]
-        leaf["sibling_summaries"] = sibling_summaries
+    if pending_sections:
+        rag_tasks = [asyncio.create_task(_fetch_rag(leaf)) for leaf in pending_sections]
+        rag_results = await asyncio.gather(*rag_tasks)
+        for leaf, refs in zip(pending_sections, rag_results):
+            leaf["_reference_sections"] = refs
 
-        # ── Generate with retry ──
-        content, error = await _generate_single_section_with_retry(
-            leaf=leaf,
-            requirements=requirements,
-            company_profile=company_profile,
-            reference_sections=reference_sections,
-            max_retries=settings.GENERATION_MAX_RETRIES,
-            retry_delay_base=settings.GENERATION_RETRY_DELAY_BASE,
-        )
+    # ── Status: starting generation ──
+    mode_label = "并行" if parallel_workers > 1 else "逐节"
+    yield {
+        "event": "status",
+        "data": json.dumps({
+            "phase": "generating",
+            "message": f"开始{mode_label}生成{resume_note}（共 {total} 个小节，已完成 {gen_state['completed_leaves']} 个，{parallel_workers} 路并发）...",
+            "total_leaf_sections": total,
+            "completed_leaf_sections": gen_state["completed_leaves"],
+        }, ensure_ascii=False),
+    }
 
-        if content:
-            # ── Success ──
-            _update_generation_state(gen_state, path_key, "done", content=content)
+    if not pending_sections:
+        # All sections already completed — skip to assembly
+        pass
+    elif parallel_workers <= 1:
+        # ── Serial fallback ──
+        for leaf in pending_sections:
+            path_key = leaf["_path_key"]
+            idx = leaf["_idx"]
+
             yield {
-                "event": "section_done",
+                "event": "section_start",
                 "data": json.dumps({
                     "path": path_key,
+                    "title": leaf.get("title", ""),
+                    "index": idx + 1,
+                    "total": total,
+                    "depth": leaf.get("depth", 0),
+                    "estimated_pages": leaf.get("estimated_pages", 1),
+                }, ensure_ascii=False),
+            }
+            yield {
+                "event": "subsection_status",
+                "data": json.dumps({
+                    "completed": gen_state["completed_leaves"],
+                    "total": total,
+                    "current_title": leaf.get("title", ""),
+                }, ensure_ascii=False),
+            }
+
+            _update_generation_state(gen_state, path_key, "generating")
+
+            content, error = await _generate_single_section_with_retry(
+                leaf=leaf,
+                requirements=requirements,
+                company_profile=company_profile,
+                reference_sections=leaf.get("_reference_sections", []),
+                max_retries=settings.GENERATION_MAX_RETRIES,
+                retry_delay_base=settings.GENERATION_RETRY_DELAY_BASE,
+                extra_guidance=leaf.get("_extra_guidance", ""),
+            )
+
+            if content:
+                _update_generation_state(gen_state, path_key, "done", content=content)
+                yield {
+                    "event": "section_done",
+                    "data": json.dumps({
+                        "path": path_key,
+                        "title": leaf.get("title", ""),
+                        "content": content,
+                        "content_length": len(content),
+                        "char_count": len(content),
+                        "index": idx + 1,
+                        "total": total,
+                    }, ensure_ascii=False),
+                }
+                yield {
+                    "event": "subsection_chunk",
+                    "data": json.dumps({
+                        "chapter_id": path_key,
+                        "text": content,
+                    }, ensure_ascii=False),
+                }
+            else:
+                retries = settings.GENERATION_MAX_RETRIES + 1
+                _update_generation_state(
+                    gen_state, path_key, "failed",
+                    error=error, retries=retries,
+                )
+                yield {
+                    "event": "section_error",
+                    "data": json.dumps({
+                        "path": path_key,
+                        "title": leaf.get("title", ""),
+                        "error": error,
+                        "retry_count": retries,
+                        "index": idx + 1,
+                        "total": total,
+                    }, ensure_ascii=False),
+                }
+
+            # Persist after every section
+            if db:
+                try:
+                    from sqlalchemy import select as sa_select
+                    result = await db.execute(
+                        sa_select(BidProject).where(BidProject.id == project_id)
+                    )
+                    db_project = result.scalar_one_or_none()
+                    if db_project:
+                        db_project.generation_state_json = json.dumps(gen_state, ensure_ascii=False)
+                        await db.commit()
+                except Exception as exc:
+                    logger.error("Failed to persist generation state: %s", exc)
+
+            yield {
+                "event": "progress",
+                "data": json.dumps({
+                    "completed": gen_state["completed_leaves"],
+                    "total": gen_state["total_leaves"],
+                    "percentage": round(gen_state["completed_leaves"] / max(gen_state["total_leaves"], 1) * 100, 1),
+                }, ensure_ascii=False),
+            }
+    else:
+        # ── Parallel generation (workers > 1) ──
+        state_lock = asyncio.Lock()
+        semaphore = asyncio.Semaphore(parallel_workers)
+
+        # Emit section_start + subsection_status for all pending sections upfront
+        for leaf in pending_sections:
+            yield {
+                "event": "section_start",
+                "data": json.dumps({
+                    "path": leaf["_path_key"],
+                    "title": leaf.get("title", ""),
+                    "index": leaf["_idx"] + 1,
+                    "total": total,
+                    "depth": leaf.get("depth", 0),
+                    "estimated_pages": leaf.get("estimated_pages", 1),
+                }, ensure_ascii=False),
+            }
+            yield {
+                "event": "subsection_status",
+                "data": json.dumps({
+                    "completed": gen_state["completed_leaves"],
+                    "total": total,
+                    "current_title": leaf.get("title", ""),
+                }, ensure_ascii=False),
+            }
+
+        async def _generate_one(leaf: dict) -> dict:
+            """Generate a single section, gated by the semaphore."""
+            async with semaphore:
+                path_key = leaf["_path_key"]
+                async with state_lock:
+                    _update_generation_state(gen_state, path_key, "generating")
+
+                content, error = await _generate_single_section_with_retry(
+                    leaf=leaf,
+                    requirements=requirements,
+                    company_profile=company_profile,
+                    reference_sections=leaf.get("_reference_sections", []),
+                    max_retries=settings.GENERATION_MAX_RETRIES,
+                    retry_delay_base=settings.GENERATION_RETRY_DELAY_BASE,
+                )
+                return {
+                    "idx": leaf["_idx"],
+                    "path_key": path_key,
                     "title": leaf.get("title", ""),
                     "content": content,
-                    "content_length": len(content),
-                    "char_count": len(content),
-                    "index": idx + 1,
-                    "total": total,
-                }, ensure_ascii=False),
-            }
-        else:
-            # ── Failed ──
-            retries = settings.GENERATION_MAX_RETRIES + 1
-            _update_generation_state(
-                gen_state, path_key, "failed",
-                error=error, retries=retries,
-            )
-            yield {
-                "event": "section_error",
-                "data": json.dumps({
-                    "path": path_key,
-                    "title": leaf.get("title", ""),
                     "error": error,
-                    "retry_count": retries,
-                    "index": idx + 1,
-                    "total": total,
+                }
+
+        tasks = [asyncio.create_task(_generate_one(leaf)) for leaf in pending_sections]
+
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            idx = result["idx"]
+            path_key = result["path_key"]
+            title = result["title"]
+            content = result["content"]
+            error = result["error"]
+
+            # Update gen_state (serialised via lock)
+            async with state_lock:
+                if content:
+                    _update_generation_state(gen_state, path_key, "done", content=content)
+                else:
+                    retries = settings.GENERATION_MAX_RETRIES + 1
+                    _update_generation_state(
+                        gen_state, path_key, "failed",
+                        error=error, retries=retries,
+                    )
+
+            # Yield events
+            if content:
+                yield {
+                    "event": "section_done",
+                    "data": json.dumps({
+                        "path": path_key,
+                        "title": title,
+                        "content": content,
+                        "content_length": len(content),
+                        "char_count": len(content),
+                        "index": idx + 1,
+                        "total": total,
+                    }, ensure_ascii=False),
+                }
+                yield {
+                    "event": "subsection_chunk",
+                    "data": json.dumps({
+                        "chapter_id": path_key,
+                        "text": content,
+                    }, ensure_ascii=False),
+                }
+            else:
+                yield {
+                    "event": "section_error",
+                    "data": json.dumps({
+                        "path": path_key,
+                        "title": title,
+                        "error": error,
+                        "retry_count": settings.GENERATION_MAX_RETRIES + 1,
+                        "index": idx + 1,
+                        "total": total,
+                    }, ensure_ascii=False),
+                }
+
+            # Persist after each section completes (serialised via main coroutine)
+            if db:
+                try:
+                    from sqlalchemy import select as sa_select
+                    result_db = await db.execute(
+                        sa_select(BidProject).where(BidProject.id == project_id)
+                    )
+                    db_project = result_db.scalar_one_or_none()
+                    if db_project:
+                        db_project.generation_state_json = json.dumps(gen_state, ensure_ascii=False)
+                        await db.commit()
+                except Exception as exc:
+                    logger.error("Failed to persist generation state: %s", exc)
+
+            # Yield progress
+            yield {
+                "event": "progress",
+                "data": json.dumps({
+                    "completed": gen_state["completed_leaves"],
+                    "total": gen_state["total_leaves"],
+                    "percentage": round(gen_state["completed_leaves"] / max(gen_state["total_leaves"], 1) * 100, 1),
                 }, ensure_ascii=False),
             }
-
-        # ── Persist after EVERY section ──
-        if db:
-            try:
-                from sqlalchemy import select as sa_select
-                result = await db.execute(
-                    sa_select(BidProject).where(BidProject.id == project_id)
-                )
-                db_project = result.scalar_one_or_none()
-                if db_project:
-                    db_project.generation_state_json = json.dumps(gen_state, ensure_ascii=False)
-                    await db.commit()
-            except Exception as exc:
-                logger.error("Failed to persist generation state: %s", exc)
-
-        # ── Yield overall progress ──
-        yield {
-            "event": "progress",
-            "data": json.dumps({
-                "completed": gen_state["completed_leaves"],
-                "total": gen_state["total_leaves"],
-                "percentage": round(gen_state["completed_leaves"] / max(gen_state["total_leaves"], 1) * 100, 1),
-            }, ensure_ascii=False),
-        }
 
     # ── Phase 4: Assemble into chapters ──
     yield {

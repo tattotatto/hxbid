@@ -8,6 +8,7 @@ Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 
 import asyncio
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from app.models.company_profile import CompanyProfile
 from app.models.project import BidProject, ProjectChapter
 from app.models.qualification import Qualification
 from app.models.user import User
-from app.schemas.bid import ExportRequest, ExportResponse, GenerateRequest, ParseResponse
+from app.schemas.bid import ExportRequest, ExportResponse, GenerateRequest, ParseResponse, RetryFailedRequest
 from app.services.ai_pipeline import (
     generate_bid_with_deep_outline,
     generate_chapter_with_materials,
@@ -43,7 +44,49 @@ from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
 from app.models.template import BidTemplate
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+async def _gather_generation_context(
+    project_id: str,
+    requirements: dict,
+    db,
+) -> tuple[dict | None, list, list]:
+    """Gather company profile, qualifications, and personnel for generation.
+
+    Returns (company_profile, matched_qualifications, matched_personnel).
+    """
+    collected = None
+    company_profile = None
+    matched_qualifications: list = []
+    matched_personnel: list = []
+
+    try:
+        collected = await get_collected_resources(project_id, db)
+    except Exception:
+        pass
+
+    if collected:
+        matched_qualifications = collected.get("qualifications", [])
+        matched_personnel = collected.get("personnel", [])
+        company_profile = collected.get("company")
+    else:
+        try:
+            from app.services.rag import assemble_chapter_context
+            _, matched_qualifications, matched_personnel, source_summary = \
+                await assemble_chapter_context(
+                    chapter_title="项目整体",
+                    requirements=requirements,
+                    project_id=project_id,
+                    db=db,
+                )
+            company_profile = source_summary.get("company")
+        except Exception:
+            pass
+
+    return company_profile, matched_qualifications, matched_personnel
 
 
 # ---------------------------------------------------------------------------
@@ -267,32 +310,11 @@ async def generate_bid(
         ):
             async with async_session() as gen_db:
                 try:
-                    # Gather context (same as legacy)
-                    collected = None
-                    company_profile = None
-                    matched_qualifications = []
-                    matched_personnel = []
-                    try:
-                        collected = await get_collected_resources(project_id, gen_db)
-                    except Exception:
-                        pass
-                    if collected:
-                        matched_qualifications = collected.get("qualifications", [])
-                        matched_personnel = collected.get("personnel", [])
-                        company_profile = collected.get("company")
-                    else:
-                        try:
-                            from app.services.rag import assemble_chapter_context
-                            _, matched_qualifications, matched_personnel, source_summary = \
-                                await assemble_chapter_context(
-                                    chapter_title="项目整体",
-                                    requirements=requirements,
-                                    project_id=project_id,
-                                    db=gen_db,
-                                )
-                            company_profile = source_summary.get("company")
-                        except Exception:
-                            pass
+                    # Gather context
+                    company_profile, matched_qualifications, matched_personnel = \
+                        await _gather_generation_context(
+                            project_id, requirements, gen_db,
+                        )
 
                     # Use the deep generation pipeline
                     chapters_payload = None
@@ -573,6 +595,216 @@ async def generate_bid(
 
 
 # ---------------------------------------------------------------------------
+# POST /generate/retry-failed  (Retry failed sections via deep pipeline)
+# ---------------------------------------------------------------------------
+
+@router.post("/generate/retry-failed")
+async def retry_failed_sections(
+    data: RetryFailedRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retry previously failed leaf sections in the deep generation pipeline.
+
+    Loads the stored generation_state_json, resets failed sections back
+    to pending, and re-enters the deep pipeline in resume mode (skipping
+    outline regeneration). Completed sections are preserved.
+
+    Request body:
+        - project_id: str
+        - section_paths: Optional[List[str]] — specific sections to retry;
+          if omitted, all failed sections are retried.
+    """
+    # ── Load project ──
+    result = await db.execute(
+        select(BidProject)
+        .where(BidProject.id == data.project_id)
+        .options(selectinload(BidProject.chapters))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+
+    # ── Validate generation state exists ──
+    if not project.generation_state_json or project.generation_state_json == "{}":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该项目没有生成状态记录，请先使用「一键生成」启动生成",
+        )
+
+    # ── Validate project status ──
+    if project.status == "generating":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="项目正在生成中，请等待当前生成完成后再重试",
+        )
+
+    try:
+        gen_state = json.loads(project.generation_state_json)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="生成状态数据损坏，请重新启动生成",
+        )
+
+    sections = gen_state.get("sections", {})
+    if not sections:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="生成状态中没有章节数据，请重新启动生成",
+        )
+
+    # ── Identify sections to retry ──
+    target_paths = set(data.section_paths) if data.section_paths else None
+    retry_count = 0
+
+    for path_key, sec in sections.items():
+        if sec.get("status") == "failed":
+            if target_paths is None or path_key in target_paths:
+                sec["status"] = "pending"
+                sec["error"] = None
+                sec["retries"] = 0
+                retry_count += 1
+
+    if retry_count == 0:
+        # Check if there were failed sections at all
+        total_failed = sum(1 for s in sections.values() if s.get("status") == "failed")
+        if total_failed > 0 and target_paths:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"指定的 {len(target_paths)} 个章节路径未匹配到任何失败章节（共 {total_failed} 个失败章节）",
+            )
+        elif total_failed > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"所有 {total_failed} 个失败章节已达最大重试次数，请调整重试配置或重新生成",
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="没有找到失败的章节需要重试",
+            )
+
+    # ── Save updated gen_state ──
+    gen_state["completed_leaves"] = sum(
+        1 for s in sections.values() if s.get("status") == "done"
+    )
+    gen_state["status"] = "generating"
+    project.generation_state_json = json.dumps(gen_state, ensure_ascii=False)
+    await db.commit()
+
+    logger.info(
+        "Retry: reset %d failed sections for project %s (target_paths=%s)",
+        retry_count, data.project_id, bool(target_paths),
+    )
+
+    # ── Load requirements ──
+    requirements = json.loads(project.parsed_requirements_json or "{}")
+    project_id = project.id
+
+    # ── SSE event generator ──
+    async def event_generator():
+        async with async_session() as gen_db:
+            try:
+                # Gather context
+                company_profile, matched_qualifications, matched_personnel = \
+                    await _gather_generation_context(
+                        project_id, requirements, gen_db,
+                    )
+
+                # ── Retry notification ──
+                yield {
+                    "event": "status",
+                    "data": json.dumps({
+                        "phase": "retry",
+                        "message": f"正在重试 {retry_count} 个失败章节...",
+                        "retry_count": retry_count,
+                    }, ensure_ascii=False),
+                }
+
+                # ── Run deep pipeline in resume mode ──
+                chapters_payload = None
+                async for event in generate_bid_with_deep_outline(
+                    requirements=requirements,
+                    company_profile=company_profile,
+                    matched_qualifications=matched_qualifications,
+                    matched_personnel=matched_personnel,
+                    project_id=project_id,
+                    db=gen_db,
+                    resume=True,  # skip outline regeneration
+                ):
+                    yield event
+                    # Capture chapters_payload from the done event
+                    if event.get("event") == "done":
+                        try:
+                            done_data = json.loads(event.get("data", "{}"))
+                            chapters_payload = done_data.get("chapters")
+                        except Exception:
+                            chapters_payload = None
+
+                # ── Save generated chapters to DB ──
+                if chapters_payload:
+                    for i, ch in enumerate(chapters_payload):
+                        try:
+                            from sqlalchemy import select as sa_select
+                            result_ch = await gen_db.execute(
+                                sa_select(ProjectChapter).where(
+                                    ProjectChapter.project_id == project_id,
+                                    ProjectChapter.order_index == i + 1,
+                                )
+                            )
+                            db_ch = result_ch.scalar_one_or_none()
+                            if db_ch:
+                                db_ch.ai_generated_content = ch.get("content", "")
+                                db_ch.status = "generated"
+                                db_ch.title = ch.get("title", db_ch.title)
+                            else:
+                                db_ch = ProjectChapter(
+                                    project_id=project_id,
+                                    title=ch.get("title", f"第{i + 1}部分"),
+                                    order_index=i + 1,
+                                    ai_generated_content=ch.get("content", ""),
+                                    status="generated",
+                                )
+                                gen_db.add(db_ch)
+                        except Exception:
+                            pass
+                    await gen_db.commit()
+
+                # ── Mark project for review ──
+                try:
+                    db_proj = await gen_db.get(BidProject, project_id)
+                    if db_proj:
+                        db_proj.status = "review"
+                        await gen_db.commit()
+                except Exception:
+                    pass
+
+            except Exception as exc:
+                logger.exception("Retry generation failed: %s", exc)
+                try:
+                    await gen_db.rollback()
+                    db_proj = await gen_db.get(BidProject, project_id)
+                    if db_proj:
+                        db_proj.status = "error"
+                        await gen_db.commit()
+                except Exception:
+                    pass
+                yield {
+                    "event": "error",
+                    "data": json.dumps(
+                        {"message": f"重试生成失败: {exc}"},
+                        ensure_ascii=False,
+                    ),
+                }
+
+    return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
 # POST /export  (Step 5 — render to .docx / .pdf)
 # ---------------------------------------------------------------------------
 
@@ -791,6 +1023,27 @@ async def export_bid(
         }
         personnel_cert_images.append(pci)
 
+    # ── Contract images for 业绩/类似项目 sections ──
+    from app.models.contract import Contract
+    ct_result = await db.execute(
+        select(Contract).order_by(Contract.created_at.desc())
+    )
+    contracts = ct_result.scalars().all()
+    contract_images = []  # flat list for 其他内容 chapter
+    contract_images_by_project = {}  # per-project dict
+    for ct in contracts:
+        try:
+            img_paths = json.loads(ct.image_paths_json or "[]")
+        except Exception:
+            img_paths = []
+        for img_path in img_paths:
+            if img_path:
+                ci = {"path": img_path, "label": f"{ct.project_name} — 合同"}
+                contract_images.append(ci)
+                if ct.project_name not in contract_images_by_project:
+                    contract_images_by_project[ct.project_name] = []
+                contract_images_by_project[ct.project_name].append(ci)
+
     # ── Only add images to chapter_images that weren't already embedded inline ──
     remaining_images = [img for img in (company_images + qual_images)
                         if img['path'] not in embedded_images]
@@ -804,10 +1057,11 @@ async def export_bid(
         title = ch.get("title", "")
 
         # Inject structured company info, qualification text and inline images
+        # PREPEND so images appear at the top of the chapter, before AI-generated text
         if any(kw in title for kw in QUAL_CHAPTER_KEYWORDS):
             if company_text_block or qual_text_block:
                 injected = (company_text_block or "") + (qual_text_block or "")
-                ch["content"] = (ch.get("content") or "") + injected
+                ch["content"] = injected + "\n\n" + (ch.get("content") or "")
             if all_qual_section_images:
                 chapter_images[idx].extend(all_qual_section_images)
 
@@ -816,6 +1070,13 @@ async def export_bid(
             if kw in title:
                 chapter_images[idx].extend(personnel_cert_images)
                 break
+
+        # Contract images → 业绩/其他内容 chapters
+        CONTRACT_CHAPTER_KEYWORDS = ["业绩", "类似项目", "项目经验", "成功案例",
+                                      "投标人认为需要提供的其他", "其他内容", "其他材料"]
+        if any(kw in title for kw in CONTRACT_CHAPTER_KEYWORDS):
+            if contract_images:
+                chapter_images[idx].extend(contract_images)
 
     # -- Render .docx (no separate attachments section) --
     docx_path = render_bid_to_docx(

@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     GENERATION_RETRY_DELAY_BASE: float = 1.0
     GENERATION_SECTION_TIMEOUT: int = 180  # 单个小节最大秒数
 
+    # 并行生成
+    GENERATION_PARALLEL_SECTIONS: int = 4  # 同时生成的小节数（1 = 串行）
+
     # Reference context limits (per-section, not per-chapter)
     GENERATION_REF_MAX_CHARS_PER_SOURCE: int = 8000   # was 3000
     GENERATION_REF_MAX_TOTAL_CHARS: int = 32000        # was 8000

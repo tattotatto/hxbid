@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import text
+
 logger = logging.getLogger(__name__)
 
 
@@ -326,16 +328,27 @@ async def build_reference_library(db) -> int:
 
             # Upsert: delete old entry if exists
             await db.execute(
-                f"DELETE FROM reference_outlines WHERE project_id = '{project.id}'"
+                text("DELETE FROM reference_outlines WHERE project_id = :pid"),
+                {"pid": project.id},
             )
             await db.execute(
-                f"""INSERT INTO reference_outlines
-                    (id, project_id, outline_json, section_stats_json,
-                     total_chars, total_sections, max_depth)
-                    VALUES
-                    ('{uuid.uuid4().hex}', '{project.id}', '{outline_json}',
-                     '{stats_json}', {len(text)}, {stats['total_sections']},
-                     {stats['max_depth']})"""
+                text(
+                    "INSERT INTO reference_outlines "
+                    "(id, project_id, outline_json, section_stats_json, "
+                    " total_chars, total_sections, max_depth) "
+                    "VALUES "
+                    "(:uid, :pid, :outline_json, :stats_json, "
+                    " :total_chars, :total_sections, :max_depth)"
+                ),
+                {
+                    "uid": uuid.uuid4().hex,
+                    "pid": project.id,
+                    "outline_json": outline_json,
+                    "stats_json": stats_json,
+                    "total_chars": len(text),
+                    "total_sections": stats["total_sections"],
+                    "max_depth": stats["max_depth"],
+                },
             )
             await db.flush()
 
@@ -362,22 +375,22 @@ async def build_reference_library(db) -> int:
 async def _ensure_reference_outlines_table(db):
     """Create the reference_outlines table if it doesn't exist."""
     try:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS reference_outlines (
-                id VARCHAR(36) PRIMARY KEY,
-                project_id VARCHAR(36) REFERENCES bid_projects(id) ON DELETE CASCADE,
-                outline_json TEXT NOT NULL DEFAULT '{}',
-                section_stats_json TEXT NOT NULL DEFAULT '{}',
-                total_chars INTEGER NOT NULL DEFAULT 0,
-                total_sections INTEGER NOT NULL DEFAULT 0,
-                max_depth INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            )
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_reference_outlines_project
-            ON reference_outlines(project_id)
-        """)
+        await db.execute(text(
+            "CREATE TABLE IF NOT EXISTS reference_outlines ("
+            "    id VARCHAR(36) PRIMARY KEY,"
+            "    project_id VARCHAR(36) REFERENCES bid_projects(id) ON DELETE CASCADE,"
+            "    outline_json TEXT NOT NULL DEFAULT '{}',"
+            "    section_stats_json TEXT NOT NULL DEFAULT '{}',"
+            "    total_chars INTEGER NOT NULL DEFAULT 0,"
+            "    total_sections INTEGER NOT NULL DEFAULT 0,"
+            "    max_depth INTEGER NOT NULL DEFAULT 0,"
+            "    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
+            ")"
+        ))
+        await db.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_reference_outlines_project "
+            "ON reference_outlines(project_id)"
+        ))
         await db.flush()
     except Exception as exc:
         logger.warning("Could not ensure reference_outlines table: %s", exc)
@@ -394,7 +407,7 @@ async def get_reference_outlines(db) -> List[Dict[str, Any]]:
 
     try:
         result = await db.execute(
-            "SELECT * FROM reference_outlines ORDER BY total_sections DESC"
+            text("SELECT * FROM reference_outlines ORDER BY total_sections DESC")
         )
         rows = result.fetchall()
         outlines = []

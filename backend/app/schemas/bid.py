@@ -25,6 +25,11 @@ class ExportRequest(BaseModel):
     template_id: Optional[str] = None
 
 
+class RetryFailedRequest(BaseModel):
+    project_id: str
+    section_paths: Optional[List[str]] = None  # if None, retry all failed sections
+
+
 class ExportResponse(BaseModel):
     docx_url: str = ""
     pdf_url: str = ""

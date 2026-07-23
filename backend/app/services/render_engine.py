@@ -290,15 +290,17 @@ def _parse_table_cells(line):
 
 
 def _is_markdown_heading(line):
-    """Check if line is a markdown heading (# / ## / ### )."""
-    return bool(re.match(r'^#{1,3}\s+\S', line))
+    """Check if line is a markdown heading (# / ## / ### / ####)."""
+    stripped = line.strip()
+    # Must start with 1-4 # marks, optionally followed by space, then content
+    return bool(re.match(r'^#{1,4}\s*\S', stripped))
 
 
 def _get_heading_level_and_text(line):
-    """Extract heading level (1-3) and text from a markdown heading line."""
-    m = re.match(r'^(#{1,3})\s+(.+)$', line)
+    """Extract heading level (1-4) and text from a markdown heading line."""
+    m = re.match(r'^(#{1,4})\s*(.+)$', line.strip())
     if m:
-        level = len(m.group(1))
+        level = min(len(m.group(1)), 3)  # cap at level 3 for Word heading styles
         text = m.group(2).strip()
         # Remove trailing # marks sometimes left by AI
         text = re.sub(r'\s*#+\s*$', '', text)
@@ -414,8 +416,8 @@ def _clean_lone_symbols(text):
     text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text)
     # Remove stray single * not part of any pair
     text = re.sub(r'(?<!\*)\*(?!\*)', '', text)
-    # Remove heading markers at line start (##, ###, etc.)
-    text = re.sub(r'^#{1,3}\s+', '', text)
+    # Remove heading markers at line start (##, ###, ####, etc.)
+    text = re.sub(r'^#{1,4}\s*', '', text)
     # Remove trailing # marks
     text = re.sub(r'\s*#+\s*$', '', text)
     # Remove stray underscore emphasis
@@ -566,7 +568,7 @@ def _preprocess_content(content):
             continue
 
         # Skip lines that are purely markdown symbols
-        if re.match(r'^[\#\*\-_]{1,3}$', stripped):
+        if re.match(r'^[\#\*\-_]{1,4}$', stripped):
             continue
 
         # Merge multiple blank lines into one
