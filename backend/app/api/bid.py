@@ -1023,14 +1023,34 @@ async def export_bid(
         }
         personnel_cert_images.append(pci)
 
-    # ── Contract images for 业绩/类似项目 sections ──
+    # ── Contract data and images for 业绩/类似项目 sections ──
     from app.models.contract import Contract
     ct_result = await db.execute(
         select(Contract).order_by(Contract.created_at.desc())
     )
     contracts = ct_result.scalars().all()
-    contract_images = []  # flat list for 其他内容 chapter
-    contract_images_by_project = {}  # per-project dict
+
+    # Build structured contract text block with inline [IMG:...] markers per project
+    contract_text_block = ""
+    if contracts:
+        lines = ["\n## 项目详细情况\n"]
+        for i, ct in enumerate(contracts, 1):
+            lines.append(f"### {i}、{ct.project_name}合同")
+            if ct.procurement_content:
+                lines.append(f"采购内容：{ct.procurement_content[:200]}")
+            # Embed contract images as [IMG:...] markers
+            try:
+                img_paths = json.loads(ct.image_paths_json or "[]")
+            except Exception:
+                img_paths = []
+            for img_path in img_paths:
+                if img_path:
+                    lines.append(f"[IMG:{img_path}|{ct.project_name} — 合同]")
+            lines.append("")
+        contract_text_block = "\n".join(lines)
+
+    # Flat contract images for chapters that don't get text injection
+    contract_images = []
     for ct in contracts:
         try:
             img_paths = json.loads(ct.image_paths_json or "[]")
@@ -1038,11 +1058,7 @@ async def export_bid(
             img_paths = []
         for img_path in img_paths:
             if img_path:
-                ci = {"path": img_path, "label": f"{ct.project_name} — 合同"}
-                contract_images.append(ci)
-                if ct.project_name not in contract_images_by_project:
-                    contract_images_by_project[ct.project_name] = []
-                contract_images_by_project[ct.project_name].append(ci)
+                contract_images.append({"path": img_path, "label": f"{ct.project_name} — 合同"})
 
     # ── Only add images to chapter_images that weren't already embedded inline ──
     remaining_images = [img for img in (company_images + qual_images)
@@ -1071,10 +1087,12 @@ async def export_bid(
                 chapter_images[idx].extend(personnel_cert_images)
                 break
 
-        # Contract images → 业绩/其他内容 chapters
+        # Contract text + images → 业绩/其他内容 chapters
         CONTRACT_CHAPTER_KEYWORDS = ["业绩", "类似项目", "项目经验", "成功案例",
                                       "投标人认为需要提供的其他", "其他内容", "其他材料"]
         if any(kw in title for kw in CONTRACT_CHAPTER_KEYWORDS):
+            if contract_text_block:
+                ch["content"] = (ch.get("content") or "") + "\n" + contract_text_block
             if contract_images:
                 chapter_images[idx].extend(contract_images)
 
