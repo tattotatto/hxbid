@@ -1030,10 +1030,17 @@ async def export_bid(
     )
     contracts = ct_result.scalars().all()
 
-    # Build structured contract text block with inline [IMG:...] markers per project
+    # Build structured contract text block with summary table + per-project images
     contract_text_block = ""
     if contracts:
-        lines = ["\n## 项目详细情况\n"]
+        lines = ["\n## 公司业绩一览表\n"]
+        lines.append("| 序号 | 项目名称 | 采购单位 | 合同金额 | 服务期限 |")
+        lines.append("|:---|:---|:---|:---|:---|")
+        for i, ct in enumerate(contracts, 1):
+            lines.append(f"| {i} | {ct.project_name} | {ct.procurement_unit} | {ct.contract_amount} | {ct.service_period} |")
+        lines.append("")
+
+        lines.append("## 项目详细情况\n")
         for i, ct in enumerate(contracts, 1):
             lines.append(f"### {i}、{ct.project_name}合同")
             if ct.procurement_content:
