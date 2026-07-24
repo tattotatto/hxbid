@@ -202,6 +202,7 @@ def _add_toc_page(doc, chapters, style):
     """
     # ── TOC heading ──
     h = doc.add_heading("目录", level=1)
+    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for run in h.runs:
         _set_run_font(
             run,
@@ -1108,8 +1109,9 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
         # on a fresh page and never bleeds from the previous section.
         if i > 0:
             _insert_page_break(doc)
-        # Chapter heading – 黑体 16pt (三号) bold
+        # Chapter heading – 黑体 16pt (三号) bold, centred
         h = doc.add_heading(chapter["title"], level=1)
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
         for run in h.runs:
             _set_run_font(
                 run,
@@ -1249,6 +1251,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
                 if heading_text:
                     if level == 1:
                         h_para = doc.add_heading(heading_text, level=1)
+                        h_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         for run in h_para.runs:
                             _set_run_font(
                                 run,
@@ -1258,6 +1261,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
                             )
                     elif level == 2:
                         h_para = doc.add_heading(heading_text, level=2)
+                        h_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         for run in h_para.runs:
                             _set_run_font(
                                 run,
@@ -1267,6 +1271,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
                             )
                     else:
                         h_para = doc.add_heading(heading_text, level=3)
+                        h_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         for run in h_para.runs:
                             _set_run_font(
                                 run,

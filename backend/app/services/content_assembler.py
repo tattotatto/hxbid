@@ -11,6 +11,7 @@ Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, List
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,17 @@ HEADING_MARKERS = {
     3: "#### ",   # Sub-sections
     4: "##### ",  # Deep sub-sections (rendered as bold body paragraph)
 }
+
+
+def _content_starts_with_heading(content: str, title: str) -> bool:
+    """Check if content already begins with a markdown heading matching the title."""
+    if not content or not content.strip():
+        return False
+    first_line = content.strip().split("\n")[0].strip()
+    # Remove leading # markers and whitespace
+    cleaned = re.sub(r'^#{1,5}\s*', '', first_line).strip()
+    # Fuzzy match: check if the title appears in the first heading line
+    return title in cleaned or cleaned in title
 
 
 def assemble_chapter_content(
@@ -69,24 +81,28 @@ def assemble_chapter_content(
     node_path = parent_path + [title]
 
     if children:
-        # Non-leaf: add heading, then recurse
-        parts.append(f"\n\n{marker}{title}\n")
+        # Non-leaf: collect children first, then decide if we need a heading
+        child_contents = []
         for child in children:
             child_content = assemble_chapter_content(
                 child, generated_sections, depth + 1, node_path
             )
             if child_content.strip():
-                parts.append(child_content)
+                child_contents.append(child_content)
+
+        if child_contents:
+            # Only add heading if there's actual content below
+            parts.append(f"\n\n{marker}{title}\n")
+            parts.extend(child_contents)
     else:
         # Leaf: retrieve generated content
         path = " > ".join(node_path)
         content = generated_sections.get(path, "")
         if content.strip():
-            parts.append(f"\n\n{marker}{title}\n")
+            # Dedup: skip assembler heading if content already starts with one
+            if not _content_starts_with_heading(content, title):
+                parts.append(f"\n\n{marker}{title}\n")
             parts.append(content)
-        else:
-            logger.warning("No generated content for leaf section: %s", path)
-            parts.append(f"\n\n{marker}{title}\n\n[本节内容未生成]\n")
 
     return "\n".join(parts)
 
