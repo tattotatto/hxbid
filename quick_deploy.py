@@ -22,6 +22,7 @@ BACKEND_FILES = [
     "backend/app/services/outline_engine.py",
     "backend/app/services/rag.py",
     "backend/app/services/reference_analyzer.py",
+    "backend/app/services/render_engine.py",
     "backend/app/services/subsection_generator.py",
     "backend/app/services/token_budget.py",
 ]
@@ -103,6 +104,7 @@ CONTAINER_MAP = {
     "backend/app/services/outline_engine.py": "/app/app/services/outline_engine.py",
     "backend/app/services/rag.py": "/app/app/services/rag.py",
     "backend/app/services/reference_analyzer.py": "/app/app/services/reference_analyzer.py",
+    "backend/app/services/render_engine.py": "/app/app/services/render_engine.py",
     "backend/app/services/subsection_generator.py": "/app/app/services/subsection_generator.py",
     "backend/app/services/token_budget.py": "/app/app/services/token_budget.py",
 }
