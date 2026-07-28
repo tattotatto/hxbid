@@ -24,6 +24,11 @@ config = context.config
 # generation runs synchronously.
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL_SYNC)
 
+# Also set the async URL on the config section so the online migration
+# path (async_engine_from_config) picks up the correct driver.
+section = config.config_ini_section
+config.set_section_option(section, "sqlalchemy.url", settings.DATABASE_URL)
+
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

@@ -60,6 +60,18 @@ class BidProject(Base):
         nullable=False,
         default="{}",
     )
+    format_template_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="{}",
+        comment="格式模板JSON — 从招标文件'投标文件格式'章节提取的结构化格式定义",
+    )
+    format_verification_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="{}",
+        comment="格式校验报告JSON — 最近一次生成后的格式合规校验结果",
+    )
     created_by: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="SET NULL"),
