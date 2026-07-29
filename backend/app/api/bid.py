@@ -126,6 +126,19 @@ async def upload_and_parse(
     except Exception as e:
         requirements = {"project_name": project_name or file.filename or "未命名项目", "parse_error": str(e)}
 
+    # -- Extract format section from PDF (best-effort, non-blocking) --
+    # Uses pdf_extractor to extract format section text, tables, and page range
+    # from the uploaded tender document. The extracted data is stored in the
+    # requirements JSON and later used by the ai_pipeline for template filling.
+    try:
+        from app.services.pdf_extractor import extract_format_section
+        format_section = extract_format_section(str(saved_path))
+        requirements["format_section_text"] = format_section["full_text"]
+        requirements["format_tables"] = format_section["tables"]
+        requirements["format_pages"] = [format_section["start_page"], format_section["end_page"]]
+    except Exception as e:
+        logger.warning("Format section extraction failed: %s", e)
+
     # -- Extract format template from tender document (best-effort, non-blocking) --
     format_template = None
     if document_text:

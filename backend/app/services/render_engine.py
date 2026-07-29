@@ -987,6 +987,69 @@ def _add_attachments_section(doc, attachments, style):
     doc.add_paragraph()
 
 
+# ── File section rendering (direct, no markdown) ────────────────────────
+
+def _render_file_section_content(doc, content, style):
+    """Render pre-filled file section content directly without markdown parsing.
+
+    File-type sections (bid letters, commitment letters, legal representative
+    certificates, etc.) have already been filled by template_filler. Their
+    text should be rendered as-is — no markdown conversion, no heading parsing,
+    no table detection. Blank lines create paragraph breaks. Lines that look
+    like section headings (short, numbered) are rendered centred and bold.
+    """
+    lines = content.split('\n')
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            # Blank line → empty paragraph spacer
+            spacer = doc.add_paragraph()
+            spacer.paragraph_format.space_before = Pt(2)
+            spacer.paragraph_format.space_after = Pt(2)
+            continue
+
+        # Detect likely section heading: starts with numbering pattern or
+        # is a short standalone title-like line (used for 投标函, 承诺书, etc.)
+        is_heading = _looks_like_file_section_heading(stripped)
+
+        if is_heading:
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _set_paragraph_spacing(p, style["body_line_spacing"])
+            run = p.add_run(stripped)
+            _set_run_font(run, style["heading2_font_name"], style["heading2_font_size"], bold=True)
+        else:
+            _add_body_paragraph(doc, stripped, style)
+
+
+def _looks_like_file_section_heading(line):
+    """Heuristic: detect if a line is likely a section heading in a file-type section.
+
+    Returns True for lines like:
+      - "一、投标函" (Chinese numbered)
+      - "1. 法定代表人证明" (numeric numbered)
+      - "（一）授权委托书" (parenthesized)
+      - Short lines (< 30 chars) that contain keywords like 函, 书, 证明, etc.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # Chinese numbered: 一、二、三...
+    if re.match(r'^[一二三四五六七八九十]+[、．.]', stripped):
+        return True
+    # Parenthesized: （一）、（二）...
+    if re.match(r'^[（\(][一二三四五六七八九十\d]+[）\)]', stripped):
+        return True
+    # Numeric: 1. 2. 3.
+    if re.match(r'^\d+[\.\)、]\s', stripped):
+        return True
+    # Short title-like line with document-type keywords
+    doc_keywords = ['投标函', '承诺书', '证明', '委托书', '一览表', '声明', '授权', '附录']
+    if len(stripped) <= 30 and any(kw in stripped for kw in doc_keywords):
+        return True
+    return False
+
+
 # ── Public API ────────────────────────────────────────────────────────
 
 def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images=None, company_name="", format_template=None):
@@ -1135,6 +1198,13 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
 
         # Preprocess content to remove obvious markdown artifacts
         content = chapter.get("content", "")
+
+        # ── Direct text rendering for file-type sections (pre-filled, no markdown) ──
+        section_type = chapter.get("section_type", "")
+        if section_type == "file":
+            _render_file_section_content(doc, content, style)
+            continue
+
         content = _preprocess_content(content)
 
         # Parse content line-by-line, accumulating table rows

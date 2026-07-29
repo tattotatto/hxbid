@@ -1135,7 +1135,44 @@ async def generate_bid_with_deep_outline(
         }, ensure_ascii=False),
     }
 
-    # ── Phase 2.5: Gather contract + personnel data for context injection ──
+    # ── Phase 2.5: 文件类章节填充 ──
+    # 从 pdf_extractor 提取的格式章节文本 → AI标注 → 填充 → 作为技术章节生成的上下文
+    file_section_content = ""
+    if project_id and db:
+        try:
+            reqs_str = ""
+            result_reqs = await db.execute(
+                sa_select(BidProject).where(BidProject.id == project_id)
+            )
+            db_proj_reqs = result_reqs.scalar_one_or_none()
+            if db_proj_reqs and db_proj_reqs.parsed_requirements_json:
+                reqs_data = json.loads(db_proj_reqs.parsed_requirements_json)
+                format_text = reqs_data.get("format_section_text", "")
+                if format_text:
+                    from app.services.template_filler import scan_and_mark_variables, build_variable_values, batch_fill_text
+                    scan_result = await scan_and_mark_variables(
+                        format_text, reqs_data.get("format_tables", []), ai_adapter,
+                    )
+                    variables = build_variable_values(company_profile, requirements)
+                    # 为每个 replacement 添加上 value
+                    for rep in scan_result.get("text_replacements", []):
+                        var_name = rep.get("var", "")
+                        if var_name:
+                            rep["value"] = variables.get(var_name, f"[{var_name}]")
+                    file_section_content = batch_fill_text(
+                        format_text, scan_result.get("text_replacements", []),
+                    )
+                    yield {
+                        "event": "status",
+                        "data": json.dumps({
+                            "phase": "file_section",
+                            "message": "文件类章节已自动填充完成",
+                        }, ensure_ascii=False),
+                    }
+        except Exception as exc:
+            logger.warning("File section filling failed: %s", exc)
+
+    # ── Phase 2.6: Gather contract + personnel data for context injection ──
     contract_context = ""
     if db:
         try:
@@ -1217,6 +1254,9 @@ async def generate_bid_with_deep_outline(
             extra_parts.append(contract_context)
         if personnel_context and any(kw in title_lower for kw in PERSONNEL_CTX_KEYWORDS):
             extra_parts.append(personnel_context)
+        # 文件类章节已填充完毕，提醒 AI 只需撰写技术方案
+        if file_section_content:
+            extra_parts.append("注意：投标文件中的投标函、承诺书、法定代表人证明等文件类内容已由系统自动填充，你只需撰写技术方案部分。")
         if extra_parts:
             leaf["_extra_guidance"] = "\n\n".join(extra_parts)
         pending_sections.append(leaf)
@@ -1504,6 +1544,16 @@ async def generate_bid_with_deep_outline(
             generated_sections[path_key] = sec["content"]
 
     chapters_payload = build_final_chapters_payload(tree, generated_sections)
+
+    # ── Prepend file section content as the first chapter (file-type, no markdown) ──
+    if file_section_content:
+        file_chapter = {
+            "title": "商务部分",
+            "content": file_section_content,
+            "section_type": "file",
+        }
+        chapters_payload.insert(0, file_chapter)
+        logger.info("Prepending file section content (%d chars) as first chapter", len(file_section_content))
 
     # ── Format verification ──
     if fmt_template and chapters_payload:
