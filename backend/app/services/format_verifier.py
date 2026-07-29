@@ -75,6 +75,15 @@ def _check_section_order(
                 "detail": f"章节'{act_title}'的顺序与模板不符",
                 "can_auto_fix": False,
             })
+        else:
+            # 章节标题不匹配任何已知关键词，可能存在顺序问题
+            mismatches.append({
+                "check": "section_order",
+                "item": act_title,
+                "status": "warning",
+                "detail": f"章节'{act_title}'未匹配任何预期模板元素或已知关键词，请人工复核顺序",
+                "can_auto_fix": False,
+            })
 
     if not mismatches:
         return [{
@@ -104,6 +113,17 @@ def _check_numbering_format(
                 "detail": "检测到阿拉伯数字序号，应为中文数字（一、二、三...）",
                 "can_auto_fix": True,
                 "auto_fix": "replace_arabic_with_chinese",
+            })
+    elif expected_style == "numeric":
+        # 检查一级序号是否是阿拉伯数字（不应使用中文数字）
+        if re.search(r'^#{1,2}\s*[一二三四五六七八九十]+[、]', content, re.MULTILINE):
+            results.append({
+                "check": "numbering_format",
+                "item": "heading_numbering",
+                "status": "warning",
+                "detail": "检测到中文数字序号，应为阿拉伯数字（1、2、3...）",
+                "can_auto_fix": True,
+                "auto_fix": "replace_chinese_with_arabic",
             })
     return results
 
@@ -275,7 +295,6 @@ def _apply_auto_fixes(
                     ch["content"] = new_content
                     fixes_applied += 1
                     result["auto_fix_applied"] = True
-                break
 
         elif fix_type == "replace_column_names":
             expected = result.get("expected_columns", [])
@@ -376,7 +395,6 @@ def verify_format(
                             content, child.get("signature_block"), child_title,
                         ))
 
-                break
 
     # 4. 应用自动修正
     chapters_payload, fixes_applied = _apply_auto_fixes(chapters_payload, all_checks)

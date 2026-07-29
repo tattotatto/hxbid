@@ -1080,6 +1080,7 @@ async def generate_bid_with_deep_outline(
             tender_text=tender_text,
             min_leaves=settings.GENERATION_MIN_LEAF_SECTIONS,
             max_leaves=settings.GENERATION_MAX_LEAF_SECTIONS,
+            format_template=fmt_template,
         )
 
         tree = prepare_outline_tree(deep_outline, requirements)

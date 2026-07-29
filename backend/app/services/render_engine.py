@@ -1021,7 +1021,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
         # 封面元素由 _add_cover_page 处理
         # 目录标题在 _add_toc_page 中已使用 "目录"，如需覆盖在此处理
         logger.info(
-            "Applying format template global rules: numbering=%s",
+            "Format template received (rendering-level enforcement deferred to future release): numbering=%s",
             rules.get("numbering_style", "unknown"),
         )
     # Use company name as header_text default if not explicitly configured
