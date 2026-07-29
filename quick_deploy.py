@@ -12,6 +12,7 @@ LOCAL = os.path.dirname(os.path.abspath(__file__))
 
 # All backend files changed since last full Docker image build
 BACKEND_FILES = [
+    "backend/alembic/versions/20260729_0002_add_format_columns.py",
     "backend/app/api/bid.py",
     "backend/app/config.py",
     "backend/app/models/project.py",
@@ -19,6 +20,8 @@ BACKEND_FILES = [
     "backend/app/schemas/project.py",
     "backend/app/services/ai_pipeline.py",
     "backend/app/services/content_assembler.py",
+    "backend/app/services/format_extractor.py",
+    "backend/app/services/format_verifier.py",
     "backend/app/services/outline_engine.py",
     "backend/app/services/rag.py",
     "backend/app/services/reference_analyzer.py",
