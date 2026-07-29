@@ -7,31 +7,6 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
-def _extract_section_numbers(chapters_payload: list[dict]) -> list[str]:
-    """从章节列表中提取序号列表."""
-    numbers = []
-    for ch in chapters_payload:
-        title = ch.get("title", "")
-        m = re.match(r'^[一二三四五六七八九十\d]+', title)
-        if m:
-            numbers.append(m.group(0))
-        else:
-            numbers.append(title)
-    return numbers
-
-
-def _find_heading_numbers_in_content(content: str) -> list[str]:
-    """从生成内容中提取所有一级标题序号."""
-    numbers = []
-    for line in content.split('\n'):
-        stripped = line.strip()
-        if stripped.startswith('#'):
-            m = re.search(r'[一二三四五六七八九十\d]+[、．.]', stripped)
-            if m:
-                numbers.append(m.group(0).rstrip('、．.'))
-    return numbers
-
-
 def _check_section_completeness(
     chapters_payload: list[dict],
     structure: list[dict],
@@ -263,9 +238,44 @@ def _apply_auto_fixes(
         fix_type = result.get("auto_fix", "")
 
         if fix_type == "replace_arabic_with_chinese":
-            # 将阿拉伯数字序号替换为中文数字
-            # 这里简化处理，实际需要更复杂的替换逻辑
-            pass
+            # 将内容中 markdown 标题的阿拉伯数字序号替换为中文数字
+            arabic_to_chinese = {
+                "1": "一", "2": "二", "3": "三", "4": "四", "5": "五",
+                "6": "六", "7": "七", "8": "八", "9": "九", "10": "十",
+                "11": "十一", "12": "十二", "13": "十三", "14": "十四",
+                "15": "十五", "16": "十六", "17": "十七", "18": "十八",
+                "19": "十九", "20": "二十",
+            }
+            item = result.get("item", "")
+            for ch in chapters_payload:
+                if item not in ch.get("title", "") and item != "heading_numbering":
+                    continue
+                content = ch.get("content", "")
+                if not content:
+                    continue
+
+                def _replace_heading_num(match):
+                    prefix = match.group(1)
+                    num = match.group(2)
+                    punct = match.group(3)  # 、or . or ．
+                    cn = arabic_to_chinese.get(num)
+                    if cn is None:
+                        return match.group(0)
+                    # Use Chinese-style punctuation
+                    sep = "、" if punct in ("、", ".", "．") else punct
+                    return f"{prefix}{cn}{sep}"
+
+                new_content = re.sub(
+                    r'^(#{1,2}\s*)(\d+)([、.．])',
+                    _replace_heading_num,
+                    content,
+                    flags=re.MULTILINE,
+                )
+                if new_content != content:
+                    ch["content"] = new_content
+                    fixes_applied += 1
+                    result["auto_fix_applied"] = True
+                break
 
         elif fix_type == "replace_column_names":
             expected = result.get("expected_columns", [])
