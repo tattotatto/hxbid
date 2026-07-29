@@ -166,6 +166,7 @@ async def upload_and_parse(
     return ParseResponse(
         project_name=project.name,
         requirements=requirements,
+        format_template=format_template,
     )
 
 
@@ -1116,6 +1117,14 @@ async def export_bid(
             if contract_images:
                 chapter_images[idx].extend(contract_images)
 
+    # -- Read format_template from project --
+    format_template = {}
+    if project.format_template_json and project.format_template_json != "{}":
+        try:
+            format_template = json.loads(project.format_template_json)
+        except Exception:
+            pass
+
     # -- Render .docx (no separate attachments section) --
     docx_path = render_bid_to_docx(
         chapters_payload,
@@ -1123,6 +1132,7 @@ async def export_bid(
         style_config=style_config,
         chapter_images=chapter_images if any(chapter_images) else None,
         company_name=cp.company_name if cp else "",
+        format_template=format_template,
     )
     docx_filename = Path(docx_path).name
 

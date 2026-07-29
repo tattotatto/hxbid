@@ -1504,6 +1504,34 @@ async def generate_bid_with_deep_outline(
 
     chapters_payload = build_final_chapters_payload(tree, generated_sections)
 
+    # ── Format verification ──
+    if fmt_template and chapters_payload:
+        try:
+            from app.services.format_verifier import verify_format
+            verification = verify_format(chapters_payload, fmt_template)
+
+            yield {
+                "event": "format_verification",
+                "data": json.dumps(verification, ensure_ascii=False),
+            }
+
+            # Save verification result to DB
+            if db and project_id:
+                try:
+                    result_v = await db.execute(
+                        sa_select(BidProject).where(BidProject.id == project_id)
+                    )
+                    db_proj = result_v.scalar_one_or_none()
+                    if db_proj:
+                        db_proj.format_verification_json = json.dumps(
+                            verification, ensure_ascii=False,
+                        )
+                        await db.commit()
+                except Exception as exc:
+                    logger.warning("Failed to save verification result: %s", exc)
+        except Exception as exc:
+            logger.warning("Format verification failed (non-blocking): %s", exc)
+
     # ── Phase 5: Yield final result ──
     yield {
         "event": "done",

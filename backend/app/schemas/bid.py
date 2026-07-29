@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class ParseResponse(BaseModel):
     project_name: str = ""
     requirements: dict = {}
+    format_template: dict | None = None
 
 
 class GenerateRequest(BaseModel):
