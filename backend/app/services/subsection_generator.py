@@ -209,6 +209,7 @@ async def generate_section(
     company_profile: dict | None = None,
     extra_guidance: str = "",
     temperature: float = 0.7,
+    format_template: dict | None = None,
 ) -> AsyncIterator[str]:
     """Generate content for a single leaf section.
 
@@ -226,6 +227,7 @@ async def generate_section(
         company_profile: Company info dict.
         extra_guidance: Additional writing instructions.
         temperature: AI temperature (default 0.7).
+        format_template: Optional format template dict from tender document.
 
     Yields:
         Generated content chunks (str).
@@ -256,7 +258,7 @@ async def generate_section(
 
     # ── Build system prompt with deep-section augmentation ──
     from app.services.ai_pipeline import _build_system_prompt
-    system_content = _build_system_prompt()
+    system_content = _build_system_prompt(format_template=format_template)
     if depth >= 2:
         system_content += "\n" + DEEP_SECTION_PROMPT_SUFFIX
 

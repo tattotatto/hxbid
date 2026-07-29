@@ -126,11 +126,24 @@ async def upload_and_parse(
     except Exception as e:
         requirements = {"project_name": project_name or file.filename or "未命名项目", "parse_error": str(e)}
 
+    # -- Extract format template from tender document (best-effort, non-blocking) --
+    format_template = None
+    if document_text:
+        try:
+            from app.services.format_extractor import extract_format_from_document
+            from app.services.ai_adapter import ai_adapter as ai_adapter_svc
+            format_template = await extract_format_from_document(
+                document_text, ai_adapter_svc,
+            )
+        except Exception as e:
+            logger.warning("Format extraction failed (non-blocking): %s", e)
+
     # -- Create project record --
     project = BidProject(
         name=project_name or requirements.get("project_name") or file.filename or "未命名项目",
         original_file_path=str(saved_path.absolute()),
         parsed_requirements_json=json.dumps(requirements, ensure_ascii=False),
+        format_template_json=json.dumps(format_template, ensure_ascii=False) if format_template else "{}",
         status="collecting",
         created_by=current_user.id,
     )

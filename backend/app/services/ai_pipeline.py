@@ -154,8 +154,15 @@ async def _get_active_constraints() -> List[str]:
         return _active_constraints_cache
 
 
-def _build_system_prompt(extra_constraints: List[str] | None = None) -> str:
-    """Build the full system prompt, appending any active feedback rules."""
+def _build_system_prompt(
+    extra_constraints: List[str] | None = None,
+    format_template: dict | None = None,
+) -> str:
+    """Build the full system prompt, appending any active feedback rules.
+
+    When format_template is provided, global format rules (numbering style,
+    TOC heading title, page number format) are injected as hard constraints.
+    """
     parts = [SYSTEM_PROMPT]
     all_constraints = list(_active_constraints_cache)
     if extra_constraints:
@@ -164,6 +171,23 @@ def _build_system_prompt(extra_constraints: List[str] | None = None) -> str:
         parts.append("\n额外写作约束（基于历史编辑反馈自动生成）：")
         for i, c in enumerate(all_constraints, 1):
             parts.append(f"  {i}. {c}")
+
+    # ── Global format rules from tender document ──
+    if format_template and format_template.get("global_format_rules"):
+        global_rules = format_template["global_format_rules"]
+        numbering = global_rules.get("numbering_style", "")
+        parts.append("\n【招标文件规定的格式规范 — 硬性要求】")
+        if numbering:
+            if numbering == "chinese_legal":
+                parts.append("- 序号体系：一级用中文数字（一、二、三...），二级用带括号中文数字（（一）、（二）...），三级用阿拉伯数字加点（1.、2.）")
+            elif numbering == "numeric":
+                parts.append("- 序号体系：一级用阿拉伯数字（1、2、3...），二级用（1.1、1.2...）")
+        if global_rules.get("toc_heading_title"):
+            parts.append(f"- 目录页标题为：{global_rules['toc_heading_title']}")
+        if global_rules.get("page_number_format"):
+            parts.append(f"- 页码格式：{global_rules['page_number_format']}")
+        parts.append("- 以上格式要求来自招标文件原文，生成内容时必须严格遵守。")
+
     return "\n".join(parts)
 
 
@@ -171,10 +195,14 @@ def _build_system_prompt(extra_constraints: List[str] | None = None) -> str:
 # Helper: build messages list with system prompt prepended
 # ---------------------------------------------------------------------------
 
-def _build_messages(user_content: str, extra_constraints: List[str] | None = None) -> List[Dict[str, str]]:
+def _build_messages(
+    user_content: str,
+    extra_constraints: List[str] | None = None,
+    format_template: dict | None = None,
+) -> List[Dict[str, str]]:
     """Return a messages list with SYSTEM_PROMPT as the system message."""
     return [
-        {"role": "system", "content": _build_system_prompt(extra_constraints)},
+        {"role": "system", "content": _build_system_prompt(extra_constraints, format_template)},
         {"role": "user", "content": user_content},
     ]
 
@@ -360,19 +388,25 @@ def generate_outline(requirements: dict) -> list[dict]:
 # Section-specific content guidance
 # ---------------------------------------------------------------------------
 
-def _get_section_guidance(chapter_title: str) -> str:
+def _get_section_guidance(chapter_title: str, format_template: dict | None = None) -> str:
     """Return content-structure guidance for a given chapter title.
 
     Bidding documents (招标文件) typically divide the bid into four parts
     (see 第六章 投标文件格式).  Each part has a clear purpose; without
     explicit guidance the AI tends to put commitment letters everywhere
     and duplicate content across sections.
+
+    When format_template is provided, per-section format constraints
+    (table columns, fixed-form text, signature blocks) are appended.
     """
     title_lower = chapter_title.strip().lower()
 
+    # ── Determine base guidance by section type ──
+    guidance = ""
+
     # -- 商务部分 / Business Section --
     if _match_section(title_lower, ["商务", "商务部分"]):
-        return """【本章节内容规范 — 商务部分】
+        guidance = """【本章节内容规范 — 商务部分】
 本章节必须包含以下内容，按顺序排列：
 1. 开标一览表（项目名称、不含税单价/总价、服务期限、税率、投标保证金）
 2. 投标函（致招标人，声明已阅读招标文件、投标有效期、承诺不转包分包、承诺不串标围标）
@@ -388,8 +422,8 @@ def _get_section_guidance(chapter_title: str) -> str:
 - 承诺书文本应完整、正式，包含投标人签章栏"""
 
     # -- 技术部分 / Technical Section --
-    if _match_section(title_lower, ["技术", "技术部分", "服务方案", "技术方案"]):
-        return """【本章节内容规范 — 技术部分】
+    elif _match_section(title_lower, ["技术", "技术部分", "服务方案", "技术方案"]):
+        guidance = """【本章节内容规范 — 技术部分】
 本章节为项目技术方案，必须包含：
 1. 项目投入服务人员一览表（姓名、年龄、学历、证书、从业年限、拟任角色）
 2. 人员相关证明材料说明（劳动合同、社保证明、退出现役证、驾驶证、消防员证等）
@@ -406,8 +440,8 @@ def _get_section_guidance(chapter_title: str) -> str:
 - 不得包含廉洁诚信承诺书等商务部分内容"""
 
     # -- 资格审查部分 / Qualification Review Section --
-    if _match_section(title_lower, ["资格审查", "资格", "资质审查", "公司资质", "资质与业绩"]):
-        return """【本章节内容规范 — 资格审查部分】
+    elif _match_section(title_lower, ["资格审查", "资格", "资质审查", "公司资质", "资质与业绩"]):
+        guidance = """【本章节内容规范 — 资格审查部分】
 本章节用于证明投标人具备投标资格，必须包含：
 1. 投标人基本情况表（公司名称、统一社会信用代码、法定代表人、注册资本、成立时间、经营范围、公司简介）
 2. 企业信誉情况承诺书（承诺：未被暂停投标资格、未列入严重失信名单、未列入行贿行为供应商名单）
@@ -421,10 +455,9 @@ def _get_section_guidance(chapter_title: str) -> str:
 - 不得包含与招标人干部职工不存在关联关系的承诺书（该承诺书在商务部分）
 - 企业信誉情况承诺书与廉洁诚信承诺书是不同的文件，不可混淆"""
 
-
     # -- 投标人认为需要提供的其他内容 / Other Materials --
-    if _match_section(title_lower, ["其他", "其他内容", "投标人认为需要提供的"]):
-        return """【本章节内容规范 — 投标人认为需要提供的其他内容】
+    elif _match_section(title_lower, ["其他", "其他内容", "投标人认为需要提供的"]):
+        guidance = """【本章节内容规范 — 投标人认为需要提供的其他内容】
 本章节用于补充前三部分未覆盖的证明材料，例如：
 1. 公司获奖证书、荣誉证明
 2. 类似项目业绩合同关键页
@@ -441,8 +474,8 @@ def _get_section_guidance(chapter_title: str) -> str:
 如确实无补充材料，可简要声明"投标人已将所有相关证明材料分别归入商务部分、技术部分和资格审查部分，本处不再赘述。" """
 
     # -- 投标函 specific --
-    if _match_section(title_lower, ["投标函"]):
-        return """【本章节内容规范 — 投标函】
+    elif _match_section(title_lower, ["投标函"]):
+        guidance = """【本章节内容规范 — 投标函】
 按招标文件格式撰写正式投标函：
 1. 致招标人全称
 2. 声明已仔细阅读全部招标文件内容
@@ -454,8 +487,8 @@ def _get_section_guidance(chapter_title: str) -> str:
 8. 附投标人签章栏"""
 
     # -- 类似项目业绩 / Project Performance Section --
-    if _match_section(title_lower, ["业绩", "类似项目", "项目经验", "成功案例", "既往项目"]):
-        return """【本章节内容规范 — 公司业绩】
+    elif _match_section(title_lower, ["业绩", "类似项目", "项目经验", "成功案例", "既往项目"]):
+        guidance = """【本章节内容规范 — 公司业绩】
 本章节展示投标人类似项目业绩，系统将自动插入"公司业绩一览表"和合同扫描图片。
 你只需撰写以下文字内容：
 
@@ -469,15 +502,78 @@ def _get_section_guidance(chapter_title: str) -> str:
 - 不需要自己写表格，不需要写"项目详细情况"章节，系统会自动处理
 - 严禁编造任何项目名称或数据"""
 
-    # -- Catch-all: no specific guidance --
-    return ""
-
-    # -- Catch-all: no specific guidance --
-    return ""
+    # -- Append per-section format constraints from tender template --
+    fmt_suffix = _build_section_format_guidance(chapter_title, [], format_template)
+    if fmt_suffix:
+        if guidance:
+            return guidance + "\n" + fmt_suffix
+        return fmt_suffix
+    return guidance
 
 def _match_section(title_lower: str, keywords: list) -> bool:
     """Return True if any keyword appears in the chapter title."""
     return any(kw in title_lower for kw in keywords)
+
+
+def _build_section_format_guidance(
+    section_title: str,
+    section_path: list[str],
+    format_template: dict | None,
+) -> str:
+    """Build per-section format constraint guidance from the tender format template.
+
+    Matches the section title/path against the document_structure in the
+    format_template. When a match is found, injects table column constraints,
+    fixed-form text segments, and signature block requirements into a prompt
+    guidance string.
+
+    Returns an empty string when format_template is None or no match is found.
+    """
+    if not format_template:
+        return ""
+
+    parts = []
+    structure = format_template.get("document_structure", [])
+
+    for part in structure:
+        for child in part.get("children", []):
+            child_title = child.get("title", "")
+            # Match: child title appears in section path or section title
+            path_titles = " ".join(section_path)
+            if child_title not in path_titles and child_title not in section_title:
+                continue
+
+            child_type = child.get("type") or "text"
+
+            if child_type == "table":
+                cols = [c["name"] for c in child.get("table_schema", {}).get("columns", [])]
+                if cols:
+                    parts.append(
+                        f"\n【招标文件规定的表格格式 — 必须严格遵守】\n"
+                        f"本节的表格必须包含以下列（按顺序）：{'、'.join(cols)}\n"
+                        f"禁止增减列、禁止调换列顺序。"
+                    )
+            elif child_type == "fixed_form":
+                segments = child.get("fixed_text_segments", [])
+                if segments:
+                    parts.append(
+                        f"\n【招标文件规定的固定格式 — 加粗部分必须原样使用】"
+                    )
+                    for seg in segments:
+                        if seg.get("editable") is False:
+                            parts.append(f"固定措辞（不可修改）：{seg['text']}")
+                        else:
+                            parts.append(f"可编辑区域：{seg['text']}")
+
+            if child.get("signature_block"):
+                sig_lines = child["signature_block"].get("lines", [])
+                if sig_lines:
+                    parts.append(
+                        f"\n【签章要求 — 必须包含以下签章行】\n" +
+                        "\n".join(sig_lines)
+                    )
+
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +585,7 @@ async def generate_chapter(
     requirements: dict,
     context: str = "",
     stream: bool = True,
+    format_template: dict | None = None,
 ) -> AsyncIterator[str] | str:
     """Generate content for a single bid document chapter.
 
@@ -502,6 +599,8 @@ async def generate_chapter(
         context: Additional context string (de-identified if containing PII).
         stream: If True, returns an AsyncIterator[str] for token-by-token
                 streaming. If False, returns the complete response as a str.
+        format_template: Optional format template dict extracted from the
+            tender document for injecting format constraints.
 
     Returns:
         AsyncIterator[str] when stream=True; str when stream=False.
@@ -516,7 +615,7 @@ async def generate_chapter(
     # Without this, the AI tends to put commitment letters (承诺书) in
     # 资格审查部分 and duplicate them in 其他内容, while the actual
     # qualification certificates end up buried in attachments.
-    section_guidance = _get_section_guidance(chapter_title)
+    section_guidance = _get_section_guidance(chapter_title, format_template)
 
     user_prompt = f"""请撰写标书章节内容。
 
@@ -537,7 +636,7 @@ async def generate_chapter(
 7. 段落之间用空行分隔
 8. 如果上文提供了【公司基本信息】，其中所有数据（公司名称、法定代表人、统一社会信用代码等）必须原封不动使用，严禁编造任何替代信息"""
 
-    messages = _build_messages(user_prompt)
+    messages = _build_messages(user_prompt, format_template=format_template)
 
     if stream:
         return ai_adapter.chat_completion_stream(
@@ -562,6 +661,7 @@ async def generate_chapter_with_materials(
     matched_personnel: list | None = None,
     similar_chapters: list[str] | None = None,
     company_profile: dict | None = None,
+    format_template: dict | None = None,
 ) -> AsyncIterator[str]:
     """Generate a chapter enriched with matched company resources.
 
@@ -587,6 +687,7 @@ async def generate_chapter_with_materials(
             style / content reference.
         company_profile: Optional dict with company info fields (company_name,
             business_license_number, legal_rep_name, address, etc.).
+        format_template: Optional format template dict from tender document.
 
     Yields:
         Generated chapter text chunks as they arrive from the model.
@@ -659,6 +760,7 @@ async def generate_chapter_with_materials(
         requirements=requirements,
         context=context,
         stream=True,
+        format_template=format_template,
     )
 
     async for chunk in stream_result:
@@ -818,6 +920,7 @@ async def _generate_single_section_with_retry(
     max_retries: int = 2,
     retry_delay_base: float = 1.0,
     extra_guidance: str = "",
+    format_template: dict | None = None,
 ) -> tuple:
     """Generate a single leaf section with retry.
 
@@ -832,6 +935,15 @@ async def _generate_single_section_with_retry(
     max_tokens = leaf.get("max_tokens", 4096)
     sibling_summaries = leaf.get("sibling_summaries", [])
 
+    # Build section-specific format guidance from tender template
+    fmt_guidance = _build_section_format_guidance(title, path, format_template)
+    combined_guidance = extra_guidance
+    if fmt_guidance:
+        if combined_guidance:
+            combined_guidance = combined_guidance + "\n" + fmt_guidance
+        else:
+            combined_guidance = fmt_guidance
+
     last_error = None
     for attempt in range(max_retries + 1):
         try:
@@ -845,7 +957,8 @@ async def _generate_single_section_with_retry(
                 sibling_summaries=sibling_summaries[:8],
                 reference_sections=reference_sections,
                 company_profile=company_profile,
-                extra_guidance=extra_guidance,
+                extra_guidance=combined_guidance,
+                format_template=format_template,
             ):
                 full_content += chunk
 
@@ -921,6 +1034,20 @@ async def generate_bid_with_deep_outline(
         tree = _reconstruct_tree_from_leaves(leaves)
         stats = get_outline_stats(tree) if tree else {"total_leaf_sections": len(leaves), "estimated_pages": 0, "max_depth": 1}
         logger.info("Resume mode: loaded %d leaves from stored state", len(leaves))
+
+    # ── Load format_template from DB (best-effort, non-blocking) ──
+    fmt_template: dict | None = None
+    if db and project_id:
+        try:
+            result = await db.execute(
+                sa_select(BidProject).where(BidProject.id == project_id)
+            )
+            db_proj = result.scalar_one_or_none()
+            if db_proj and db_proj.format_template_json and db_proj.format_template_json != "{}":
+                fmt_template = json.loads(db_proj.format_template_json)
+                logger.info("Loaded format_template for project %s", project_id)
+        except Exception as exc:
+            logger.debug("Failed to load format_template: %s", exc)
 
     # ── Phase 1: Build reference outlines (skip on resume) ──
     if not resume:
@@ -1166,6 +1293,7 @@ async def generate_bid_with_deep_outline(
                 max_retries=settings.GENERATION_MAX_RETRIES,
                 retry_delay_base=settings.GENERATION_RETRY_DELAY_BASE,
                 extra_guidance=leaf.get("_extra_guidance", ""),
+                format_template=fmt_template,
             )
 
             if content:
@@ -1270,6 +1398,7 @@ async def generate_bid_with_deep_outline(
                     reference_sections=leaf.get("_reference_sections", []),
                     max_retries=settings.GENERATION_MAX_RETRIES,
                     retry_delay_base=settings.GENERATION_RETRY_DELAY_BASE,
+                    format_template=fmt_template,
                 )
                 return {
                     "idx": leaf["_idx"],
