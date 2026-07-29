@@ -33,3 +33,19 @@ class RetryFailedRequest(BaseModel):
 class ExportResponse(BaseModel):
     docx_url: str = ""
     pdf_url: str = ""
+
+
+class FormatVerificationCheck(BaseModel):
+    check: str = ""
+    item: str = ""
+    status: str = ""  # "pass" | "warning" | "fail"
+    detail: str = ""
+    can_auto_fix: bool = False
+
+
+class FormatVerificationResult(BaseModel):
+    overall_status: str = "pass"  # "pass" | "pass_with_warnings" | "fail"
+    checks: list[dict] = []
+    auto_fixes_applied: int = 0
+    manual_review_required: int = 0
+    message: str = ""

@@ -53,6 +53,7 @@ async def generate_deep_outline(
     tender_text: str = "",
     min_leaves: int = MIN_LEAF_SECTIONS,
     max_leaves: int = MAX_LEAF_SECTIONS,
+    format_template: dict | None = None,
 ) -> list:
     """Generate a comprehensive multi-level bid document outline.
 
@@ -60,6 +61,7 @@ async def generate_deep_outline(
     - The tender requirements (project scope, evaluation criteria)
     - Reference bid outlines from the library (structural templates)
     - The tender document text (for section format requirements)
+    - Format template extracted from the tender (for mandatory structure constraints)
 
     Args:
         requirements: Parsed tender requirements dict.
@@ -70,6 +72,10 @@ async def generate_deep_outline(
             section structure from Chapter 6 投标文件格式).
         min_leaves: Minimum number of leaf sections to generate.
         max_leaves: Maximum number of leaf sections to generate.
+        format_template: Extracted format template dict with
+            "document_structure" key. When provided, the mandatory
+            chapter structure is injected into the AI prompt as a hard
+            constraint — top-level chapters must not be changed.
 
     Returns:
         List of root outline nodes (dicts), each like:
@@ -112,6 +118,11 @@ async def generate_deep_outline(
                 f"最大深度{stats.get('max_depth', '?')}级"
             )
             user_parts.append(outline_struct)
+
+    # 3b. Format template constraints (mandatory chapter structure)
+    if format_template and format_template.get("document_structure"):
+        format_prompt = _format_template_to_prompt_text(format_template)
+        user_parts.append(f"\n{format_prompt}")
 
     # 4. Output format specification
     user_parts.append(f"""
@@ -516,3 +527,47 @@ def flatten_outline_to_chapters(outline_tree: list) -> List[dict]:
             leaf["parent_title"] = ""
 
     return leaves
+
+
+# ---------------------------------------------------------------------------
+# Format template to prompt text converter
+# ---------------------------------------------------------------------------
+
+def _format_template_to_prompt_text(format_template: dict) -> str:
+    """将格式模板转为可注入 AI prompt 的文本描述.
+
+    只描述顶层结构（部分→章），AI 在提取的子节内可以扩展更深层级。
+    """
+    lines = [
+        "【招标文件规定的标书格式 — 以下结构为强制要求，顶层不得更改】",
+        "以下章节结构、序号、标题均来自招标文件的投标文件格式要求。",
+        "生成大纲时，这些章节必须原样保留，顺序不得调整，标题不得改动。",
+        "你可以在每个章下面扩展更细的子节，但不能修改顶层结构。\n",
+    ]
+
+    structure = format_template.get("document_structure", [])
+    for part in structure:
+        number = part.get("number", "")
+        title = part.get("title", "")
+        required = part.get("required", True)
+        req_mark = "【必需】" if required else "【可选】"
+        lines.append(f"{number}、{title} {req_mark}")
+
+        for child in part.get("children", []):
+            c_num = child.get("number", "")
+            c_title = child.get("title", "")
+            c_type = child.get("type") or "text"
+
+            type_hint = ""
+            if c_type == "table":
+                cols = [c["name"] for c in child.get("table_schema", {}).get("columns", [])]
+                type_hint = f" [表格 — 必须包含以下列：{'、'.join(cols)}]"
+            elif c_type == "fixed_form":
+                type_hint = " [固定格式表单 — 含招标文件规定的固定措辞]"
+            elif c_type == "attachment":
+                type_hint = " [附件/证明材料]"
+
+            lines.append(f"  {c_num} {c_title}{type_hint}")
+
+    lines.append(f"\n共 {len(structure)} 个部分。请严格按此结构生成大纲。")
+    return "\n".join(lines)
