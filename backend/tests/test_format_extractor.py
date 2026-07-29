@@ -250,6 +250,68 @@ async def test_extract_format_template_ai_failure():
 
 
 @pytest.mark.asyncio
+async def test_extract_format_from_document_happy_path():
+    """验证完整提取流水线：定位成功 + AI提取成功，并合并定位元数据."""
+    from unittest.mock import patch
+
+    mock_ai = AsyncMock()
+    mock_ai.chat_completion.return_value = '''{
+        "document_structure": [
+            {
+                "number": "一",
+                "title": "商务部分",
+                "required": true,
+                "confidence": 0.95,
+                "children": [
+                    {
+                        "number": "（一）",
+                        "title": "开标一览表",
+                        "type": "table",
+                        "table_schema": {
+                            "columns": [
+                                {"name": "序号"},
+                                {"name": "服务内容"}
+                            ]
+                        },
+                        "signature_block": {
+                            "lines": ["投标人：（公章）"]
+                        },
+                        "confidence": 0.9
+                    }
+                ]
+            }
+        ],
+        "global_format_rules": {
+            "numbering_style": "chinese_legal",
+            "confidence": 0.8
+        },
+        "extraction_metadata": {"warnings": []}
+    }'''
+
+    mock_location = {
+        "chapter_number": "六",
+        "chapter_title": "第六章 投标文件格式",
+        "section_text": MOCK_SECTION,
+        "method": "keyword_match",
+    }
+
+    with patch(
+        "app.services.format_extractor.locate_format_section",
+        AsyncMock(return_value=mock_location),
+    ):
+        result = await extract_format_from_document(SAMPLE_TEXT_CHAPTER6, mock_ai)
+
+    assert result is not None
+    assert "document_structure" in result
+    assert len(result["document_structure"]) == 1
+    assert result["document_structure"][0]["title"] == "商务部分"
+
+    # 验证定位元数据已合并到提取结果
+    assert result["extraction_metadata"]["location_method"] == "keyword_match"
+    assert result["extraction_metadata"]["chapter_title"] == "第六章 投标文件格式"
+
+
+@pytest.mark.asyncio
 async def test_extract_format_from_document_no_section():
     """验证无法定位格式章节时返回None."""
     mock_ai = AsyncMock()
