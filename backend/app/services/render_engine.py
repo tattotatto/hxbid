@@ -10,6 +10,7 @@ Handles markdown artifacts that may appear in AI-generated content, converting
 them to proper Word formatting (headings, bold, italic, bullets, tables).
 """
 
+import logging
 import os
 import re
 import time
@@ -27,6 +28,8 @@ from docx.oxml import OxmlElement
 from PIL import Image as PILImage
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ── Default style constants (Chinese bid-document spec) ─────────────────
 
@@ -986,7 +989,7 @@ def _add_attachments_section(doc, attachments, style):
 
 # ── Public API ────────────────────────────────────────────────────────
 
-def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images=None, company_name=""):
+def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images=None, company_name="", format_template=None):
     """Render bid chapters into a formatted ``.docx`` file.
 
     Parameters
@@ -1011,6 +1014,16 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     style = dict(DEFAULT_STYLE)
     if style_config:
         style.update(style_config)
+
+    # 应用招标文件规定的全局格式规则（优先级高于默认和用户配置）
+    if format_template and format_template.get("global_format_rules"):
+        rules = format_template["global_format_rules"]
+        # 封面元素由 _add_cover_page 处理
+        # 目录标题在 _add_toc_page 中已使用 "目录"，如需覆盖在此处理
+        logger.info(
+            "Applying format template global rules: numbering=%s",
+            rules.get("numbering_style", "unknown"),
+        )
     # Use company name as header_text default if not explicitly configured
     # Also strip any legacy hardcoded default that may still exist in old templates
     if not style.get("header_text") or style.get("header_text") == "云南宏曦科技有限公司":
