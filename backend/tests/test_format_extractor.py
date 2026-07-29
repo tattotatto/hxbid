@@ -1,5 +1,9 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from app.services.format_extractor import (
+    extract_format_from_document,
+    extract_format_template,
     locate_format_section,
     _fallback_tail,
     _find_by_keyword,
@@ -154,4 +158,100 @@ def test_fallback_tail_too_short():
     """Strategy 4 returns None when tail is too short."""
     short_text = "短文本" * 50  # ~150 chars, tail ~60 chars < _TAIL_MIN_CHARS
     result = _fallback_tail(short_text)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — AI format template extraction tests
+# ---------------------------------------------------------------------------
+
+MOCK_SECTION = """
+一、商务部分
+（一）开标一览表
+投标人应根据本招标文件的要求编制投标报价，格式如下：
+
+| 序号 | 服务内容 | 不含税单价（元） | 税率（%） | 含税总价（元） | 备注 |
+|------|---------|----------------|----------|--------------|------|
+|      |         |                |          |              |      |
+
+投标人：（公章）
+法定代表人或授权代理人：（签字）
+日期：  年  月  日
+
+（二）投标函
+致：〔招标人名称〕
+我方（投标人名称）已仔细阅读并充分理解贵方招标文件的全部内容...
+"""
+
+
+@pytest.mark.asyncio
+async def test_extract_format_template_structure():
+    """验证AI提取返回格式模板的基本结构."""
+    mock_ai = AsyncMock()
+    mock_ai.chat_completion.return_value = '''{
+        "document_structure": [
+            {
+                "number": "一",
+                "title": "商务部分",
+                "required": true,
+                "confidence": 0.9,
+                "children": [
+                    {
+                        "number": "（一）",
+                        "title": "开标一览表",
+                        "type": "table",
+                        "table_schema": {
+                            "columns": [
+                                {"name": "序号"},
+                                {"name": "服务内容"},
+                                {"name": "不含税单价（元）"},
+                                {"name": "税率（%）"},
+                                {"name": "含税总价（元）"},
+                                {"name": "备注"}
+                            ]
+                        },
+                        "signature_block": {
+                            "lines": ["投标人：（公章）", "法定代表人或授权代理人：（签字）", "日期：  年  月  日"]
+                        },
+                        "confidence": 0.9
+                    }
+                ]
+            }
+        ],
+        "global_format_rules": {
+            "numbering_style": "chinese_legal",
+            "confidence": 0.8
+        },
+        "extraction_metadata": {"warnings": []}
+    }'''
+
+    result = await extract_format_template(MOCK_SECTION, mock_ai)
+
+    assert "document_structure" in result
+    assert len(result["document_structure"]) == 1
+    assert result["document_structure"][0]["title"] == "商务部分"
+
+    first_child = result["document_structure"][0]["children"][0]
+    assert first_child["type"] == "table"
+    assert len(first_child["table_schema"]["columns"]) == 6
+    assert "signature_block" in first_child
+
+
+@pytest.mark.asyncio
+async def test_extract_format_template_ai_failure():
+    """验证AI调用失败时返回降级空模板."""
+    mock_ai = AsyncMock()
+    mock_ai.chat_completion.side_effect = Exception("AI timeout")
+
+    result = await extract_format_template(MOCK_SECTION, mock_ai)
+
+    assert result["document_structure"] == []
+    assert "error" in result.get("extraction_metadata", {})
+
+
+@pytest.mark.asyncio
+async def test_extract_format_from_document_no_section():
+    """验证无法定位格式章节时返回None."""
+    mock_ai = AsyncMock()
+    result = await extract_format_from_document("无格式章节的短文本", mock_ai)
     assert result is None
