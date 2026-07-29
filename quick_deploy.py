@@ -23,10 +23,12 @@ BACKEND_FILES = [
     "backend/app/services/format_extractor.py",
     "backend/app/services/format_verifier.py",
     "backend/app/services/outline_engine.py",
+    "backend/app/services/pdf_extractor.py",
     "backend/app/services/rag.py",
     "backend/app/services/reference_analyzer.py",
     "backend/app/services/render_engine.py",
     "backend/app/services/subsection_generator.py",
+    "backend/app/services/template_filler.py",
     "backend/app/services/token_budget.py",
 ]
 
@@ -104,11 +106,15 @@ CONTAINER_MAP = {
     "backend/app/schemas/project.py": "/app/app/schemas/project.py",
     "backend/app/services/ai_pipeline.py": "/app/app/services/ai_pipeline.py",
     "backend/app/services/content_assembler.py": "/app/app/services/content_assembler.py",
+    "backend/app/services/format_extractor.py": "/app/app/services/format_extractor.py",
+    "backend/app/services/format_verifier.py": "/app/app/services/format_verifier.py",
     "backend/app/services/outline_engine.py": "/app/app/services/outline_engine.py",
+    "backend/app/services/pdf_extractor.py": "/app/app/services/pdf_extractor.py",
     "backend/app/services/rag.py": "/app/app/services/rag.py",
     "backend/app/services/reference_analyzer.py": "/app/app/services/reference_analyzer.py",
     "backend/app/services/render_engine.py": "/app/app/services/render_engine.py",
     "backend/app/services/subsection_generator.py": "/app/app/services/subsection_generator.py",
+    "backend/app/services/template_filler.py": "/app/app/services/template_filler.py",
     "backend/app/services/token_budget.py": "/app/app/services/token_budget.py",
 }
 for f in BACKEND_FILES:
