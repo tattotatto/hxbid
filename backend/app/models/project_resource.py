@@ -184,6 +184,10 @@ class ProjectContract(Base):
     project: Mapped["BidProject"] = relationship(  # noqa: F821
         back_populates="project_contracts",
     )
+    contract: Mapped["Contract | None"] = relationship(  # noqa: F821
+        "Contract",
+        foreign_keys=[contract_id],
+    )
 
     def __repr__(self) -> str:
         return (

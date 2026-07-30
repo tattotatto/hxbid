@@ -462,13 +462,11 @@ async def get_collected_resources(
     pc_result = await db.execute(
         select(ProjectContract)
         .where(ProjectContract.project_id == project_id)
+        .options(selectinload(ProjectContract.contract))
     )
-    from app.models.contract import Contract as ContractModel
     contracts = []
     for pc in pc_result.scalars():
-        c = None
-        if pc.contract_id:
-            c = await db.get(ContractModel, pc.contract_id)
+        c = pc.contract
         contracts.append({
             "id": pc.id,
             "contract_id": pc.contract_id,

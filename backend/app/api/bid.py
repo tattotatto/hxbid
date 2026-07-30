@@ -53,15 +53,16 @@ async def _gather_generation_context(
     project_id: str,
     requirements: dict,
     db,
-) -> tuple[dict | None, list, list]:
-    """Gather company profile, qualifications, and personnel for generation.
+) -> tuple[dict | None, list, list, list]:
+    """Gather company profile, qualifications, personnel, and contracts for generation.
 
-    Returns (company_profile, matched_qualifications, matched_personnel).
+    Returns (company_profile, matched_qualifications, matched_personnel, matched_contracts).
     """
     collected = None
     company_profile = None
     matched_qualifications: list = []
     matched_personnel: list = []
+    matched_contracts: list = []
 
     try:
         collected = await get_collected_resources(project_id, db)
@@ -71,6 +72,7 @@ async def _gather_generation_context(
     if collected:
         matched_qualifications = collected.get("qualifications", [])
         matched_personnel = collected.get("personnel", [])
+        matched_contracts = collected.get("contracts", [])
         company_profile = collected.get("company")
     else:
         try:
@@ -86,7 +88,7 @@ async def _gather_generation_context(
         except Exception:
             pass
 
-    return company_profile, matched_qualifications, matched_personnel
+    return company_profile, matched_qualifications, matched_personnel, matched_contracts
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +340,7 @@ async def generate_bid(
             async with async_session() as gen_db:
                 try:
                     # Gather context
-                    company_profile, matched_qualifications, matched_personnel = \
+                    company_profile, matched_qualifications, matched_personnel, matched_contracts = \
                         await _gather_generation_context(
                             project_id, requirements, gen_db,
                         )
@@ -350,6 +352,7 @@ async def generate_bid(
                         company_profile=company_profile,
                         matched_qualifications=matched_qualifications,
                         matched_personnel=matched_personnel,
+                        matched_contracts=matched_contracts,
                         project_id=project_id,
                         db=gen_db,
                     ):
@@ -446,13 +449,14 @@ async def generate_bid(
                     similar_chapters = []
                     matched_qualifications = []
                     matched_personnel = []
+                    matched_contracts = []
                     company_profile = None
                     source_summary = {}
 
                     try:
                         # If project has collected resources, use them directly
                         collected = await get_collected_resources(project_id, gen_db)
-                        if collected["qualifications"] or collected["personnel"]:
+                        if collected["qualifications"] or collected["personnel"] or collected["contracts"]:
                             # Use collected qualifications (still do vector search for similar chapters)
                             try:
                                 from app.services.rag import retrieve_similar_chapters
@@ -465,11 +469,13 @@ async def generate_bid(
                                 similar_chapters = []
                             matched_qualifications = collected["qualifications"]
                             matched_personnel = collected["personnel"]
+                            matched_contracts = collected.get("contracts", [])
                             company_profile = collected.get("company")
                             source_summary = {
                                 "similar_count": len(similar_chapters),
                                 "qual_count": len(matched_qualifications),
                                 "personnel_count": len(matched_personnel),
+                                "contract_count": len(matched_contracts),
                                 "has_company": company_profile is not None,
                                 "similar_titles": [s.get("title", "") for s in similar_chapters[:5]],
                             }
@@ -504,6 +510,7 @@ async def generate_bid(
                             requirements=requirements,
                             matched_qualifications=matched_qualifications,
                             matched_personnel=matched_personnel,
+                            matched_contracts=matched_contracts,
                             similar_chapters=[s["content"] for s in similar_chapters],
                             company_profile=company_profile,
                         ):
@@ -737,7 +744,7 @@ async def retry_failed_sections(
         async with async_session() as gen_db:
             try:
                 # Gather context
-                company_profile, matched_qualifications, matched_personnel = \
+                company_profile, matched_qualifications, matched_personnel, matched_contracts = \
                     await _gather_generation_context(
                         project_id, requirements, gen_db,
                     )
@@ -759,6 +766,7 @@ async def retry_failed_sections(
                     company_profile=company_profile,
                     matched_qualifications=matched_qualifications,
                     matched_personnel=matched_personnel,
+                    matched_contracts=matched_contracts,
                     project_id=project_id,
                     db=gen_db,
                     resume=True,  # skip outline regeneration
@@ -1052,9 +1060,27 @@ async def export_bid(
 
     # ── Contract data and images for 业绩/类似项目 sections ──
     from app.models.contract import Contract
-    ct_result = await db.execute(
-        select(Contract).order_by(Contract.created_at.desc())
-    )
+    # Prefer collected (user-selected) contracts over the full library
+    collected_contract_ids = []
+    try:
+        collected_resources = await get_collected_resources(data.project_id, db)
+        collected_contracts = collected_resources.get("contracts", [])
+        collected_contract_ids = [
+            c["contract_id"] for c in collected_contracts if c.get("contract_id")
+        ]
+    except Exception:
+        pass
+
+    if collected_contract_ids:
+        ct_result = await db.execute(
+            select(Contract)
+            .where(Contract.id.in_(collected_contract_ids))
+            .order_by(Contract.created_at.desc())
+        )
+    else:
+        ct_result = await db.execute(
+            select(Contract).order_by(Contract.created_at.desc())
+        )
     contracts = ct_result.scalars().all()
 
     # Build structured contract text block with summary table + per-project images

@@ -659,6 +659,7 @@ async def generate_chapter_with_materials(
     requirements: dict,
     matched_qualifications: list | None = None,
     matched_personnel: list | None = None,
+    matched_contracts: list | None = None,
     similar_chapters: list[str] | None = None,
     company_profile: dict | None = None,
     format_template: dict | None = None,
@@ -743,6 +744,27 @@ async def generate_chapter_with_materials(
         combined = "\n".join(personnel_lines)
         safe_combined, _ = deidentify_text(combined)
         context_parts.append(safe_combined)
+
+    # --- Contracts (for 业绩-related chapters) ---
+    if matched_contracts:
+        contract_lines: List[str] = ["【历史合同业绩数据 — 以下为真实项目数据，必须在标书中原样使用，严禁编造项目名称、金额等信息】"]
+        for i, c in enumerate(matched_contracts, 1):
+            name = c.get("project_name", "")
+            if not name:
+                continue
+            contract_lines.append(f"{i}. 项目名称：{name}")
+            if c.get("procurement_unit"):
+                contract_lines.append(f"   采购单位：{c['procurement_unit']}")
+            if c.get("contract_amount"):
+                contract_lines.append(f"   合同金额：{c['contract_amount']}")
+            if c.get("contract_date"):
+                contract_lines.append(f"   合同日期：{c['contract_date']}")
+            notes = c.get("notes", "")
+            if notes:
+                contract_lines.append(f"   备注：{notes[:200]}")
+            contract_lines.append("")
+        contract_lines.append("重要提醒：标书中涉及项目业绩时，必须使用以上真实项目数据，不得自行编造任何项目名称、金额等信息。")
+        context_parts.append("\n".join(contract_lines))
 
     # --- Similar historical chapters ---
     if similar_chapters:
@@ -875,6 +897,44 @@ def _update_generation_state(
         state["status"] = "completed"
 
 
+def _format_contract_context(contracts: list) -> str:
+    """Format collected contract dicts into AI prompt context.
+
+    Same output format as ``_gather_contract_data`` but operates on
+    already-fetched collected resources (dicts) instead of querying the DB.
+
+    Args:
+        contracts: List of contract dicts from ``get_collected_resources``,
+            each containing project_name, procurement_unit, contract_amount,
+            service_period, contract_date, notes.
+
+    Returns:
+        Formatted text block, or empty string if list is empty.
+    """
+    if not contracts:
+        return ""
+
+    lines = ["【历史合同业绩数据 — 以下为真实项目数据，必须在标书中原样使用，严禁编造项目名称、金额等信息】"]
+    for i, c in enumerate(contracts, 1):
+        name = c.get("project_name", "")
+        if not name:
+            continue
+        lines.append(f"{i}. 项目名称：{name}")
+        if c.get("procurement_unit"):
+            lines.append(f"   采购单位：{c['procurement_unit']}")
+        if c.get("contract_amount"):
+            lines.append(f"   合同金额：{c['contract_amount']}")
+        if c.get("contract_date"):
+            lines.append(f"   合同日期：{c['contract_date']}")
+        notes = c.get("notes", "")
+        if notes:
+            lines.append(f"   备注：{notes[:200]}")
+        lines.append("")
+
+    lines.append("重要提醒：标书中涉及项目业绩时，必须使用以上真实项目数据，不得自行编造任何项目名称、金额等信息。")
+    return "\n".join(lines)
+
+
 async def _gather_contract_data(db) -> str:
     """Gather historical contract data for injection into AI prompt context.
 
@@ -989,6 +1049,7 @@ async def generate_bid_with_deep_outline(
     company_profile: dict | None = None,
     matched_qualifications: list | None = None,
     matched_personnel: list | None = None,
+    matched_contracts: list | None = None,
     project_id: str = "",
     db=None,
     progress_callback: Callable | None = None,
@@ -1174,7 +1235,12 @@ async def generate_bid_with_deep_outline(
 
     # ── Phase 2.6: Gather contract + personnel data for context injection ──
     contract_context = ""
-    if db:
+    if matched_contracts:
+        # Prefer collected (user-selected) contracts over the full library
+        contract_context = _format_contract_context(matched_contracts)
+        if contract_context:
+            logger.info("Using collected contracts context: %d chars", len(contract_context))
+    elif db:
         try:
             contract_context = await _gather_contract_data(db)
             if contract_context:
