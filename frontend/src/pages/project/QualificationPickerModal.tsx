@@ -48,14 +48,6 @@ interface CompanyProfile {
 
 type PickerMode = 'qualification' | 'personnel' | 'contract' | 'history_bid' | 'company'
 
-const MODE_LABELS: Record<PickerMode, string> = {
-  qualification: '公司资质',
-  personnel: '人员管理',
-  contract: '历史合同',
-  history_bid: '历史投标',
-  company: '公司信息',
-}
-
 interface Props {
   open: boolean
   requirementName: string
@@ -234,7 +226,14 @@ export default function QualificationPickerModal({
           value={mode}
           onChange={(v) => { setMode(v); setSearch('') }}
           style={{ width: 140 }}
-          options={Object.entries(MODE_LABELS).map(([value, label]) => ({ value, label }))}
+          getPopupContainer={(trigger) => trigger.parentElement!}
+          options={[
+            { value: 'qualification', label: '公司资质' },
+            { value: 'personnel', label: '人员管理' },
+            { value: 'contract', label: '历史合同' },
+            { value: 'history_bid', label: '历史投标' },
+            { value: 'company', label: '公司信息' },
+          ]}
         />
         {mode !== 'company' && (
           <Input
