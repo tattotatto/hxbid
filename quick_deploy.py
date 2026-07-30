@@ -13,12 +13,20 @@ LOCAL = os.path.dirname(os.path.abspath(__file__))
 # All backend files changed since last full Docker image build
 BACKEND_FILES = [
     "backend/alembic/versions/20260729_0002_add_format_columns.py",
+    "backend/alembic/versions/20260730_0003_add_contract_date_and_project_contracts.py",
     "backend/app/api/bid.py",
+    "backend/app/api/collection.py",
     "backend/app/config.py",
+    "backend/app/models/__init__.py",
+    "backend/app/models/contract.py",
     "backend/app/models/project.py",
+    "backend/app/models/project_resource.py",
     "backend/app/schemas/bid.py",
+    "backend/app/schemas/collection.py",
+    "backend/app/schemas/contract.py",
     "backend/app/schemas/project.py",
     "backend/app/services/ai_pipeline.py",
+    "backend/app/services/collection.py",
     "backend/app/services/content_assembler.py",
     "backend/app/services/format_extractor.py",
     "backend/app/services/format_verifier.py",
@@ -33,11 +41,14 @@ BACKEND_FILES = [
 ]
 
 FRONTEND_FILES = [
+    "frontend/src/pages/project/CollectionStep.tsx",
     "frontend/src/pages/project/ProjectWorkflow.tsx",
+    "frontend/src/pages/project/QualificationPickerModal.tsx",
+    "frontend/src/pages/resources/Contracts.tsx",
 ]
 
 print("=" * 60)
-print("宏曦标书 — 快速部署")
+print("宏曦标书 — 快速部署 (含业绩合同选择功能)")
 print(f"服务器: {HOST}  用户: {USER}")
 print(f"后端文件: {len(BACKEND_FILES)}  前端文件: {len(FRONTEND_FILES)}")
 print("=" * 60)
@@ -100,11 +111,18 @@ sftp.close()
 print("\n>>> 更新后端容器 (docker cp)...")
 CONTAINER_MAP = {
     "backend/app/api/bid.py": "/app/app/api/bid.py",
+    "backend/app/api/collection.py": "/app/app/api/collection.py",
     "backend/app/config.py": "/app/app/config.py",
+    "backend/app/models/__init__.py": "/app/app/models/__init__.py",
+    "backend/app/models/contract.py": "/app/app/models/contract.py",
     "backend/app/models/project.py": "/app/app/models/project.py",
+    "backend/app/models/project_resource.py": "/app/app/models/project_resource.py",
     "backend/app/schemas/bid.py": "/app/app/schemas/bid.py",
+    "backend/app/schemas/collection.py": "/app/app/schemas/collection.py",
+    "backend/app/schemas/contract.py": "/app/app/schemas/contract.py",
     "backend/app/schemas/project.py": "/app/app/schemas/project.py",
     "backend/app/services/ai_pipeline.py": "/app/app/services/ai_pipeline.py",
+    "backend/app/services/collection.py": "/app/app/services/collection.py",
     "backend/app/services/content_assembler.py": "/app/app/services/content_assembler.py",
     "backend/app/services/format_extractor.py": "/app/app/services/format_extractor.py",
     "backend/app/services/format_verifier.py": "/app/app/services/format_verifier.py",
@@ -119,24 +137,30 @@ CONTAINER_MAP = {
 }
 for f in BACKEND_FILES:
     remote_path = f"{PROJ}/{f}"
+    if f not in CONTAINER_MAP:
+        continue  # skip migration files, handled separately
     container_path = CONTAINER_MAP[f]
     # Ensure parent dir exists in container
     sudo_cmd(f"docker exec hongxi-backend mkdir -p {os.path.dirname(container_path)}")
     sudo_cmd(f"docker cp {remote_path} hongxi-backend:{container_path}")
     print(f"  Copied {f} -> hongxi-backend:{container_path}")
 
-# ── Step 3: Restart backend ──
+# ── Step 3: Run DB migration ──
+print("\n>>> 运行数据库迁移...")
+sudo_cmd("docker exec hongxi-backend alembic -c /app/alembic.ini upgrade head", timeout=30)
+
+# ── Step 4: Restart backend ──
 print("\n>>> 重启后端服务...")
 sudo_cmd(f"cd {PROJ} && docker compose restart backend", timeout=60)
 
-# ── Step 4: Rebuild frontend ──
+# ── Step 5: Rebuild frontend ──
 if FRONTEND_FILES:
     print("\n>>> 重新构建前端镜像 (这需要 1-3 分钟)...")
     sudo_cmd(f"cd {PROJ} && docker compose build frontend", timeout=300)
     print("\n>>> 重新创建前端容器...")
     sudo_cmd(f"cd {PROJ} && docker compose up -d --no-deps frontend", timeout=60)
 
-# ── Step 5: Wait & verify ──
+# ── Step 6: Wait & verify ──
 print("\n>>> 等待服务就绪...")
 time.sleep(8)
 

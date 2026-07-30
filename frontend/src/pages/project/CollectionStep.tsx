@@ -84,13 +84,16 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
     }
   }
 
-  const handleLinkContract = async (contractId: string, reqName: string) => {
+  // Batch link contracts
+  const handleLinkContracts = async (contracts: any[], reqName: string) => {
     try {
-      await client.post(`/collection/${projectId}/contract/link`, {
-        contract_id: contractId,
-        requirement_name: reqName,
-      })
-      message.success('已关联合同')
+      for (const c of contracts) {
+        await client.post(`/collection/${projectId}/contract/link`, {
+          contract_id: c.id,
+          requirement_name: reqName,
+        })
+      }
+      message.success(`已关联 ${contracts.length} 份合同`)
       setPickerOpen(false)
       fetchStatus()
     } catch {
@@ -98,14 +101,17 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
     }
   }
 
-  const handleAssignPersonnel = async (person: any, role: string) => {
+  // Batch assign personnel
+  const handleAssignPersonnelList = async (personnelList: any[], role: string) => {
     try {
-      await client.post(`/collection/${projectId}/personnel/assign`, {
-        personnel_id: person.id,
-        role,
-        requirement_desc: role,
-      })
-      message.success(`已分配 ${person.name} 为 ${role}`)
+      for (const p of personnelList) {
+        await client.post(`/collection/${projectId}/personnel/assign`, {
+          personnel_id: p.id,
+          role,
+          requirement_desc: role,
+        })
+      }
+      message.success(`已分配 ${personnelList.length} 人`)
       setPickerOpen(false)
       setQuickPersonnelOpen(false)
       fetchStatus()
@@ -333,8 +339,8 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         defaultMode={pickerDefaultMode}
         onCancel={() => setPickerOpen(false)}
         onSelectQual={(qual) => handleLinkQual(qual.id, pickerReq)}
-        onSelectPersonnel={(person) => handleAssignPersonnel(person, pickerReq)}
-        onSelectContract={(c) => handleLinkContract(c.id, pickerReq)}
+        onSelectPersonnel={(list) => handleAssignPersonnelList(list, pickerReq)}
+        onSelectContract={(list) => handleLinkContracts(list, pickerReq)}
         onSelectHistoryBid={(bid) => {
           message.info(`已选择历史投标「${bid.name}」作为参考`)
           setPickerOpen(false)
@@ -344,7 +350,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         open={quickPersonnelOpen}
         role={quickPersonnelRole}
         onCancel={() => setQuickPersonnelOpen(false)}
-        onCreated={handleAssignPersonnel}
+        onCreated={(person, role) => handleAssignPersonnelList([person], role)}
       />
       <QuickQualificationUpload
         open={uploadOpen}

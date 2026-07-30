@@ -48,15 +48,20 @@ interface CompanyProfile {
 
 type PickerMode = 'qualification' | 'personnel' | 'contract' | 'history_bid' | 'company'
 
+// 支持多选的模式
+const MULTI_SELECT_MODES: PickerMode[] = ['personnel', 'contract']
+
 interface Props {
   open: boolean
   requirementName: string
-  /** Default mode when opening — "从资质库选择" opens in qualification, "从人员库选择" in personnel */
   defaultMode?: PickerMode
   onCancel: () => void
+  // 单选（资质、历史投标）
   onSelectQual: (qual: Qualification) => void
-  onSelectPersonnel?: (person: Personnel) => void
-  onSelectContract?: (contract: Contract) => void
+  // 多选（人员、合同）
+  onSelectPersonnel?: (personnel: Personnel[]) => void
+  onSelectContract?: (contracts: Contract[]) => void
+  // 单选
   onSelectHistoryBid?: (bid: HistoryBid) => void
 }
 
@@ -72,11 +77,13 @@ export default function QualificationPickerModal({
   const [company, setCompany] = useState<CompanyProfile | null>(null)
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
   useEffect(() => {
     if (open) {
       setMode(defaultMode ?? 'qualification')
       setSearch('')
+      setSelectedRowKeys([])
       setLoading(true)
       Promise.all([
         client.get('/qualifications/'),
@@ -89,7 +96,6 @@ export default function QualificationPickerModal({
           setQuals(qualRes.data)
           setPersonnel(persRes.data)
           setContracts(contractRes.data)
-          // Filter for history bids (archived/won/lost/exported)
           const relevantStatuses = ['exported', 'archived', 'won', 'lost']
           setHistoryBids(
             (projRes.data as HistoryBid[]).filter((p) => relevantStatuses.includes(p.status))
@@ -121,7 +127,30 @@ export default function QualificationPickerModal({
     ? historyBids.filter((b) => b.name.includes(search))
     : historyBids
 
-  // ── Columns ──
+  const selectedRows = {
+    personnel: personnel.filter((p) => selectedRowKeys.includes(p.id)),
+    contract: contracts.filter((c) => selectedRowKeys.includes(c.id)),
+  }
+
+  const handleConfirmMulti = () => {
+    if (selectedRowKeys.length === 0) { message.warning('请至少选择一项'); return }
+    if (mode === 'personnel') {
+      onSelectPersonnel?.(selectedRows.personnel)
+    } else if (mode === 'contract') {
+      onSelectContract?.(selectedRows.contract)
+    }
+  }
+
+  // ── Row selection for multi-select modes ──
+
+  const multiSelect = MULTI_SELECT_MODES.includes(mode)
+    ? {
+        selectedRowKeys,
+        onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
+      }
+    : undefined
+
+  // ── Columns (multi-select modes omit the per-row action button) ──
 
   const qualColumns = [
     { title: '名称', dataIndex: 'name', key: 'name' },
@@ -137,9 +166,6 @@ export default function QualificationPickerModal({
     { title: '学历', dataIndex: 'education', key: 'education', width: 80 },
     { title: '标签', dataIndex: 'tags', key: 'tags', ellipsis: true },
     { title: '电话', dataIndex: 'phone', key: 'phone', width: 120 },
-    { title: '', key: 'action', render: (_: any, r: Personnel) => (
-      <Button type="link" onClick={() => onSelectPersonnel?.(r)}>选择</Button>
-    )},
   ]
 
   const contractColumns = [
@@ -148,9 +174,6 @@ export default function QualificationPickerModal({
     { title: '合同金额', dataIndex: 'contract_amount', key: 'contract_amount', width: 120 },
     { title: '签订日期', dataIndex: 'contract_date', key: 'contract_date', width: 110,
       render: (d: string | null) => d || '-' },
-    { title: '', key: 'action', render: (_: any, r: Contract) => (
-      <Button type="link" onClick={() => onSelectContract?.(r)}>选择</Button>
-    )},
   ]
 
   const historyBidColumns = [
@@ -184,18 +207,19 @@ export default function QualificationPickerModal({
     company: '',
   }
 
-  // ── Render ──
+  // ── Render table per mode ──
 
   const renderTable = () => {
+    const shared = { loading, size: 'small' as const, pagination: false as const }
     switch (mode) {
       case 'qualification':
-        return <Table dataSource={filteredQuals} columns={qualColumns} rowKey="id" loading={loading} size="small" pagination={false} />
+        return <Table dataSource={filteredQuals} columns={qualColumns} rowKey="id" {...shared} />
       case 'personnel':
-        return <Table dataSource={filteredPersonnel} columns={personnelColumns} rowKey="id" loading={loading} size="small" pagination={false} />
+        return <Table dataSource={filteredPersonnel} columns={personnelColumns} rowKey="id" rowSelection={multiSelect} {...shared} />
       case 'contract':
-        return <Table dataSource={filteredContracts} columns={contractColumns} rowKey="id" loading={loading} size="small" pagination={false} />
+        return <Table dataSource={filteredContracts} columns={contractColumns} rowKey="id" rowSelection={multiSelect} {...shared} />
       case 'history_bid':
-        return <Table dataSource={filteredHistoryBids} columns={historyBidColumns} rowKey="id" loading={loading} size="small" pagination={false} />
+        return <Table dataSource={filteredHistoryBids} columns={historyBidColumns} rowKey="id" {...shared} />
       case 'company':
         if (!company) return <div style={{ color: '#999', textAlign: 'center', padding: 24 }}>暂无公司信息，请先在资源库中填写</div>
         return (
@@ -212,18 +236,28 @@ export default function QualificationPickerModal({
     }
   }
 
+  const multiCount = selectedRowKeys.length
+
   return (
     <Modal
       title={`选择资源 — ${requirementName}`}
       open={open}
       onCancel={onCancel}
-      footer={null}
+      footer={multiSelect ? (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ color: '#666' }}>已选 {multiCount} 项</span>
+          <div>
+            <Button onClick={onCancel} style={{ marginRight: 8 }}>取消</Button>
+            <Button type="primary" onClick={handleConfirmMulti}>确定选择</Button>
+          </div>
+        </div>
+      ) : null}
       width={mode === 'company' ? 700 : mode === 'contract' || mode === 'personnel' ? 800 : 700}
     >
       <div style={{ marginBottom: 16 }}>
         <Segmented
           value={mode}
-          onChange={(v) => { setMode(v as PickerMode); setSearch('') }}
+          onChange={(v) => { setMode(v as PickerMode); setSearch(''); setSelectedRowKeys([]) }}
           block
           options={[
             { value: 'qualification', label: '公司资质' },
