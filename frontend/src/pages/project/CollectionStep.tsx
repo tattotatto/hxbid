@@ -86,6 +86,20 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
     }
   }
 
+  const handleLinkContract = async (contractId: string, reqName: string) => {
+    try {
+      await client.post(`/collection/${projectId}/contract/link`, {
+        contract_id: contractId,
+        requirement_name: reqName,
+      })
+      message.success('已关联合同')
+      setQualPickerOpen(false)
+      fetchStatus()
+    } catch {
+      message.error('关联失败')
+    }
+  }
+
   const handleAssignPersonnel = async (person: any, role: string) => {
     try {
       await client.post(`/collection/${projectId}/personnel/assign`, {
@@ -165,7 +179,8 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
               const categoryLabel =
                 item.requirement.category === 'company' ? '公司证照' :
                 item.requirement.category === 'financial' ? '财务证明' :
-                item.requirement.category === 'qualification' ? '专业资质' : '其他'
+                item.requirement.category === 'qualification' ? '专业资质' :
+                item.requirement.category === 'contract_performance' ? '业绩合同' : '其他'
 
               return (
                 <List.Item
@@ -206,7 +221,10 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                         {isDone && item.matches[0] && (
                           <span style={{ color: '#666', fontSize: 12 }}>
                             {item.matches[0].name}
-                            {item.matches[0].cert_number ? ` (${item.matches[0].cert_number})` : ''}
+                            {item.requirement.category === 'contract_performance'
+                              ? item.matches[0].contract_date ? ` (${item.matches[0].contract_date})` : ''
+                              : item.matches[0].cert_number ? ` (${item.matches[0].cert_number})` : ''
+                            }
                           </span>
                         )}
                       </span>
@@ -307,7 +325,8 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         open={qualPickerOpen}
         requirementName={qualPickerReq}
         onCancel={() => setQualPickerOpen(false)}
-        onSelect={(qual) => handleLinkQual(qual.id, qualPickerReq)}
+        onSelectQual={(qual) => handleLinkQual(qual.id, qualPickerReq)}
+        onSelectContract={(c) => handleLinkContract(c.id, qualPickerReq)}
       />
       <PersonnelPickerModal
         open={personnelPickerOpen}
