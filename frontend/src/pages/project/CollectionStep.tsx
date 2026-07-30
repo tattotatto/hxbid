@@ -11,7 +11,6 @@ import {
 } from '@ant-design/icons'
 import client from '../../api/client'
 import QualificationPickerModal from './QualificationPickerModal'
-import PersonnelPickerModal from './PersonnelPickerModal'
 import QuickPersonnelForm from './QuickPersonnelForm'
 import QuickQualificationUpload from './QuickQualificationUpload'
 
@@ -47,10 +46,9 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
   const [confirming, setConfirming] = useState(false)
 
   // Modal state
-  const [qualPickerOpen, setQualPickerOpen] = useState(false)
-  const [qualPickerReq, setQualPickerReq] = useState('')
-  const [personnelPickerOpen, setPersonnelPickerOpen] = useState(false)
-  const [personnelPickerRole, setPersonnelPickerRole] = useState('')
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [pickerReq, setPickerReq] = useState('')
+  const [pickerDefaultMode, setPickerDefaultMode] = useState<'qualification' | 'personnel' | 'contract' | 'history_bid' | 'company'>('qualification')
   const [quickPersonnelOpen, setQuickPersonnelOpen] = useState(false)
   const [quickPersonnelRole, setQuickPersonnelRole] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
@@ -79,7 +77,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         requirement_name: reqName,
       })
       message.success('已关联资质')
-      setQualPickerOpen(false)
+      setPickerOpen(false)
       fetchStatus()
     } catch {
       message.error('关联失败')
@@ -93,7 +91,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         requirement_name: reqName,
       })
       message.success('已关联合同')
-      setQualPickerOpen(false)
+      setPickerOpen(false)
       fetchStatus()
     } catch {
       message.error('关联失败')
@@ -108,7 +106,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         requirement_desc: role,
       })
       message.success(`已分配 ${person.name} 为 ${role}`)
-      setPersonnelPickerOpen(false)
+      setPickerOpen(false)
       setQuickPersonnelOpen(false)
       fetchStatus()
     } catch {
@@ -199,9 +197,13 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                         <Button
                           size="small"
                           icon={<LinkOutlined />}
-                          onClick={() => { setQualPickerReq(item.requirement.name); setQualPickerOpen(true) }}
+                          onClick={() => {
+                            setPickerReq(item.requirement.name)
+                            setPickerDefaultMode(item.requirement.category === 'contract_performance' ? 'contract' : 'qualification')
+                            setPickerOpen(true)
+                          }}
                         >
-                          从资质库选择
+                          从资源库选择
                         </Button>
                       </Space>
                     ),
@@ -255,7 +257,11 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                         <Button
                           size="small"
                           icon={<UserAddOutlined />}
-                          onClick={() => { setPersonnelPickerRole(item.requirement.name); setPersonnelPickerOpen(true) }}
+                          onClick={() => {
+                            setPickerReq(item.requirement.name)
+                            setPickerDefaultMode('personnel')
+                            setPickerOpen(true)
+                          }}
                         >
                           从人员库选择
                         </Button>
@@ -320,19 +326,19 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         </Space>
       </Card>
 
-      {/* Modals */}
+      {/* Unified Resource Picker Modal */}
       <QualificationPickerModal
-        open={qualPickerOpen}
-        requirementName={qualPickerReq}
-        onCancel={() => setQualPickerOpen(false)}
-        onSelectQual={(qual) => handleLinkQual(qual.id, qualPickerReq)}
-        onSelectContract={(c) => handleLinkContract(c.id, qualPickerReq)}
-      />
-      <PersonnelPickerModal
-        open={personnelPickerOpen}
-        role={personnelPickerRole}
-        onCancel={() => setPersonnelPickerOpen(false)}
-        onSelect={handleAssignPersonnel}
+        open={pickerOpen}
+        requirementName={pickerReq}
+        defaultMode={pickerDefaultMode}
+        onCancel={() => setPickerOpen(false)}
+        onSelectQual={(qual) => handleLinkQual(qual.id, pickerReq)}
+        onSelectPersonnel={(person) => handleAssignPersonnel(person, pickerReq)}
+        onSelectContract={(c) => handleLinkContract(c.id, pickerReq)}
+        onSelectHistoryBid={(bid) => {
+          message.info(`已选择历史投标「${bid.name}」作为参考`)
+          setPickerOpen(false)
+        }}
       />
       <QuickPersonnelForm
         open={quickPersonnelOpen}
