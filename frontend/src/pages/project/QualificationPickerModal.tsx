@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, Table, Button, Input, Select, message, Descriptions } from 'antd'
+import { Modal, Table, Button, Input, Segmented, message, Descriptions } from 'antd'
 import client from '../../api/client'
 
 interface Qualification {
@@ -220,13 +220,11 @@ export default function QualificationPickerModal({
       footer={null}
       width={mode === 'company' ? 700 : mode === 'contract' || mode === 'personnel' ? 800 : 700}
     >
-      <div style={{ marginBottom: 16, display: 'flex', gap: 12, alignItems: 'center' }}>
-        <span style={{ whiteSpace: 'nowrap' }}>资源类型：</span>
-        <Select
+      <div style={{ marginBottom: 16 }}>
+        <Segmented
           value={mode}
-          onChange={(v) => { setMode(v); setSearch('') }}
-          style={{ width: 140 }}
-          getPopupContainer={(trigger) => trigger.parentElement!}
+          onChange={(v) => { setMode(v as PickerMode); setSearch('') }}
+          block
           options={[
             { value: 'qualification', label: '公司资质' },
             { value: 'personnel', label: '人员管理' },
@@ -241,7 +239,7 @@ export default function QualificationPickerModal({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             allowClear
-            style={{ flex: 1 }}
+            style={{ marginTop: 12 }}
           />
         )}
       </div>
