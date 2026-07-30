@@ -51,6 +51,11 @@ class Contract(Base):
         nullable=False,
         default="",
     )
+    contract_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        comment="合同签订日期，用于按时间范围筛选业绩合同",
+    )
     # JSON array of image file paths, e.g. ["uploads/contract_abc_page1.png", ...]
     image_paths_json: Mapped[str] = mapped_column(
         Text,
