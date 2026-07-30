@@ -16,6 +16,7 @@ from app.models.user import User
 from app.schemas.collection import (
     AssignPersonnelRequest,
     CollectionStatus,
+    LinkContractRequest,
     LinkQualificationRequest,
 )
 from app.services.collection import (
@@ -23,6 +24,7 @@ from app.services.collection import (
     assign_personnel,
     confirm_collection,
     get_collected_resources,
+    link_contract,
     link_qualification,
     unassign_personnel,
     upload_qualification,
@@ -144,6 +146,23 @@ async def link_qualification_to_project(
         project_id, data.qualification_id, data.requirement_name, db
     )
     return {"id": pq.id, "requirement_name": pq.requirement_name, "status": pq.match_status}
+
+
+# ── POST /{project_id}/contract/link ────────────────────────────────────
+
+
+@router.post("/{project_id}/contract/link")
+async def link_contract_to_project(
+    project_id: str,
+    data: LinkContractRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    """Link a historical contract to fulfil a performance-contract requirement."""
+    pc = await link_contract(
+        project_id, data.contract_id, data.requirement_name, db
+    )
+    return {"id": pc.id, "requirement_name": pc.requirement_name, "status": pc.match_status}
 
 
 # ── POST /{project_id}/confirm ──────────────────────────────────────────
