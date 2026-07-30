@@ -138,3 +138,56 @@ class ProjectPersonnel(Base):
             f" role={self.role!r},"
             f" status={self.match_status!r})>"
         )
+
+
+class ProjectContract(Base):
+    """A historical contract linked to a bid project during collection.
+
+    Created during the information-collection step.  Links a Contract
+    from the resource library to fulfil a performance-contract requirement.
+    """
+
+    __tablename__ = "project_contracts"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("bid_projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    contract_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("contracts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    requirement_name: Mapped[str] = mapped_column(
+        String(300),
+        nullable=False,
+        default="",
+    )
+    match_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="matched",
+        # Values: "matched" | "missing"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # Relationships
+    project: Mapped["BidProject"] = relationship(  # noqa: F821
+        back_populates="project_contracts",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ProjectContract(id={self.id!r},"
+            f" requirement={self.requirement_name!r},"
+            f" status={self.match_status!r})>"
+        )
