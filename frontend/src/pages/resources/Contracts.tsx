@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { Card, Table, Button, Modal, Form, Input, InputNumber, Steps, Upload, Image, message, Space, Popconfirm, Tag } from 'antd'
+import { Card, Table, Button, Modal, Form, Input, InputNumber, Steps, Upload, Image, message, Space, Popconfirm, Tag, DatePicker } from 'antd'
 import { PlusOutlined, DeleteOutlined, UploadOutlined, InboxOutlined, EyeOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import type { UploadProps } from 'antd'
@@ -14,6 +14,7 @@ interface Contract {
   procurement_content: string
   contract_amount: string
   service_period: string
+  contract_date: string | null
   notes: string
   image_paths_json: string
   created_at: string
@@ -70,6 +71,7 @@ export default function Contracts() {
         procurement_content: values.procurement_content || '',
         contract_amount: values.contract_amount != null ? String(values.contract_amount) : '',
         service_period: values.service_period || '',
+        contract_date: values.contract_date ? values.contract_date.format('YYYY-MM-DD') : '',
         notes: values.notes || '',
       })
       setCreatedId(res.data.id)
@@ -141,6 +143,13 @@ export default function Contracts() {
     { title: '采购单位', dataIndex: 'procurement_unit', key: 'procurement_unit', ellipsis: true },
     { title: '合同金额', dataIndex: 'contract_amount', key: 'contract_amount', width: 120 },
     { title: '服务时间', dataIndex: 'service_period', key: 'service_period', width: 140 },
+    {
+      title: '签订日期',
+      dataIndex: 'contract_date',
+      key: 'contract_date',
+      width: 110,
+      render: (d: string | null) => d || '-',
+    },
     {
       title: '页数',
       key: 'pages',
@@ -231,6 +240,9 @@ export default function Contracts() {
             </Form.Item>
             <Form.Item label="服务时间" name="service_period">
               <Input placeholder="如：2024年1月-2025年12月" />
+            </Form.Item>
+            <Form.Item label="合同签订日期" name="contract_date">
+              <DatePicker style={{ width: '100%' }} placeholder="选择合同签订日期" />
             </Form.Item>
             <Form.Item label="备注" name="notes">
               <Input.TextArea rows={2} placeholder="其他备注信息" />
