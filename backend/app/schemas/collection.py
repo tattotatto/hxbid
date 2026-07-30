@@ -59,3 +59,8 @@ class CollectedResource(BaseModel):
 class CollectedResources(BaseModel):
     qualifications: List[CollectedResource] = []
     personnel: List[dict] = []
+
+
+class LinkContractRequest(BaseModel):
+    contract_id: str
+    requirement_name: str = ""
