@@ -18,7 +18,7 @@ from sqlalchemy.orm import selectinload
 from app.models.company_profile import CompanyProfile
 from app.models.personnel import Personnel
 from app.models.project import BidProject
-from app.models.project_resource import ProjectPersonnel, ProjectQualification
+from app.models.project_resource import ProjectContract, ProjectPersonnel, ProjectQualification
 from app.models.qualification import Qualification
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,12 @@ async def analyze_collection_needs(
         .one_or_none()
     )
 
+    from app.models.contract import Contract
+
+    contracts = (
+        (await db.execute(select(Contract))).scalars().all()
+    )
+
     document_items = []
     personnel_items = []
 
@@ -66,7 +72,10 @@ async def analyze_collection_needs(
         name = doc["name"] if isinstance(doc, dict) else str(doc)
         category = doc.get("category", "other") if isinstance(doc, dict) else "other"
 
-        matches = _match_document(name, category, quals, company)
+        if category == "contract_performance":
+            matches = _match_contracts(name, contracts)
+        else:
+            matches = _match_document(name, category, quals, company)
         document_items.append({
             "requirement": {"name": name, "category": category},
             "matched": len(matches) > 0,
@@ -173,6 +182,80 @@ def _match_personnel(
     return matches
 
 
+def _match_contracts(
+    requirement_name: str,
+    contracts: List,
+) -> List[Dict[str, Any]]:
+    """Match a contract-performance requirement against the contract library.
+
+    Extracts date-filter keywords ("2023") and service-type keywords
+    ("安保", "物业", "保洁", etc.) from the requirement name, then filters
+    contracts by contract_date range and fuzzy-matches procurement_content.
+    """
+    from datetime import date as date_type
+
+    matches = []
+    req_lower = requirement_name.lower()
+
+    # Extract year hints, e.g. "2023年1月1日至投标截止日"
+    year_hints = []
+    import re
+    year_matches = re.findall(r"(\d{4})\s*年", requirement_name)
+    for y in year_matches:
+        try:
+            year_hints.append(int(y))
+        except ValueError:
+            pass
+
+    # Extract service type keywords
+    SERVICE_KEYWORDS = ["安保", "保安", "物业", "保洁", "绿化", "餐饮", "维修", "后勤", "秩序维护"]
+    matched_service = None
+    for kw in SERVICE_KEYWORDS:
+        if kw in requirement_name:
+            matched_service = kw
+            break
+
+    for c in contracts:
+        # Date filter: contract_date >= earliest year hint
+        if year_hints and c.contract_date:
+            min_year = min(year_hints)
+            if c.contract_date < date_type(min_year, 1, 1):
+                continue
+
+        # Service type fuzzy match against procurement_content
+        if matched_service:
+            content = (c.procurement_content or "").lower()
+            if matched_service not in content and matched_service not in (c.project_name or "").lower():
+                continue
+
+        matches.append({
+            "source": "contract",
+            "id": c.id,
+            "name": c.project_name,
+            "procurement_unit": c.procurement_unit or "",
+            "contract_amount": c.contract_amount or "",
+            "contract_date": str(c.contract_date) if c.contract_date else "",
+            "service_period": c.service_period or "",
+        })
+
+    # If no date-filtered match, return all as candidates
+    if not matches and contracts:
+        matches = [
+            {
+                "source": "contract",
+                "id": c.id,
+                "name": c.project_name,
+                "procurement_unit": c.procurement_unit or "",
+                "contract_amount": c.contract_amount or "",
+                "contract_date": str(c.contract_date) if c.contract_date else "",
+                "service_period": c.service_period or "",
+            }
+            for c in contracts[:10]
+        ]
+
+    return matches
+
+
 def _personnel_to_dict(p: Personnel) -> Dict[str, Any]:
     return {
         "source": "personnel",
@@ -275,6 +358,35 @@ async def upload_qualification(
     return pq
 
 
+async def link_contract(
+    project_id: str,
+    contract_id: str,
+    requirement_name: str,
+    db: AsyncSession,
+) -> ProjectContract:
+    """Link a historical contract to fulfil a performance-contract requirement."""
+    # Remove any previous contract for the same requirement in this project
+    existing = await db.execute(
+        select(ProjectContract).where(
+            ProjectContract.project_id == project_id,
+            ProjectContract.requirement_name == requirement_name,
+        )
+    )
+    for old in existing.scalars():
+        await db.delete(old)
+
+    pc = ProjectContract(
+        project_id=project_id,
+        contract_id=contract_id,
+        requirement_name=requirement_name,
+        match_status="matched",
+    )
+    db.add(pc)
+    await db.flush()
+    await db.refresh(pc)
+    return pc
+
+
 async def confirm_collection(project_id: str, db: AsyncSession) -> BidProject:
     """Mark collection as complete and advance the project to 'parsed'."""
     project = await db.get(BidProject, project_id)
@@ -346,4 +458,26 @@ async def get_collected_resources(
             "notes": cp.notes or "",
         }
 
-    return {"qualifications": quals, "personnel": personnel, "company": company}
+    # Contracts
+    pc_result = await db.execute(
+        select(ProjectContract)
+        .where(ProjectContract.project_id == project_id)
+    )
+    from app.models.contract import Contract as ContractModel
+    contracts = []
+    for pc in pc_result.scalars():
+        c = None
+        if pc.contract_id:
+            c = await db.get(ContractModel, pc.contract_id)
+        contracts.append({
+            "id": pc.id,
+            "contract_id": pc.contract_id,
+            "requirement_name": pc.requirement_name,
+            "project_name": c.project_name if c else "",
+            "procurement_unit": c.procurement_unit if c else "",
+            "contract_amount": c.contract_amount if c else "",
+            "contract_date": str(c.contract_date) if c and c.contract_date else "",
+            "source": "collected",
+        })
+
+    return {"qualifications": quals, "personnel": personnel, "company": company, "contracts": contracts}
