@@ -1,6 +1,6 @@
 """宏曦标书 - Contract Pydantic Schemas."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -15,6 +15,7 @@ class ContractCreate(BaseModel):
     contract_amount: str = Field(default="", max_length=100)
     service_period: str = Field(default="", max_length=200)
     notes: str = Field(default="", max_length=2000)
+    contract_date: date | None = None
 
 
 class ContractUpdate(BaseModel):
@@ -26,6 +27,7 @@ class ContractUpdate(BaseModel):
     contract_amount: Optional[str] = Field(None, max_length=100)
     service_period: Optional[str] = Field(None, max_length=200)
     notes: Optional[str] = Field(None, max_length=2000)
+    contract_date: date | None = None
 
 
 class ContractRead(BaseModel):
@@ -39,6 +41,7 @@ class ContractRead(BaseModel):
     service_period: str
     notes: str
     image_paths_json: str  # JSON array string
+    contract_date: date | None = None
     created_at: datetime
     updated_at: datetime
 
