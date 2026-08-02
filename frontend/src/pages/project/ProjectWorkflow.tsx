@@ -87,6 +87,55 @@ const statusStepMap: Record<string, number> = {
   exported: 5,
 }
 
+// Parse markdown headings from AI-generated content into a tree structure
+function parseMarkdownHeadings(content: string): any[] {
+  if (!content) return [];
+  const lines = content.split('\n');
+  const root: any[] = [];
+  const stack: { level: number; node: any }[] = [];
+
+  for (const line of lines) {
+    const match = line.trim().match(/^(#{1,4})\s+(.+)$/);
+    if (!match) continue;
+
+    const level = match[1].length;
+    const title = match[2].trim();
+
+    // Extract content under this heading (until next heading of same/higher level)
+    const headingIndex = lines.indexOf(line);
+    let contentEnd = lines.length;
+    for (let i = headingIndex + 1; i < lines.length; i++) {
+      const nextMatch = lines[i].trim().match(/^(#{1,4})\s+(.+)$/);
+      if (nextMatch && nextMatch[1].length <= level) {
+        contentEnd = i;
+        break;
+      }
+    }
+    const sectionContent = lines.slice(headingIndex + 1, contentEnd).join('\n').trim();
+
+    const node: any = {
+      title,
+      content: sectionContent,
+      children: [],
+    };
+
+    // Place node at correct level
+    while (stack.length > 0 && stack[stack.length - 1].level >= level) {
+      stack.pop();
+    }
+
+    if (stack.length === 0) {
+      root.push(node);
+    } else {
+      stack[stack.length - 1].node.children.push(node);
+    }
+
+    stack.push({ level, node });
+  }
+
+  return root;
+}
+
 // Reconstruct tree structure from flattened task list
 function rebuildTreeFromTasks(tasks: any[]): any[] {
   const root: any[] = [];
@@ -860,58 +909,38 @@ export default function ProjectWorkflow() {
         </Card>
       )}
 
-      {/* Chapter editor — Tree Editor (new) or Tabs (legacy) */}
+      {/* Chapter editor — Tree Editor (优先) or Tabs (回退) */}
       {hasChapters && !generating && !retrying && (
         <Card bodyStyle={{ padding: 0 }}>
           {projectChapters.length > 0 ? (
-            // Use TreeEditor if chapters have structure (new pipeline)
-            // Fall back to Tabs+BidEditor for legacy projects
-            projectChapters.some(ch => ch.children_json && ch.children_json !== '[]') ? (
-              <TreeEditor
-                chapters={projectChapters
-                  .sort((a, b) => a.order_index - b.order_index)
-                  .map(ch => ({
-                    id: ch.id,
-                    title: ch.title,
-                    order_index: ch.order_index,
-                    chapter_type: ch.chapter_type || 'text',
-                    review_status: ch.review_status || '',
-                    status: ch.status,
-                    children: (() => {
-                      try {
-                        const parsed = ch.children_json ? JSON.parse(ch.children_json) : [];
-                        // Handle both flattened tasks and tree format
-                        if (Array.isArray(parsed) && parsed.length > 0 && 'path' in parsed[0]) {
-                          // Flattened tasks → reconstruct tree structure for display
+            <TreeEditor
+              chapters={projectChapters
+                .sort((a, b) => a.order_index - b.order_index)
+                .map(ch => ({
+                  id: ch.id,
+                  title: ch.title,
+                  order_index: ch.order_index,
+                  chapter_type: ch.chapter_type || 'text',
+                  review_status: ch.review_status || '',
+                  status: ch.status,
+                  children: (() => {
+                    try {
+                      const parsed = ch.children_json ? JSON.parse(ch.children_json) : [];
+                      // New pipeline: structured children_json
+                      if (Array.isArray(parsed) && parsed.length > 0) {
+                        if ('path' in parsed[0]) {
                           return rebuildTreeFromTasks(parsed);
                         }
                         return parsed;
-                      } catch { return []; }
-                    })(),
-                  }))}
-                projectId={id || ''}
-              />
-            ) : (
-              <Tabs
-                type="card"
-                activeKey={activeChapter}
-                onChange={setActiveChapter}
-                items={[...projectChapters]
-                  .sort((a, b) => a.order_index - b.order_index)
-                  .map((ch) => ({
-                    key: ch.id,
-                    label: ch.title,
-                    children: (
-                      <BidEditor
-                        content={chapterContent[ch.id] || ''}
-                        onChange={(html) => handleChapterChange(ch.id, html)}
-                        onSave={handleSave}
-                        saving={saving}
-                      />
-                    ),
-                  }))}
-              />
-            )
+                      }
+                      // Old project: parse markdown headings from content
+                      const content = ch.final_content || ch.ai_generated_content || '';
+                      return parseMarkdownHeadings(content);
+                    } catch { return []; }
+                  })(),
+                }))}
+              projectId={id || ''}
+            />
           ) : (
             <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>
               暂无章节，请先生成标书内容

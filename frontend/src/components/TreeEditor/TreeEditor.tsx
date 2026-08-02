@@ -12,6 +12,9 @@ interface TreeEditorProps {
   chapters: ChapterTreeItem[];
   projectId: string;
   onContentUpdate?: (chapterId: string, content: string) => void;
+  // Legacy save callback — used when chapters lack children_json (old projects)
+  onLegacySave?: (chapterId: string, content: string) => Promise<void>;
+  legacySaving?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -22,12 +25,16 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
   chapters,
   projectId,
   onContentUpdate,
+  onLegacySave,
+  legacySaving,
 }) => {
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null);
   const [selectedSectionPath, setSelectedSectionPath] = useState<string[]>([]);
   const [currentContent, setCurrentContent] = useState('');
   const [humanEdited, setHumanEdited] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Track full chapter content for legacy (markdown-parsed) projects
+  const [legacyChapterContents, setLegacyChapterContents] = useState<Record<string, string>>({});
 
   // Find currently selected chapter
   const selectedChapter = chapters.find((c) => c.id === selectedChapterId);
@@ -74,29 +81,65 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
     if (!selectedChapterId) return;
     setSaving(true);
     try {
-      const token = localStorage.getItem('token') || '';
-      const res = await fetch(`/api/v1/bid/${projectId}/chapters/${selectedChapterId}/sections/save`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          section_path: selectedSectionPath,
-          content: currentContent,
-        }),
-      });
-      if (!res.ok) throw new Error('保存失败');
-      message.success('保存成功');
-      if (onContentUpdate) {
-        onContentUpdate(selectedChapterId, currentContent);
+      // Check if this chapter has structured children_json (new pipeline)
+      const chapter = chapters.find(c => c.id === selectedChapterId);
+      const hasStructuredChildren = chapter?.children && chapter.children.length > 0
+        && !('content' in chapter.children[0]) === false; // has children_json with content fields
+
+      if (selectedSectionPath.length > 0) {
+        // Legacy mode: save by reconstructing full chapter content
+        const token = localStorage.getItem('token') || '';
+
+        // Build updated full content by walking the tree and replacing this section
+        const sectionTitle = selectedSectionPath[selectedSectionPath.length - 1];
+        const fullContent = rebuildFullContent(
+          chapter?.children || [],
+          selectedSectionPath,
+          currentContent,
+        );
+
+        // Save full chapter via project chapters API
+        const res = await fetch(`/api/v1/projects/${projectId}/chapters/${selectedChapterId}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            final_content: fullContent,
+          }),
+        });
+        if (!res.ok) throw new Error('保存失败');
+        message.success('保存成功');
+        if (onContentUpdate) {
+          onContentUpdate(selectedChapterId, fullContent);
+        }
+      } else {
+        // New pipeline mode: save single section
+        const token = localStorage.getItem('token') || '';
+        const res = await fetch(`/api/v1/bid/${projectId}/chapters/${selectedChapterId}/sections/save`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            section_path: selectedSectionPath,
+            content: currentContent,
+          }),
+        });
+        if (!res.ok) throw new Error('保存失败');
+        message.success('保存成功');
+        if (onContentUpdate) {
+          onContentUpdate(selectedChapterId, currentContent);
+        }
       }
     } catch (err: any) {
       message.error(err.message || '保存失败');
     } finally {
       setSaving(false);
     }
-  }, [selectedChapterId, selectedSectionPath, currentContent, projectId, onContentUpdate]);
+  }, [selectedChapterId, selectedSectionPath, currentContent, projectId, chapters, onContentUpdate]);
 
   // AI modify section
   const handleAIModify = useCallback(async (instruction: string) => {
@@ -220,6 +263,39 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Rebuild full markdown content from tree structure after editing a section
+function rebuildFullContent(
+  children: any[],
+  sectionPath: string[],
+  newContent: string,
+): string {
+  if (!children || children.length === 0) return newContent;
+
+  const parts: string[] = [];
+  for (const node of children) {
+    const isTarget = node.title === sectionPath[0];
+    if (isTarget && sectionPath.length === 1) {
+      // This is the target section — replace its content
+      parts.push(`## ${node.title}\n\n${newContent}`);
+    } else if (isTarget && node.children && node.children.length > 0) {
+      // Go deeper
+      parts.push(`## ${node.title}\n\n${rebuildFullContent(node.children, sectionPath.slice(1), newContent)}`);
+    } else {
+      // Not the target — keep original content
+      const content = node.content || '';
+      if (content) {
+        parts.push(`## ${node.title}\n\n${content}`);
+      } else {
+        parts.push(`## ${node.title}`);
+        if (node.children && node.children.length > 0) {
+          parts.push(rebuildFullContent(node.children, [], ''));
+        }
+      }
+    }
+  }
+  return parts.join('\n\n');
+}
 
 function findSectionByPath(
   children: any[],
