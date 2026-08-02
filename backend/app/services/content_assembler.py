@@ -194,6 +194,117 @@ def generate_chapter_summary(content: str, max_len: int = 80) -> str:
     return cleaned + "…" if len(content.strip()) > max_len else cleaned
 
 
+# ---------------------------------------------------------------------------
+# Chinese legal numbering
+# ---------------------------------------------------------------------------
+
+CN_NUMERALS = [
+    "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+    "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八",
+    "十九", "二十", "二十一", "二十二", "二十三", "二十四", "二十五",
+    "二十六", "二十七", "二十八", "二十九", "三十",
+]
+
+
+def _to_cn_numeral(n: int) -> str:
+    """Convert an integer to Chinese numeral (1 → 一, 10 → 十, 25 → 二十五)."""
+    if 1 <= n <= len(CN_NUMERALS):
+        return CN_NUMERALS[n - 1]
+    return str(n)
+
+
+def _normalize_heading_numbering(content: str) -> str:
+    """Normalize heading numbering within a chapter's content.
+
+    Ensures that all markdown headings (##, ###) within the content
+    have consistent Chinese legal numbering:
+      - ## → 一、二、三... (Chinese numerals with 、)
+      - ### → （一）、（二）... (parenthesized Chinese numerals)
+      - #### → 1.、2. ... (Arabic numerals)
+
+    If a heading already has a numbering prefix, it is preserved.
+    If not, sequential numbering is added based on the heading level.
+
+    Returns the content with normalized heading numbering.
+    """
+    lines = content.split("\n")
+    result = []
+    h2_counter = 0
+    h3_counter = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            result.append(line)
+            continue
+
+        # Match markdown headings
+        h_match = re.match(r'^(#{1,4})\s*(.+)$', stripped)
+        if not h_match:
+            result.append(line)
+            continue
+
+        hashes = h_match.group(1)
+        heading_text = h_match.group(2).strip()
+        level = len(hashes)
+
+        # Check if heading already has a numbering prefix
+        has_numbering = bool(
+            re.match(r'^[（\(]?[一二三四五六七八九十\d]+[）\)]?[、．.\s]', heading_text)
+        )
+
+        if has_numbering:
+            # Keep existing numbering
+            result.append(line)
+            if level == 2:
+                h2_counter += 1
+                h3_counter = 0
+            elif level == 3:
+                h3_counter += 1
+            continue
+
+        # Add numbering
+        if level == 2:
+            h2_counter += 1
+            h3_counter = 0
+            num = _to_cn_numeral(h2_counter)
+            result.append(f"{hashes} {num}、{heading_text}")
+        elif level == 3:
+            h3_counter += 1
+            num = _to_cn_numeral(h3_counter)
+            result.append(f"{hashes} （{num}）{heading_text}")
+        elif level == 4:
+            h3_counter += 1
+            result.append(f"{hashes} {h3_counter}. {heading_text}")
+        else:
+            result.append(line)
+
+    return "\n".join(result)
+
+
+def normalize_chapters_numbering(chapters_payload: list) -> list:
+    """Normalize numbering across all chapters in the payload.
+
+    - Chapter-level titles get sequential Chinese numbering (一、二、三...)
+    - Each chapter's content has its internal headings normalized
+    - Returns the updated chapters_payload (mutated in-place).
+    """
+    for i, chapter in enumerate(chapters_payload):
+        title = chapter.get("title", "")
+
+        # Add chapter-level numbering if missing
+        if not re.match(r'^[（\(]?[一二三四五六七八九十\d]+[）\)]?[、．.\s]', title.strip()):
+            num = _to_cn_numeral(i + 1)
+            chapter["title"] = f"{num}、{title}"
+
+        # Normalize internal headings
+        content = chapter.get("content", "")
+        if content and chapter.get("section_type") != "file":
+            chapter["content"] = _normalize_heading_numbering(content)
+
+    return chapters_payload
+
+
 def collect_sibling_summaries(
     parent_node: dict,
     generated_sections: Dict[str, str],

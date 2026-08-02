@@ -332,7 +332,117 @@ async def generate_bid(
 
     # -- SSE event generator (runs after the handler returns) --
     async def event_generator():
-        # ── Deep generation mode (new pipeline) ──
+        # ── Check if chapters are locked (new pipeline) ──
+        use_new_pipeline = False
+        try:
+            structure_json = project.chapter_structure_json
+            if structure_json and structure_json not in ("[]", "{}", ""):
+                locked_chapters = json.loads(structure_json)
+                if locked_chapters:
+                    # Check if ai_generated chapters have been refined
+                    use_new_pipeline = True
+        except Exception:
+            pass
+
+        # ── New pipeline: chapter-structure-driven generation ──
+        if use_new_pipeline:
+            from app.services.ai_pipeline import generate_from_chapter_structure
+
+            async with async_session() as gen_db:
+                try:
+                    company_profile, matched_qualifications, matched_personnel, matched_contracts = \
+                        await _gather_generation_context(
+                            project_id, requirements, gen_db,
+                        )
+
+                    chapters_payload = None
+                    async for event in generate_from_chapter_structure(
+                        project_id=project_id,
+                        requirements=requirements,
+                        company_profile=company_profile,
+                        matched_qualifications=matched_qualifications,
+                        matched_personnel=matched_personnel,
+                        matched_contracts=matched_contracts,
+                        db=gen_db,
+                    ):
+                        yield event
+                        if event.get("event") == "done":
+                            try:
+                                done_data = json.loads(event.get("data", "{}"))
+                                chapters_payload = done_data.get("chapters")
+                            except Exception:
+                                chapters_payload = None
+
+                    # Save generated chapters to DB
+                    if chapters_payload:
+                        for i, ch in enumerate(chapters_payload):
+                            try:
+                                from sqlalchemy import select as sa_select
+                                # Update existing ProjectChapter records by title match
+                                result_ch = await gen_db.execute(
+                                    sa_select(ProjectChapter).where(
+                                        ProjectChapter.project_id == project_id,
+                                        ProjectChapter.title == ch.get("title", ""),
+                                    )
+                                )
+                                db_ch = result_ch.scalar_one_or_none()
+                                if db_ch:
+                                    db_ch.ai_generated_content = ch.get("content", "")
+                                    db_ch.status = "generated"
+                                else:
+                                    db_ch = ProjectChapter(
+                                        project_id=project_id,
+                                        title=ch.get("title", f"第{i + 1}部分"),
+                                        order_index=i + 1,
+                                        ai_generated_content=ch.get("content", ""),
+                                        status="generated",
+                                    )
+                                    gen_db.add(db_ch)
+                            except Exception:
+                                pass
+                        await gen_db.commit()
+
+                    # Mark project for review
+                    try:
+                        db_proj = await gen_db.get(BidProject, project_id)
+                        if db_proj:
+                            db_proj.status = "review"
+                            await gen_db.commit()
+                    except Exception:
+                        pass
+
+                    return
+
+                except ValueError as exc:
+                    # Structure validation error (e.g. titles not refined)
+                    yield {
+                        "event": "error",
+                        "data": json.dumps(
+                            {"message": str(exc)},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    return
+                except Exception as exc:
+                    logger.exception("Structure-driven generation failed: %s", exc)
+                    try:
+                        await gen_db.rollback()
+                        db_proj = await gen_db.get(BidProject, project_id)
+                        if db_proj:
+                            db_proj.status = "error"
+                            await gen_db.commit()
+                    except Exception:
+                        pass
+                    yield {
+                        "event": "error",
+                        "data": json.dumps(
+                            {"message": f"生成失败: {exc}"},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    return
+
+        # ── Legacy deep generation mode ──
         if (
             settings.GENERATION_DEEP_OUTLINE_ENABLED
             and not settings.GENERATION_LEGACY_MODE

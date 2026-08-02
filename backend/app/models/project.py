@@ -72,6 +72,12 @@ class BidProject(Base):
         default="{}",
         comment="格式校验报告JSON — 最近一次生成后的格式合规校验结果",
     )
+    chapter_structure_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+        comment="用户确认锁定的章节结构JSON — 从招标文件第六章提取并经用户审核的章节列表",
+    )
     created_by: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -151,6 +157,30 @@ class ProjectChapter(Base):
         String(20),
         nullable=False,
         default="pending",
+    )
+    chapter_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="text",
+        comment="章节类型: fixed_form(固定格式)|table(表格)|ai_generated(AI撰写)|attachment(附件)|mixed",
+    )
+    chapter_meta_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="{}",
+        comment="章节元数据JSON — 类型相关元数据(表格列定义、格式说明、评分上下文等)",
+    )
+    children_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+        comment="子章节树JSON — AI撰写章节的细化标题树(leaf节点=生成任务)",
+    )
+    review_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending_review",
+        comment="审核状态: pending_review|locked|refining|generating|generated",
     )
 
     # Relationships

@@ -13,6 +13,8 @@ import json
 import logging
 from typing import Any, AsyncIterator, Callable, Dict, List
 
+from sqlalchemy.orm import selectinload
+
 from app.config import settings
 from app.database import async_session
 from app.services.ai_adapter import ai_adapter
@@ -1044,6 +1046,357 @@ async def _generate_single_section_with_retry(
 # 5. generate_bid_with_deep_outline — Sequential per-section generation
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 5b. generate_from_chapter_structure — 基于锁定章节结构生成
+# ---------------------------------------------------------------------------
+
+async def generate_from_chapter_structure(
+    project_id: str,
+    requirements: dict,
+    company_profile: dict | None = None,
+    matched_qualifications: list | None = None,
+    matched_personnel: list | None = None,
+    matched_contracts: list | None = None,
+    db=None,
+    progress_callback: Callable | None = None,
+) -> AsyncIterator[dict]:
+    """基于用户确认锁定的章节结构生成标书.
+
+    替代 generate_bid_with_deep_outline()。
+    不生成 AI 大纲，直接使用 ProjectChapter 记录中的章节结构。
+
+    流程：
+    1. 加载已锁定的章节
+    2. 文件/表格章节 → template_filler 生成
+    3. AI 撰写章节 → 读取 children_json（叶子任务）→ 并行生成
+    4. 组装 → 输出
+    """
+    from app.services.subsection_generator import generate_section
+    from app.services.content_assembler import build_final_chapters_payload
+    from app.models.project import BidProject, ProjectChapter
+    from sqlalchemy import select as sa_select
+
+    if not db or not project_id:
+        raise ValueError("db and project_id are required")
+
+    # ── Load project with chapters ──
+    result = await db.execute(
+        sa_select(BidProject)
+        .where(BidProject.id == project_id)
+        .options(selectinload(BidProject.chapters))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise ValueError("Project not found")
+
+    chapters = sorted(project.chapters, key=lambda c: c.order_index)
+    if not chapters:
+        raise ValueError("No chapters found — please lock chapter structure first")
+
+    # ── Check review status ──
+    unrefined = [c for c in chapters if c.chapter_type == "ai_generated" and c.review_status not in ("generating", "generated")]
+    if unrefined:
+        titles = ", ".join(c.title for c in unrefined[:3])
+        raise ValueError(f"以下 AI 撰写章节尚未细化标题：{titles}。请先完成标题细化并锁定。")
+
+    yield {
+        "event": "status",
+        "data": json.dumps({
+            "phase": "init",
+            "message": f"开始基于章节结构生成（共 {len(chapters)} 个章节）...",
+        }, ensure_ascii=False),
+    }
+
+    # ── Generate file sections first ──
+    file_chapters_output = []  # pre-generated file/table chapters
+    from app.services.template_filler import generate_file_section
+
+    for chapter in chapters:
+        if chapter.chapter_type in ("fixed_form", "table"):
+            chapter_meta = json.loads(chapter.chapter_meta_json) if chapter.chapter_meta_json else {}
+
+            # Generate file section content
+            file_content = ""
+            try:
+                file_content = await generate_file_section(
+                    section_type=chapter.title,
+                    company_profile=company_profile,
+                    requirements=requirements,
+                    project_name=requirements.get("project_name", "") if requirements else "",
+                    ai_adapter=ai_adapter,
+                )
+            except Exception as exc:
+                logger.warning("File section '%s' generation failed: %s", chapter.title, exc)
+
+            file_chapters_output.append({
+                "id": chapter.id,
+                "title": chapter.title,
+                "order_index": chapter.order_index,
+                "chapter_type": chapter.chapter_type,
+                "content": file_content,
+                "section_type": "file",
+            })
+            yield {
+                "event": "section_done",
+                "data": json.dumps({
+                    "path": chapter.title,
+                    "title": chapter.title,
+                    "content": file_content,
+                    "content_length": len(file_content),
+                    "index": chapter.order_index,
+                    "total": len(chapters),
+                }, ensure_ascii=False),
+            }
+
+    # ── Collect all leaf tasks from ai_generated chapters ──
+    all_tasks = []
+
+    for chapter in chapters:
+        if chapter.chapter_type == "ai_generated":
+            # Load leaf tasks from children_json
+            try:
+                children = json.loads(chapter.children_json) if chapter.children_json else []
+            except json.JSONDecodeError:
+                children = []
+
+            if not children:
+                # Fallback: treat the chapter itself as one generation task
+                all_tasks.append({
+                    "chapter_id": chapter.id,
+                    "chapter_title": chapter.title,
+                    "task": {
+                        "path": [chapter.title],
+                        "title": chapter.title,
+                        "depth": 0,
+                        "token_budget_hint": "large",
+                    },
+                })
+            else:
+                for task in children:
+                    all_tasks.append({
+                        "chapter_id": chapter.id,
+                        "chapter_title": chapter.title,
+                        "task": task,
+                    })
+
+    total_leaves = len(all_tasks)
+
+    yield {
+        "event": "outline_generated",
+        "data": json.dumps({
+            "total_leaves": total_leaves,
+            "estimated_pages": total_leaves * 3,
+            "max_depth": 3,
+            "completed_from_previous": 0,
+        }, ensure_ascii=False),
+    }
+
+    # ── Phase: Generate AI sections in parallel ──
+    parallel_workers = max(1, settings.GENERATION_PARALLEL_SECTIONS)
+
+    yield {
+        "event": "status",
+        "data": json.dumps({
+            "phase": "generating",
+            "message": f"开始并行生成 {total_leaves} 个小节（{parallel_workers} 路并发）...",
+            "total_leaf_sections": total_leaves,
+            "completed_leaf_sections": 0,
+        }, ensure_ascii=False),
+    }
+
+    # Build context
+    contract_context = ""
+    if matched_contracts:
+        contract_context = _format_contract_context(matched_contracts)
+
+    generated_sections: Dict[str, str] = {}
+    completed = 0
+
+    if total_leaves > 0:
+        semaphore = asyncio.Semaphore(parallel_workers)
+
+        async def _gen_one(task_info: dict) -> dict:
+            async with semaphore:
+                task = task_info["task"]
+                path_key = " > ".join(task["path"])
+                title = task["title"]
+                depth = task.get("depth", 0)
+                max_tokens = _budget_hint_to_tokens(task.get("token_budget_hint", "medium"))
+
+                # Build section guidance
+                from app.services.ai_pipeline import _get_section_guidance
+                guidance = _get_section_guidance(title)
+
+                full_content = ""
+                try:
+                    async for chunk in generate_section(
+                        section_title=title,
+                        section_path=task["path"],
+                        depth=depth,
+                        requirements=requirements,
+                        max_tokens=max_tokens,
+                        sibling_summaries=[],
+                        reference_sections=[],
+                        company_profile=company_profile,
+                        extra_guidance=guidance,
+                    ):
+                        full_content += chunk
+                except Exception as exc:
+                    logger.error("Section '%s' generation failed: %s", title, exc)
+                    full_content = f"\n\n[本节生成失败：{exc}]\n\n"
+
+                return {
+                    "chapter_id": task_info["chapter_id"],
+                    "path_key": path_key,
+                    "section_path": task["path"],
+                    "title": title,
+                    "content": full_content,
+                    "error": None if full_content and "[本节生成失败" not in full_content else "generation_failed",
+                }
+
+        # Emit section_start for all tasks
+        for i, ti in enumerate(all_tasks):
+            task_path = ti["task"]["path"]
+            yield {
+                "event": "section_start",
+                "data": json.dumps({
+                    "chapter_id": ti["chapter_id"],
+                    "path": " > ".join(task_path),
+                    "section_path": task_path,  # for frontend tree navigation
+                    "title": ti["task"]["title"],
+                    "index": i + 1,
+                    "total": total_leaves,
+                    "depth": ti["task"].get("depth", 0),
+                }, ensure_ascii=False),
+            }
+
+        tasks_coros = [asyncio.create_task(_gen_one(ti)) for ti in all_tasks]
+
+        for coro in asyncio.as_completed(tasks_coros):
+            result = await coro
+            path_key = result["path_key"]
+            content = result["content"]
+            completed += 1
+
+            if content:
+                generated_sections[path_key] = content
+                yield {
+                    "event": "section_done",
+                    "data": json.dumps({
+                        "chapter_id": result["chapter_id"],
+                        "path": path_key,
+                        "section_path": result.get("section_path", []),
+                        "title": result["title"],
+                        "content": content,
+                        "content_length": len(content),
+                        "char_count": len(content),
+                        "index": completed,
+                        "total": total_leaves,
+                    }, ensure_ascii=False),
+                }
+            else:
+                yield {
+                    "event": "section_error",
+                    "data": json.dumps({
+                        "chapter_id": result["chapter_id"],
+                        "path": path_key,
+                        "section_path": result.get("section_path", []),
+                        "title": result["title"],
+                        "error": result.get("error", "unknown"),
+                        "index": completed,
+                        "total": total_leaves,
+                    }, ensure_ascii=False),
+                }
+
+            yield {
+                "event": "progress",
+                "data": json.dumps({
+                    "completed": completed,
+                    "total": total_leaves,
+                    "percentage": round(completed / max(total_leaves, 1) * 100, 1),
+                }, ensure_ascii=False),
+            }
+
+    # ── Phase: Assemble chapters ──
+    yield {
+        "event": "status",
+        "data": json.dumps({
+            "phase": "assembling",
+            "message": "正在组装章节内容...",
+        }, ensure_ascii=False),
+    }
+
+    # Group generated sections by chapter
+    chapter_contents: Dict[str, Dict[str, str]] = {}
+    for path_key, content in generated_sections.items():
+        # path_key is "chapter_title > sub_title > ..."
+        chapter_title = path_key.split(" > ")[0]
+        if chapter_title not in chapter_contents:
+            chapter_contents[chapter_title] = {}
+        chapter_contents[chapter_title][path_key] = content
+
+    # Build chapters payload
+    chapters_payload = []
+
+    # Add file/table chapters first
+    for fc in file_chapters_output:
+        chapters_payload.append({
+            "title": fc["title"],
+            "content": fc.get("content", ""),
+            "section_type": fc.get("section_type", "file"),
+        })
+
+    # Add AI-generated chapters
+    for chapter in chapters:
+        if chapter.chapter_type != "ai_generated":
+            continue
+        chapter_title = chapter.title
+        sections = chapter_contents.get(chapter_title, {})
+
+        # Assemble content from generated sections
+        parts = []
+        for path_key, content in sections.items():
+            parts.append(content)
+        content = "\n\n".join(parts)
+
+        chapters_payload.append({
+            "title": chapter_title,
+            "content": content,
+        })
+
+    # Sort by original chapter order
+    title_to_order = {c.title: c.order_index for c in chapters}
+    chapters_payload.sort(key=lambda c: title_to_order.get(c["title"], 999))
+
+    # ── Phase: Done ──
+    yield {
+        "event": "done",
+        "data": json.dumps({
+            "chapters_count": len(chapters_payload),
+            "total_chars": sum(len(c.get("content", "")) for c in chapters_payload),
+            "completed_sections": completed,
+            "total_sections": total_leaves,
+            "chapters": chapters_payload,
+        }, ensure_ascii=False),
+    }
+
+
+def _budget_hint_to_tokens(hint: str) -> int:
+    """Convert a token budget hint to actual token count."""
+    mapping = {
+        "tiny": settings.GENERATION_TOKEN_BUDGET_TINY,
+        "small": settings.GENERATION_TOKEN_BUDGET_SMALL,
+        "medium": settings.GENERATION_TOKEN_BUDGET_MEDIUM,
+        "large": settings.GENERATION_TOKEN_BUDGET_LARGE,
+        "xlarge": settings.GENERATION_TOKEN_BUDGET_XLARGE,
+    }
+    return mapping.get(hint, settings.GENERATION_TOKEN_BUDGET_MEDIUM)
+
+
+# ---------------------------------------------------------------------------
+# 5. generate_bid_with_deep_outline — (legacy, kept for backward compatibility)
+# ---------------------------------------------------------------------------
+
 async def generate_bid_with_deep_outline(
     requirements: dict,
     company_profile: dict | None = None,
@@ -1196,42 +1549,37 @@ async def generate_bid_with_deep_outline(
         }, ensure_ascii=False),
     }
 
-    # ── Phase 2.5: 文件类章节填充 ──
-    # 从 pdf_extractor 提取的格式章节文本 → AI标注 → 填充 → 作为技术章节生成的上下文
-    file_section_content = ""
-    if project_id and db:
+    # ── Phase 2.5: 文件类章节生成 ──
+    # 使用 AI 从头生成标准文件章节（投标函、承诺书、法定代表人证明等）
+    # 替代原有的 tender text scan-and-fill 方案（PDF 提取乱码导致填充质量差）
+    file_section_chapters: list = []  # list of {"title": str, "content": str}
+    if db:
         try:
-            reqs_str = ""
-            result_reqs = await db.execute(
-                sa_select(BidProject).where(BidProject.id == project_id)
+            from app.services.template_filler import generate_all_file_sections
+            project_name = requirements.get("project_name", "") if requirements else ""
+
+            generated_sections = await generate_all_file_sections(
+                company_profile=company_profile,
+                requirements=requirements,
+                project_name=project_name,
+                ai_adapter=ai_adapter,
             )
-            db_proj_reqs = result_reqs.scalar_one_or_none()
-            if db_proj_reqs and db_proj_reqs.parsed_requirements_json:
-                reqs_data = json.loads(db_proj_reqs.parsed_requirements_json)
-                format_text = reqs_data.get("format_section_text", "")
-                if format_text:
-                    from app.services.template_filler import scan_and_mark_variables, build_variable_values, batch_fill_text
-                    scan_result = await scan_and_mark_variables(
-                        format_text, reqs_data.get("format_tables", []), ai_adapter,
-                    )
-                    variables = build_variable_values(company_profile, requirements)
-                    # 为每个 replacement 添加上 value
-                    for rep in scan_result.get("text_replacements", []):
-                        var_name = rep.get("var", "")
-                        if var_name:
-                            rep["value"] = variables.get(var_name, f"[{var_name}]")
-                    file_section_content = batch_fill_text(
-                        format_text, scan_result.get("text_replacements", []),
-                    )
-                    yield {
-                        "event": "status",
-                        "data": json.dumps({
-                            "phase": "file_section",
-                            "message": "文件类章节已自动填充完成",
-                        }, ensure_ascii=False),
-                    }
+            if generated_sections:
+                for section_title, content in generated_sections.items():
+                    file_section_chapters.append({
+                        "title": section_title,
+                        "content": content,
+                        "section_type": "file",
+                    })
+                yield {
+                    "event": "status",
+                    "data": json.dumps({
+                        "phase": "file_section",
+                        "message": f"文件类章节已生成完成（共 {len(generated_sections)} 个）",
+                    }, ensure_ascii=False),
+                }
         except Exception as exc:
-            logger.warning("File section filling failed: %s", exc)
+            logger.warning("File section generation failed: %s", exc)
 
     # ── Phase 2.6: Gather contract + personnel data for context injection ──
     contract_context = ""
@@ -1320,8 +1668,8 @@ async def generate_bid_with_deep_outline(
             extra_parts.append(contract_context)
         if personnel_context and any(kw in title_lower for kw in PERSONNEL_CTX_KEYWORDS):
             extra_parts.append(personnel_context)
-        # 文件类章节已填充完毕，提醒 AI 只需撰写技术方案
-        if file_section_content:
+        # 文件类章节已生成完毕，提醒 AI 只需撰写技术方案部分
+        if file_section_chapters:
             extra_parts.append("注意：投标文件中的投标函、承诺书、法定代表人证明等文件类内容已由系统自动填充，你只需撰写技术方案部分。")
         if extra_parts:
             leaf["_extra_guidance"] = "\n\n".join(extra_parts)
@@ -1611,15 +1959,13 @@ async def generate_bid_with_deep_outline(
 
     chapters_payload = build_final_chapters_payload(tree, generated_sections)
 
-    # ── Prepend file section content as the first chapter (file-type, no markdown) ──
-    if file_section_content:
-        file_chapter = {
-            "title": "商务部分",
-            "content": file_section_content,
-            "section_type": "file",
-        }
-        chapters_payload.insert(0, file_chapter)
-        logger.info("Prepending file section content (%d chars) as first chapter", len(file_section_content))
+    # ── Prepend file section chapters (each as a separate chapter) ──
+    if file_section_chapters:
+        # Insert file sections at the beginning, before AI-generated tech content
+        for i, fc in enumerate(reversed(file_section_chapters)):
+            fc["order_index"] = i + 1
+            chapters_payload.insert(0, fc)
+        logger.info("Prepended %d file section chapters", len(file_section_chapters))
 
     # ── Format verification ──
     if fmt_template and chapters_payload:

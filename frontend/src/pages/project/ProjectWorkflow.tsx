@@ -25,6 +25,7 @@ import {
 import client from '../../api/client'
 import GenerationProgress from '../../components/GenerationProgress'
 import BidEditor from '../../components/BidEditor'
+import TreeEditor from '../../components/TreeEditor/TreeEditor'
 import CollectionStep from './CollectionStep'
 
 interface Chapter {
@@ -34,6 +35,10 @@ interface Chapter {
   ai_generated_content: string
   final_content: string
   status: string
+  chapter_type?: string
+  chapter_meta_json?: string
+  children_json?: string
+  review_status?: string
 }
 
 interface SseChapter {
@@ -80,6 +85,51 @@ const statusStepMap: Record<string, number> = {
   generating: 3,
   review: 4,
   exported: 5,
+}
+
+// Reconstruct tree structure from flattened task list
+function rebuildTreeFromTasks(tasks: any[]): any[] {
+  const root: any[] = [];
+  const nodeMap = new Map<string, any>();
+
+  for (const task of tasks) {
+    const path: string[] = task.path || [];
+    if (path.length === 0) continue;
+
+    // Ensure all ancestors exist
+    for (let i = 0; i < path.length; i++) {
+      const key = path.slice(0, i + 1).join('::');
+      if (!nodeMap.has(key)) {
+        const node = {
+          title: path[i],
+          content: i === path.length - 1 ? (task.content || '') : '',
+          human_edited: i === path.length - 1 ? (task.human_edited || false) : false,
+          token_budget_hint: i === path.length - 1 ? task.token_budget_hint : undefined,
+          children: [] as any[],
+        };
+        nodeMap.set(key, node);
+
+        if (i === 0) {
+          root.push(node);
+        } else {
+          const parentKey = path.slice(0, i).join('::');
+          const parent = nodeMap.get(parentKey);
+          if (parent && !parent.children.find((c: any) => c.title === node.title)) {
+            parent.children.push(node);
+          }
+        }
+      } else if (i === path.length - 1) {
+        // Update existing node with content
+        const node = nodeMap.get(key);
+        if (node) {
+          node.content = task.content || '';
+          node.human_edited = task.human_edited || false;
+        }
+      }
+    }
+  }
+
+  return root;
 }
 
 export default function ProjectWorkflow() {
@@ -810,29 +860,58 @@ export default function ProjectWorkflow() {
         </Card>
       )}
 
-      {/* Chapter editor tabs */}
+      {/* Chapter editor — Tree Editor (new) or Tabs (legacy) */}
       {hasChapters && !generating && !retrying && (
-        <Card>
+        <Card bodyStyle={{ padding: 0 }}>
           {projectChapters.length > 0 ? (
-            <Tabs
-              type="card"
-              activeKey={activeChapter}
-              onChange={setActiveChapter}
-              items={[...projectChapters]
-                .sort((a, b) => a.order_index - b.order_index)
-                .map((ch) => ({
-                  key: ch.id,
-                  label: ch.title,
-                  children: (
-                    <BidEditor
-                      content={chapterContent[ch.id] || ''}
-                      onChange={(html) => handleChapterChange(ch.id, html)}
-                      onSave={handleSave}
-                      saving={saving}
-                    />
-                  ),
-                }))}
-            />
+            // Use TreeEditor if chapters have structure (new pipeline)
+            // Fall back to Tabs+BidEditor for legacy projects
+            projectChapters.some(ch => ch.children_json && ch.children_json !== '[]') ? (
+              <TreeEditor
+                chapters={projectChapters
+                  .sort((a, b) => a.order_index - b.order_index)
+                  .map(ch => ({
+                    id: ch.id,
+                    title: ch.title,
+                    order_index: ch.order_index,
+                    chapter_type: ch.chapter_type || 'text',
+                    review_status: ch.review_status || '',
+                    status: ch.status,
+                    children: (() => {
+                      try {
+                        const parsed = ch.children_json ? JSON.parse(ch.children_json) : [];
+                        // Handle both flattened tasks and tree format
+                        if (Array.isArray(parsed) && parsed.length > 0 && 'path' in parsed[0]) {
+                          // Flattened tasks → reconstruct tree structure for display
+                          return rebuildTreeFromTasks(parsed);
+                        }
+                        return parsed;
+                      } catch { return []; }
+                    })(),
+                  }))}
+                projectId={id || ''}
+              />
+            ) : (
+              <Tabs
+                type="card"
+                activeKey={activeChapter}
+                onChange={setActiveChapter}
+                items={[...projectChapters]
+                  .sort((a, b) => a.order_index - b.order_index)
+                  .map((ch) => ({
+                    key: ch.id,
+                    label: ch.title,
+                    children: (
+                      <BidEditor
+                        content={chapterContent[ch.id] || ''}
+                        onChange={(html) => handleChapterChange(ch.id, html)}
+                        onSave={handleSave}
+                        saving={saving}
+                      />
+                    ),
+                  }))}
+              />
+            )
           ) : (
             <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>
               暂无章节，请先生成标书内容

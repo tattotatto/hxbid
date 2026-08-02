@@ -537,12 +537,20 @@ def _format_template_to_prompt_text(format_template: dict) -> str:
     """将格式模板转为可注入 AI prompt 的文本描述.
 
     只描述顶层结构（部分→章），AI 在提取的子节内可以扩展更深层级。
+
+    当 format_template 包含 document_structure 时，这些章节将成为
+    标书前部的文件类章节（投标函、承诺书等），由 template_filler
+    单独生成。AI 大纲生成器只需关注技术/服务方案部分的章节结构。
     """
     lines = [
         "【招标文件规定的标书格式 — 以下结构为强制要求，顶层不得更改】",
         "以下章节结构、序号、标题均来自招标文件的投标文件格式要求。",
-        "生成大纲时，这些章节必须原样保留，顺序不得调整，标题不得改动。",
-        "你可以在每个章下面扩展更细的子节，但不能修改顶层结构。\n",
+        "",
+        "重要说明：标书前部的文件类章节（投标函、承诺书、法定代表人证明、",
+        "授权委托书、开标一览表等）已由系统单独生成，你不需要为这些章节",
+        "设计大纲。请专注于设计和扩展技术/服务方案相关章节的深层结构。",
+        "技术部分和服务方案才是标书的核心，占标书篇幅的80%以上。",
+        "你需要将这些技术章节展开到3-4级深度，确保每个评分项都有对应的详细方案。\n",
     ]
 
     structure = format_template.get("document_structure", [])
@@ -550,24 +558,36 @@ def _format_template_to_prompt_text(format_template: dict) -> str:
         number = part.get("number", "")
         title = part.get("title", "")
         required = part.get("required", True)
-        req_mark = "【必需】" if required else "【可选】"
+        is_file_section = any(kw in title for kw in [
+            "投标函", "承诺书", "法定代表人", "授权委托", "一览表",
+            "营业执照", "资质证明", "基本情况", "报价"
+        ])
+
+        if is_file_section:
+            req_mark = "【文件类 — 系统已自动生成】"
+        else:
+            req_mark = "【技术类 — 需要你设计深层大纲】" if required else "【可选】"
+
         lines.append(f"{number}、{title} {req_mark}")
 
         for child in part.get("children", []):
             c_num = child.get("number", "")
             c_title = child.get("title", "")
             c_type = child.get("type") or "text"
+            child_is_file = c_type in ("fixed_form", "table", "attachment")
 
             type_hint = ""
             if c_type == "table":
                 cols = [c["name"] for c in child.get("table_schema", {}).get("columns", [])]
-                type_hint = f" [表格 — 必须包含以下列：{'、'.join(cols)}]"
+                type_hint = f" [表格 — 系统自动生成]"
             elif c_type == "fixed_form":
-                type_hint = " [固定格式表单 — 含招标文件规定的固定措辞]"
+                type_hint = " [固定格式 — 系统自动生成]"
             elif c_type == "attachment":
-                type_hint = " [附件/证明材料]"
+                type_hint = " [附件 — 系统自动处理]"
+            elif not child_is_file:
+                type_hint = " [需要扩展深层大纲]"
 
             lines.append(f"  {c_num} {c_title}{type_hint}")
 
-    lines.append(f"\n共 {len(structure)} 个部分。请严格按此结构生成大纲。")
+    lines.append(f"\n共 {len(structure)} 个部分。文件类章节已由系统生成，请为技术/服务方案部分设计3-4级深层大纲。")
     return "\n".join(lines)

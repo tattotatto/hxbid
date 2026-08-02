@@ -28,6 +28,10 @@ class ChapterRead(BaseModel):
     ai_generated_content: str
     final_content: str
     status: str
+    chapter_type: str = "text"
+    chapter_meta_json: str = "{}"
+    children_json: str = "[]"
+    review_status: str = "pending_review"
     model_config = {"from_attributes": True}
 
 
@@ -45,6 +49,7 @@ class ProjectRead(BaseModel):
     parsed_requirements_json: str
     outline_json: str
     generation_state_json: str = ""
+    chapter_structure_json: str = "[]"
     chapters: List[ChapterRead] = []
     created_at: datetime
     updated_at: datetime

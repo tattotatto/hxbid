@@ -137,43 +137,67 @@ def _add_page_number(paragraph):
 
 
 def _add_cover_page(doc, project_name, style, company_name=""):
-    """Append a regulated Chinese bid cover page to *doc*."""
+    """Append a regulated Chinese bid cover page to *doc*.
+
+    Format follows the standard Chinese bidding document convention:
+      - Project name (large, bold, centred)
+      - "投 标 文 件" (medium, bold, centred)
+      - 投标人：company name
+      - 法定代表人或委托代理人：(blank line for signing)
+      - Date
+    """
     # ── Leading vertical space ──
-    for _ in range(6):
+    for _ in range(4):
         spacer = doc.add_paragraph()
         spacer.paragraph_format.space_after = Pt(0)
         spacer.paragraph_format.space_before = Pt(0)
 
-    # ── Project name (22 pt 黑体 bold, centred) ──
+    # ── Project name (20 pt 黑体 bold, centred) ──
     p_name = doc.add_paragraph()
     p_name.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_name.paragraph_format.space_after = Pt(12)
     r_name = p_name.add_run(project_name)
-    _set_run_font(r_name, style["heading1_font_name"], Pt(22), bold=True)
+    _set_run_font(r_name, style["heading1_font_name"], Pt(20), bold=True)
 
-    doc.add_paragraph()  # blank line
-
-    # ── "投标文件" (18 pt 黑体, centred) ──
+    # ── "投 标 文 件" (18 pt 黑体, centred, with word spacing) ──
     p_bid = doc.add_paragraph()
     p_bid.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_bid = p_bid.add_run("投标文件")
+    p_bid.paragraph_format.space_after = Pt(36)
+    r_bid = p_bid.add_run("投 标 文 件")
     _set_run_font(r_bid, style["heading1_font_name"], Pt(18), bold=False)
 
-    doc.add_paragraph()
-    doc.add_paragraph()
+    # ── 投标人 (14 pt 黑体 bold, centred) ──
+    p_company_label = doc.add_paragraph()
+    p_company_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_company_label.paragraph_format.space_after = Pt(4)
+    r_cl = p_company_label.add_run("投标人：")
+    _set_run_font(r_cl, style["heading2_font_name"], Pt(14), bold=True)
 
-    # ── Company name (16 pt 黑体 bold, centred) ──
     p_company = doc.add_paragraph()
     p_company.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_company = p_company.add_run(company_name or "投标人名称")
-    _set_run_font(r_company, style["heading1_font_name"], Pt(16), bold=True)
+    p_company.paragraph_format.space_after = Pt(24)
+    r_company = p_company.add_run(company_name or "（投标人名称）")
+    _set_run_font(r_company, style["heading2_font_name"], Pt(14), bold=True)
 
-    doc.add_paragraph()
+    # ── 法定代表人或委托代理人 ──
+    p_rep_label = doc.add_paragraph()
+    p_rep_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_rep_label.paragraph_format.space_after = Pt(4)
+    r_rl = p_rep_label.add_run("法定代表人或委托代理人：")
+    _set_run_font(r_rl, style["heading2_font_name"], Pt(14), bold=True)
+
+    # Blank line for signing
+    p_rep = doc.add_paragraph()
+    p_rep.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_rep.paragraph_format.space_after = Pt(24)
+    r_rep = p_rep.add_run("（签字）")
+    _set_run_font(r_rep, style["body_font_name"], Pt(12), bold=False)
 
     # ── Date ──
     p_date = doc.add_paragraph()
     p_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r_date = p_date.add_run(date.today().strftime("%Y年%m月%d日"))
-    _set_run_font(r_date, style["heading1_font_name"], Pt(14), bold=False)
+    _set_run_font(r_date, style["heading2_font_name"], Pt(14), bold=False)
 
     # Page break so TOC starts on a fresh page
     doc.add_page_break()
@@ -196,15 +220,105 @@ def _insert_page_break(doc):
     run._element.append(br)
 
 
-def _add_toc_page(doc, chapters, style):
-    """Insert a Table of Contents page after the cover page.
+def _extract_toc_entries(chapters_payload):
+    """Walk all chapter content and extract heading entries for a static TOC.
 
-    Adds a "目录" heading, then inserts a Word TOC field that auto-populates
-    when the document is opened in Microsoft Word. Falls back gracefully in
-    other editors (LibreOffice, WPS) which also support TOC fields.
+    Returns a list of dicts:
+        {"level": 1|2|3, "title": str, "number": str}
+
+    Chapter titles become level-1 entries. Markdown headings (##, ###)
+    within each chapter become level-2 and level-3 entries respectively.
+    The 'number' field holds the numbering prefix extracted from the title
+    (e.g. "一、" from "一、投标函").
     """
+    entries = []
+    # Chinese numbering for level-1 (chapter) entries
+    CN_NUMS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+               "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八",
+               "十九", "二十", "二十一", "二十二", "二十三", "二十四", "二十五"]
+
+    for idx, chapter in enumerate(chapters_payload):
+        chapter_title = chapter.get("title", "")
+        # Use chapter index + 1 for the top-level numbering
+        num_prefix = CN_NUMS[idx] if idx < len(CN_NUMS) else str(idx + 1)
+        # If the chapter title already has a numbering prefix, use it; otherwise prepend one
+        if _has_chinese_number_prefix(chapter_title):
+            display_title = chapter_title
+        else:
+            display_title = f"{num_prefix}、{chapter_title}"
+
+        entries.append({
+            "level": 1,
+            "title": display_title,
+            "number": num_prefix,
+        })
+
+        # Parse content for ## and ### headings
+        content = chapter.get("content", "")
+        if not content:
+            continue
+
+        lines = content.split("\n")
+        h2_counter = 0
+        h3_counter = 0
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Match ## heading (level 2 in TOC)
+            if _is_markdown_heading(stripped):
+                level, heading_text = _get_heading_level_and_text(stripped)
+                if level >= 2 and heading_text:
+                    # Determine display number
+                    if level == 2:
+                        h2_counter += 1
+                        h3_counter = 0  # reset h3 counter on new h2
+                        display_num = f"（{CN_NUMS[h2_counter - 1] if h2_counter - 1 < len(CN_NUMS) else str(h2_counter)}）"
+                    else:  # level == 3
+                        h3_counter += 1
+                        display_num = f"{h3_counter}."
+
+                    # If heading already has a number prefix, use it as-is
+                    if _has_chinese_number_prefix(heading_text) or re.match(r'^\d+[\.\)、]', heading_text):
+                        display_title = heading_text
+                    else:
+                        display_title = f"{display_num} {heading_text}"
+
+                    entries.append({
+                        "level": min(level, 3),  # cap at level 3
+                        "title": display_title,
+                        "number": display_num,
+                    })
+
+    return entries
+
+
+def _has_chinese_number_prefix(text):
+    """Check if text starts with a Chinese number prefix like 一、or （一）."""
+    return bool(re.match(
+        r'^[（\(]?[一二三四五六七八九十]+[）\)]?[、．.\s]',
+        text.strip(),
+    ))
+
+
+def _render_static_toc(doc, toc_entries, style):
+    """Render a static, always-visible Table of Contents.
+
+    Each entry is rendered as a paragraph with:
+      - Level 1: 黑体 bold, no indent
+      - Level 2: 宋体, indent 2 chars
+      - Level 3: 宋体, indent 4 chars
+    Dot leaders (……) are placed between the title and approximate page number.
+    """
+    if not toc_entries:
+        return
+
+    # Estimate characters per page for page-number calculation
+    CHARS_PER_PAGE = 650
+
     # ── TOC heading ──
-    h = doc.add_heading("目录", level=1)
+    h = doc.add_heading("目  录", level=1)
     h.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for run in h.runs:
         _set_run_font(
@@ -214,9 +328,73 @@ def _add_toc_page(doc, chapters, style):
             bold=True,
         )
 
-    # ── Insert Word TOC field ──
-    # This creates the standard { TOC \o "1-3" \h \z } field that
-    # populates from Heading 1, 2, and 3 styles.
+    # ── Accumulate total chars to estimate page numbers ──
+    # Page 1 = cover, Page 2 = TOC start → content starts around page 3
+    running_page = 3
+
+    # Track cumulative chars per chapter for page estimation
+    char_accum = 0
+    chap_page_starts: dict = {}  # chapter_index → estimated page
+
+    # We need chapter chars for page estimation. Walk entries and
+    # store which entries belong to which chapter.
+    chapter_ranges = []  # list of (start_idx, end_idx) per chapter
+    start_idx = 0
+    for i, entry in enumerate(toc_entries):
+        if entry["level"] == 1 and i > 0:
+            chapter_ranges.append((start_idx, i))
+            start_idx = i
+    chapter_ranges.append((start_idx, len(toc_entries)))
+
+    for idx, entry in enumerate(toc_entries):
+        level = entry["level"]
+        title = entry["title"]
+
+        # Format the TOC line: title + dot leaders + page number
+        # Level 1 entries start new chapters
+        if level == 1:
+            # New chapter — roughly 1 page per 650 chars of heading text
+            # For now, just use sequential page numbers
+            chap_page_starts[idx] = running_page
+            # Level 1 entries get a new page by convention
+            running_page += 1
+
+        # Build the TOC line
+        indent_spaces = "" if level == 1 else ("    " * (level - 1))
+        toc_line = f"{indent_spaces}{title}"
+
+        # Dot leaders and page number placeholder
+        # We use actual page number for level 1, and sequential for sub-levels
+        if level == 1:
+            page_str = str(chap_page_starts.get(idx, running_page))
+        else:
+            page_str = ""  # Sub-entries don't get page numbers in static TOC
+
+        # Add paragraph for this TOC entry
+        p = doc.add_paragraph()
+        _set_paragraph_spacing(p, 1.2)  # tighter spacing for TOC
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+        if level == 1:
+            # Bold 黑体 for top-level entries
+            run_title = p.add_run(toc_line)
+            _set_run_font(run_title, style["heading1_font_name"], Pt(12), bold=True)
+        else:
+            # Regular 宋体 for sub-entries
+            run_title = p.add_run(toc_line)
+            _set_run_font(run_title, style["body_font_name"], Pt(11), bold=False)
+
+    # ── Spacer after static TOC ──
+    doc.add_paragraph()
+    doc.add_paragraph()
+
+    # ── Insert Word TOC field as a secondary mechanism ──
+    # (visible only in Word after updating fields)
+    p_note = doc.add_paragraph()
+    _set_paragraph_spacing(p_note, 1.0)
+    run_note = p_note.add_run('（以下为Word自动目录，在Word中右键选择“更新域”可生成带页码的精确目录）')
+    _set_run_font(run_note, style["body_font_name"], Pt(9), color=RGBColor(128, 128, 128))
+
     p_toc = doc.add_paragraph()
     p_toc.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
@@ -226,7 +404,7 @@ def _add_toc_page(doc, chapters, style):
     fld_begin.set(qn("w:fldCharType"), "begin")
     r_begin._element.append(fld_begin)
 
-    # instrText: TOC field code — collect Heading 1-3 entries
+    # instrText
     r_instr = p_toc.add_run()
     instr = OxmlElement("w:instrText")
     instr.set(qn("xml:space"), "preserve")
@@ -239,11 +417,9 @@ def _add_toc_page(doc, chapters, style):
     fld_sep.set(qn("w:fldCharType"), "separate")
     r_sep._element.append(fld_sep)
 
-    # Placeholder text — visible until user updates the TOC in Word
-    r_placeholder = p_toc.add_run(
-        '（请在Word中右键点击此处，选择"更新域"以生成目录）'
-    )
-    _set_run_font(r_placeholder, style["body_font_name"], Pt(10), color=RGBColor(128, 128, 128))
+    # Placeholder
+    r_placeholder = p_toc.add_run('（请在Word中右键点击此处，选择"更新域"以更新页码）')
+    _set_run_font(r_placeholder, style["body_font_name"], Pt(9), color=RGBColor(128, 128, 128))
 
     # fldChar end
     r_end = p_toc.add_run()
@@ -1170,11 +1346,18 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     fp = footer.add_paragraph()
     _add_page_number(fp)
 
+    # ── Normalize chapter numbering before rendering ──
+    from app.services.content_assembler import normalize_chapters_numbering
+    chapters = normalize_chapters_numbering(chapters)
+
     # ── Cover page ──
     _add_cover_page(doc, project_name, style, company_name)
 
     # ── Table of Contents ──
-    _add_toc_page(doc, chapters, style)
+    # Extract heading entries from all chapter content BEFORE rendering,
+    # so we can generate a static (always-visible) TOC.
+    toc_entries = _extract_toc_entries(chapters)
+    _render_static_toc(doc, toc_entries, style)
     _insert_page_break(doc)  # chapters start after TOC
 
     # ── Body: each chapter ──
