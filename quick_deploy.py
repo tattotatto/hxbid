@@ -12,39 +12,34 @@ LOCAL = os.path.dirname(os.path.abspath(__file__))
 
 # All backend files changed since last full Docker image build
 BACKEND_FILES = [
-    "backend/alembic/versions/20260729_0002_add_format_columns.py",
-    "backend/alembic/versions/20260730_0003_add_contract_date_and_project_contracts.py",
+    # Alembic migrations
+    "backend/alembic/versions/20260802_0004_add_chapter_structure_columns.py",
+    # API
     "backend/app/api/bid.py",
+    "backend/app/api/chapters.py",
+    "backend/app/api/router.py",
     "backend/app/api/collection.py",
-    "backend/app/config.py",
-    "backend/app/models/__init__.py",
-    "backend/app/models/contract.py",
+    # Models
     "backend/app/models/project.py",
-    "backend/app/models/project_resource.py",
-    "backend/app/schemas/bid.py",
-    "backend/app/schemas/collection.py",
-    "backend/app/schemas/contract.py",
+    # Schemas
     "backend/app/schemas/project.py",
+    # Services
     "backend/app/services/ai_pipeline.py",
-    "backend/app/services/collection.py",
+    "backend/app/services/chapter_chat.py",
+    "backend/app/services/chapter_extractor.py",
     "backend/app/services/content_assembler.py",
-    "backend/app/services/format_extractor.py",
-    "backend/app/services/format_verifier.py",
     "backend/app/services/outline_engine.py",
-    "backend/app/services/pdf_extractor.py",
-    "backend/app/services/rag.py",
-    "backend/app/services/reference_analyzer.py",
     "backend/app/services/render_engine.py",
-    "backend/app/services/subsection_generator.py",
+    "backend/app/services/section_editor.py",
     "backend/app/services/template_filler.py",
-    "backend/app/services/token_budget.py",
+    "backend/app/services/title_refiner.py",
 ]
 
 FRONTEND_FILES = [
-    "frontend/src/pages/project/CollectionStep.tsx",
     "frontend/src/pages/project/ProjectWorkflow.tsx",
-    "frontend/src/pages/project/QualificationPickerModal.tsx",
-    "frontend/src/pages/resources/Contracts.tsx",
+    "frontend/src/components/TreeEditor/TreeEditor.tsx",
+    "frontend/src/components/TreeEditor/TreePanel.tsx",
+    "frontend/src/components/TreeEditor/EditPanel.tsx",
 ]
 
 print("=" * 60)
@@ -111,29 +106,20 @@ sftp.close()
 print("\n>>> 更新后端容器 (docker cp)...")
 CONTAINER_MAP = {
     "backend/app/api/bid.py": "/app/app/api/bid.py",
+    "backend/app/api/chapters.py": "/app/app/api/chapters.py",
+    "backend/app/api/router.py": "/app/app/api/router.py",
     "backend/app/api/collection.py": "/app/app/api/collection.py",
-    "backend/app/config.py": "/app/app/config.py",
-    "backend/app/models/__init__.py": "/app/app/models/__init__.py",
-    "backend/app/models/contract.py": "/app/app/models/contract.py",
     "backend/app/models/project.py": "/app/app/models/project.py",
-    "backend/app/models/project_resource.py": "/app/app/models/project_resource.py",
-    "backend/app/schemas/bid.py": "/app/app/schemas/bid.py",
-    "backend/app/schemas/collection.py": "/app/app/schemas/collection.py",
-    "backend/app/schemas/contract.py": "/app/app/schemas/contract.py",
     "backend/app/schemas/project.py": "/app/app/schemas/project.py",
     "backend/app/services/ai_pipeline.py": "/app/app/services/ai_pipeline.py",
-    "backend/app/services/collection.py": "/app/app/services/collection.py",
+    "backend/app/services/chapter_chat.py": "/app/app/services/chapter_chat.py",
+    "backend/app/services/chapter_extractor.py": "/app/app/services/chapter_extractor.py",
     "backend/app/services/content_assembler.py": "/app/app/services/content_assembler.py",
-    "backend/app/services/format_extractor.py": "/app/app/services/format_extractor.py",
-    "backend/app/services/format_verifier.py": "/app/app/services/format_verifier.py",
     "backend/app/services/outline_engine.py": "/app/app/services/outline_engine.py",
-    "backend/app/services/pdf_extractor.py": "/app/app/services/pdf_extractor.py",
-    "backend/app/services/rag.py": "/app/app/services/rag.py",
-    "backend/app/services/reference_analyzer.py": "/app/app/services/reference_analyzer.py",
     "backend/app/services/render_engine.py": "/app/app/services/render_engine.py",
-    "backend/app/services/subsection_generator.py": "/app/app/services/subsection_generator.py",
+    "backend/app/services/section_editor.py": "/app/app/services/section_editor.py",
     "backend/app/services/template_filler.py": "/app/app/services/template_filler.py",
-    "backend/app/services/token_budget.py": "/app/app/services/token_budget.py",
+    "backend/app/services/title_refiner.py": "/app/app/services/title_refiner.py",
 }
 for f in BACKEND_FILES:
     remote_path = f"{PROJ}/{f}"
