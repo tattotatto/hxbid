@@ -20,17 +20,22 @@ echo ""
 echo ">>> 重建镜像并启动..."
 docker compose up -d --build
 
-# 3. 等待服务就绪
+# 3. 运行数据库迁移
+echo ""
+echo ">>> 运行数据库迁移..."
+docker exec hongxi-backend alembic -c /app/alembic.ini upgrade head
+
+# 4. 等待服务就绪
 echo ""
 echo ">>> 等待服务就绪..."
 sleep 8
 
-# 4. 容器状态
+# 5. 容器状态
 echo ""
 echo ">>> 容器状态:"
 docker compose ps
 
-# 5. 健康检查
+# 6. 健康检查
 echo ""
 echo ">>> 健康检查:"
 HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 http://localhost:8888/docs 2>/dev/null || echo "000")
