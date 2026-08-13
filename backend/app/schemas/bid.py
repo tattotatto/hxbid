@@ -17,6 +17,7 @@ class ParseResponse(BaseModel):
 class GenerateRequest(BaseModel):
     project_id: str
     regenerate_chapter_ids: Optional[List[str]] = None
+    target_pages: Optional[int] = Field(default=None, ge=100, le=10000)
 
 
 class ExportRequest(BaseModel):

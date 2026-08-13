@@ -45,15 +45,6 @@ def _find_node_by_path(tree: list, path: list[str]) -> dict | None:
     return None
 
 
-def _update_node_by_path(tree: list, path: list[str], updates: dict) -> bool:
-    """更新树中指定路径节点的字段."""
-    node = _find_node_by_path(tree, path)
-    if node:
-        node.update(updates)
-        return True
-    return False
-
-
 def get_section_content(children_json: str, section_path: list[str]) -> str:
     """从子标题树中读取指定节的内容.
 
@@ -80,7 +71,10 @@ def get_section_content(children_json: str, section_path: list[str]) -> str:
 
     # 树形结构：递归查找
     node = _find_node_by_path(tree, section_path)
-    return node.get("content", "") if node else ""
+    if not node:
+        return ""
+    # 容器节点读引导段（lead_in），叶子读 content
+    return (node.get("lead_in") or node.get("content")) or ""
 
 
 def save_section_content(
@@ -105,8 +99,14 @@ def save_section_content(
                 return json.dumps(tree, ensure_ascii=False)
         return json.dumps(tree, ensure_ascii=False)
 
-    # 树形结构
-    _update_node_by_path(tree, section_path, {"content": content, "human_edited": True})
+    # 树形结构：容器写 lead_in，叶子写 content
+    node = _find_node_by_path(tree, section_path)
+    if node:
+        if node.get("children"):
+            node["lead_in"] = content
+        else:
+            node["content"] = content
+        node["human_edited"] = True
     return json.dumps(tree, ensure_ascii=False)
 
 
@@ -144,7 +144,7 @@ def collect_sibling_summaries(children_json: str, section_path: list[str]) -> li
     siblings = []
     for child in parent_node.get("children", []):
         if child.get("title") != current_title:
-            content = child.get("content", "")
+            content = child.get("lead_in") or child.get("content", "")
             summary = content[:80] + "…" if len(content) > 80 else content
             siblings.append(f"{child['title']}：{summary}" if summary else child["title"])
     return siblings

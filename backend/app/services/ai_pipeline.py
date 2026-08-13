@@ -40,7 +40,13 @@ SYSTEM_PROMPT = """你是投标书撰写系统的AI助手，专注于为投标�
    重要说明：
    - 所有 ## 和 ### 标题将自动渲染为Word多级标题（二号标题和三号标题），目录将包含全部三级标题
    - 不要在内容中使用单个 #，因为章节大标题（如"商务部分""技术部分"）已由系统自动设置为一级标题
+   - 【引导段先行（极其重要）】每个 ##、###、#### 标题之后，必须立即写一段引导/综述文字
+     （1-2 句说明该标题涵盖什么、与上下文的衔接），再继续写子标题或分点。绝不允许出现
+     "标题之后紧跟另一个标题"的空标题现象
    - 每个 ## 节下面至少写2-3段正文，再根据需要添加 ### 小节
+   - 每个段落至少包含1个可量化事实（人数/天数/频率/金额/编号/日期等），禁止空泛堆砌
+   - 本节标题必须以正确层级输出为第一个标题（如当前节是"## 一、服务方案"，第一行就是
+     "## 一、服务方案"），不得省略、不得改用错误层级
    - 确保全文标题序号连续且不重复
 7. 输出纯文本内容。呈现表格数据时必须使用以下两种格式之一：
    a) 【推荐】Markdown管道表格：先写"表X：标题"作为独立一行，然后使用管道表格格式。示例：
@@ -1059,6 +1065,7 @@ async def generate_from_chapter_structure(
     matched_contracts: list | None = None,
     db=None,
     progress_callback: Callable | None = None,
+    target_pages: int = 2000,
 ) -> AsyncIterator[dict]:
     """基于用户确认锁定的章节结构生成标书.
 
@@ -1068,8 +1075,8 @@ async def generate_from_chapter_structure(
     流程：
     1. 加载已锁定的章节
     2. 文件/表格章节 → template_filler 生成
-    3. AI 撰写章节 → 读取 children_json（叶子任务）→ 并行生成
-    4. 组装 → 输出
+    3. AI 撰写章节 → 从嵌套目录树深度优先收集叶子任务 → 按目标页数规划篇幅 → 并行生成
+    4. 树形组装（章节 → 容器 → 叶子）→ 输出
     """
     from app.services.subsection_generator import generate_section
     from app.services.content_assembler import build_final_chapters_payload
@@ -1092,6 +1099,13 @@ async def generate_from_chapter_structure(
     chapters = sorted(project.chapters, key=lambda c: c.order_index)
     if not chapters:
         raise ValueError("No chapters found — please lock chapter structure first")
+
+    # ── 加载格式模板（招标文件'投标文件格式'章节提取的结构化定义）──
+    format_template = {}
+    try:
+        format_template = json.loads(project.format_template_json) if project.format_template_json else {}
+    except json.JSONDecodeError:
+        format_template = {}
 
     # ── Check review status ──
     unrefined = [c for c in chapters if c.chapter_type == "ai_generated" and c.review_status not in ("generating", "generated")]
@@ -1148,12 +1162,41 @@ async def generate_from_chapter_structure(
                 }, ensure_ascii=False),
             }
 
-    # ── Collect all leaf tasks from ai_generated chapters ──
+    # ── Collect all leaf tasks from ai_generated chapters（嵌套树，文档顺序）──
     all_tasks = []
+
+    def _collect_leaf_tasks(
+        nodes: list,
+        chapter_id: str,
+        chapter_title: str,
+        parent_path: list,
+    ) -> None:
+        """深度优先收集叶子任务；兼容嵌套树与旧扁平任务列表两种 children_json。"""
+        for node in nodes:
+            title = node.get("title", "")
+            if node.get("path"):
+                # 旧扁平任务格式：path 已含完整祖先链，直接使用
+                node_path = node["path"]
+            else:
+                node_path = parent_path + [title]
+            kids = node.get("children", []) or []
+            if kids:
+                _collect_leaf_tasks(kids, chapter_id, chapter_title, node_path)
+            else:
+                all_tasks.append({
+                    "chapter_id": chapter_id,
+                    "chapter_title": chapter_title,
+                    "task": {
+                        "path": node_path,
+                        "title": title,
+                        "depth": node.get("depth", len(node_path) - 1),
+                        "token_budget_hint": node.get("token_budget_hint", "medium"),
+                    },
+                })
 
     for chapter in chapters:
         if chapter.chapter_type == "ai_generated":
-            # Load leaf tasks from children_json
+            # Load children tree
             try:
                 children = json.loads(chapter.children_json) if chapter.children_json else []
             except json.JSONDecodeError:
@@ -1172,21 +1215,25 @@ async def generate_from_chapter_structure(
                     },
                 })
             else:
-                for task in children:
-                    all_tasks.append({
-                        "chapter_id": chapter.id,
-                        "chapter_title": chapter.title,
-                        "task": task,
-                    })
+                _collect_leaf_tasks(children, chapter.id, chapter.title, [chapter.title])
 
     total_leaves = len(all_tasks)
+
+    # ── 按目标页数规划每个叶子的篇幅 ──
+    from app.services.token_budget import assign_target_budgets
+    assign_target_budgets([t["task"] for t in all_tasks], target_pages)
+
+    estimated_pages = sum(
+        t["task"].get("estimated_pages", 1) for t in all_tasks
+    )
 
     yield {
         "event": "outline_generated",
         "data": json.dumps({
             "total_leaves": total_leaves,
-            "estimated_pages": total_leaves * 3,
-            "max_depth": 3,
+            "estimated_pages": estimated_pages,
+            "target_pages": target_pages,
+            "max_depth": 4,
             "completed_from_previous": 0,
         }, ensure_ascii=False),
     }
@@ -1198,7 +1245,8 @@ async def generate_from_chapter_structure(
         "event": "status",
         "data": json.dumps({
             "phase": "generating",
-            "message": f"开始并行生成 {total_leaves} 个小节（{parallel_workers} 路并发）...",
+            "message": f"开始并行生成 {total_leaves} 个小节（{parallel_workers} 路并发），"
+                       f"目标 {target_pages} 页，预计约 {estimated_pages} 页...",
             "total_leaf_sections": total_leaves,
             "completed_leaf_sections": 0,
         }, ensure_ascii=False),
@@ -1221,11 +1269,12 @@ async def generate_from_chapter_structure(
                 path_key = " > ".join(task["path"])
                 title = task["title"]
                 depth = task.get("depth", 0)
-                max_tokens = _budget_hint_to_tokens(task.get("token_budget_hint", "medium"))
+                max_tokens = task.get("max_tokens") or _budget_hint_to_tokens(task.get("token_budget_hint", "medium"))
 
-                # Build section guidance
-                from app.services.ai_pipeline import _get_section_guidance
-                guidance = _get_section_guidance(title)
+                # Build section guidance + 招标文件格式约束
+                from app.services.ai_pipeline import _get_section_guidance, _build_section_format_guidance
+                guidance = _get_section_guidance(title, format_template)
+                guidance += _build_section_format_guidance(title, task["path"], format_template)
 
                 full_content = ""
                 try:
@@ -1239,6 +1288,7 @@ async def generate_from_chapter_structure(
                         reference_sections=[],
                         company_profile=company_profile,
                         extra_guidance=guidance,
+                        format_template=format_template,
                     ):
                         full_content += chunk
                 except Exception as exc:
@@ -1317,56 +1367,189 @@ async def generate_from_chapter_structure(
                 }, ensure_ascii=False),
             }
 
-    # ── Phase: Assemble chapters ──
+    # ── Phase: Assemble chapters（树形组装：章节 → 容器 → 叶子）──
     yield {
         "event": "status",
         "data": json.dumps({
             "phase": "assembling",
-            "message": "正在组装章节内容...",
+            "message": "正在生成分组引导段并组装章节内容...",
         }, ensure_ascii=False),
     }
 
-    # Group generated sections by chapter
-    chapter_contents: Dict[str, Dict[str, str]] = {}
-    for path_key, content in generated_sections.items():
-        # path_key is "chapter_title > sub_title > ..."
-        chapter_title = path_key.split(" > ")[0]
-        if chapter_title not in chapter_contents:
-            chapter_contents[chapter_title] = {}
-        chapter_contents[chapter_title][path_key] = content
+    from app.services.content_assembler import build_final_chapters_payload, generate_chapter_summary
+    from app.services.subsection_generator import generate_container_lead_in
 
-    # Build chapters payload
-    chapters_payload = []
+    # 解析/规范化每章 children_json 为树（兼容嵌套树与旧扁平任务）
+    def _load_chapter_tree(chapter) -> list:
+        try:
+            nodes = json.loads(chapter.children_json) if chapter.children_json else []
+        except json.JSONDecodeError:
+            nodes = []
+        if not isinstance(nodes, list) or not nodes:
+            return []
+        if isinstance(nodes[0], dict) and "path" in nodes[0]:
+            # 旧扁平任务列表 → 包装成叶子树（保留 path，供组装按文档顺序展开）
+            return [
+                {
+                    "title": n.get("title", ""),
+                    "depth": n.get("depth", 1),
+                    "path": n.get("path"),
+                    "token_budget_hint": n.get("token_budget_hint", "medium"),
+                }
+                for n in nodes
+            ]
+        return nodes
 
-    # Add file/table chapters first
+    chapter_trees = {
+        c.title: _load_chapter_tree(c)
+        for c in chapters
+        if c.chapter_type == "ai_generated"
+    }
+
+    # ── 容器引导段：遍历所有非叶节点（含章节根），用子内容摘要并行生成 ──
+    lead_ins: Dict[str, str] = {}
+
+    def _build_child_summaries(container_path: list, children: list) -> list[str]:
+        summaries = []
+        for child in children:
+            child_title = child.get("title", "")
+            if child.get("children"):
+                summaries.append(f"{child_title}（含 {len(child['children'])} 个子章节）")
+            else:
+                child_path = child.get("path") or (container_path + [child_title])
+                content = generated_sections.get(" > ".join(child_path), "")
+                if content:
+                    summaries.append(f"{child_title}：{generate_chapter_summary(content)}")
+                else:
+                    summaries.append(child_title)
+        return summaries
+
+    leadin_items: list[tuple] = []
+    for chapter in chapters:
+        if chapter.chapter_type != "ai_generated":
+            continue
+        tree = chapter_trees.get(chapter.title, [])
+        if not tree:
+            continue
+        # 章节根节点也是一个容器 → 章节引导段
+        leadin_items.append((chapter.title, {"title": chapter.title, "children": tree}, [chapter.title]))
+
+        def _walk(nodes, path):
+            for node in nodes:
+                node_path = path + [node["title"]]
+                if node.get("children"):
+                    leadin_items.append((chapter.title, node, node_path))
+                    _walk(node["children"], node_path)
+
+        _walk(tree, [chapter.title])
+
+    if leadin_items:
+        leadin_sem = asyncio.Semaphore(parallel_workers)
+
+        async def _gen_leadin(item) -> tuple | None:
+            chapter_title, node, node_path = item
+            key = " > ".join(node_path)
+            if key in generated_sections:  # 防御：容器不可能是叶子
+                return None
+            summaries = _build_child_summaries(node_path, node.get("children", []))
+            async with leadin_sem:
+                text = await generate_container_lead_in(
+                    container_title=node["title"],
+                    section_path=node_path,
+                    requirements=requirements,
+                    company_profile=company_profile,
+                    child_summaries=summaries,
+                )
+            return (key, text) if text else None
+
+        leadin_results = await asyncio.gather(*(_gen_leadin(it) for it in leadin_items))
+        for res in leadin_results:
+            if res:
+                lead_ins[res[0]] = res[1]
+
+    # ── 树形组装（文档顺序 = 树深度优先顺序，顺带修复乱序 bug）──
+    title_to_order = {c.title: c.order_index for c in chapters}
+    chapters_payload: list[dict] = []
+
+    # 文件/表格章节（保持在前，按 order_index 排序）
     for fc in file_chapters_output:
         chapters_payload.append({
             "title": fc["title"],
             "content": fc.get("content", ""),
             "section_type": fc.get("section_type", "file"),
+            "order_index": title_to_order.get(fc["title"], 999),
         })
 
-    # Add AI-generated chapters
+    # AI 撰写章节：包装成 {title, depth:0, children: tree}，走 build_final_chapters_payload
     for chapter in chapters:
         if chapter.chapter_type != "ai_generated":
             continue
-        chapter_title = chapter.title
-        sections = chapter_contents.get(chapter_title, {})
+        tree = chapter_trees.get(chapter.title, [])
+        if not tree:
+            content = generated_sections.get(chapter.title, "")
+            chapters_payload.append({
+                "title": chapter.title,
+                "content": content,
+                "order_index": title_to_order.get(chapter.title, 999),
+            })
+            continue
+        wrapper = {
+            "title": chapter.title,
+            "depth": 0,
+            "children": tree,
+            "lead_in": lead_ins.get(chapter.title, ""),
+        }
+        payload = build_final_chapters_payload([wrapper], generated_sections)
+        if payload:
+            payload[0]["order_index"] = title_to_order.get(chapter.title, 999)
+            chapters_payload.append(payload[0])
 
-        # Assemble content from generated sections
-        parts = []
-        for path_key, content in sections.items():
-            parts.append(content)
-        content = "\n\n".join(parts)
+    chapters_payload.sort(key=lambda c: c.get("order_index", 999))
 
-        chapters_payload.append({
-            "title": chapter_title,
-            "content": content,
-        })
+    # ── 回写 children_json：叶子 content + 容器 lead_in（供 TreeEditor 显示）──
+    for chapter in chapters:
+        if chapter.chapter_type != "ai_generated":
+            continue
+        tree = chapter_trees.get(chapter.title, [])
+        if not tree:
+            continue
 
-    # Sort by original chapter order
-    title_to_order = {c.title: c.order_index for c in chapters}
-    chapters_payload.sort(key=lambda c: title_to_order.get(c["title"], 999))
+        def _writeback(nodes, path):
+            for node in nodes:
+                node_path = path + [node["title"]]
+                if node.get("children"):
+                    lead = lead_ins.get(" > ".join(node_path))
+                    if lead:
+                        node["lead_in"] = lead
+                    _writeback(node["children"], node_path)
+                else:
+                    leaf_path = node.get("path") or node_path
+                    content = generated_sections.get(" > ".join(leaf_path), "")
+                    if content:
+                        node["content"] = content
+
+        _writeback(tree, [chapter.title])
+        try:
+            chapter.children_json = json.dumps(tree, ensure_ascii=False)
+        except Exception:
+            pass
+    try:
+        await db.commit()
+    except Exception:
+        pass
+
+    # ── Phase: 格式校验（与招标文件格式模板对账）──
+    from app.services.format_verifier import verify_format
+    verification = verify_format(chapters_payload, format_template)
+    try:
+        project.format_verification_json = json.dumps(verification, ensure_ascii=False)
+        await db.commit()
+    except Exception:
+        pass
+    yield {
+        "event": "format_verification",
+        "data": json.dumps(verification, ensure_ascii=False),
+    }
 
     # ── Phase: Done ──
     yield {
@@ -1383,14 +1566,8 @@ async def generate_from_chapter_structure(
 
 def _budget_hint_to_tokens(hint: str) -> int:
     """Convert a token budget hint to actual token count."""
-    mapping = {
-        "tiny": settings.GENERATION_TOKEN_BUDGET_TINY,
-        "small": settings.GENERATION_TOKEN_BUDGET_SMALL,
-        "medium": settings.GENERATION_TOKEN_BUDGET_MEDIUM,
-        "large": settings.GENERATION_TOKEN_BUDGET_LARGE,
-        "xlarge": settings.GENERATION_TOKEN_BUDGET_XLARGE,
-    }
-    return mapping.get(hint, settings.GENERATION_TOKEN_BUDGET_MEDIUM)
+    from app.services.token_budget import hint_to_tokens
+    return hint_to_tokens(hint)
 
 
 # ---------------------------------------------------------------------------

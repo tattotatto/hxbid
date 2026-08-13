@@ -14,6 +14,7 @@ import {
   List,
   Divider,
   Select,
+  InputNumber,
 } from 'antd'
 import {
   ThunderboltOutlined,
@@ -94,7 +95,8 @@ function parseMarkdownHeadings(content: string): any[] {
   const root: any[] = [];
   const stack: { level: number; node: any }[] = [];
 
-  for (const line of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
     const match = line.trim().match(/^(#{1,4})\s+(.+)$/);
     if (!match) continue;
 
@@ -102,18 +104,18 @@ function parseMarkdownHeadings(content: string): any[] {
     const title = match[2].trim();
 
     // Extract content under this heading (until next heading of same/higher level)
-    const headingIndex = lines.indexOf(line);
     let contentEnd = lines.length;
-    for (let i = headingIndex + 1; i < lines.length; i++) {
+    for (let i = li + 1; i < lines.length; i++) {
       const nextMatch = lines[i].trim().match(/^(#{1,4})\s+(.+)$/);
       if (nextMatch && nextMatch[1].length <= level) {
         contentEnd = i;
         break;
       }
     }
-    const sectionContent = lines.slice(headingIndex + 1, contentEnd).join('\n').trim();
+    const sectionContent = lines.slice(li + 1, contentEnd).join('\n').trim();
 
     const node: any = {
+      level,
       title,
       content: sectionContent,
       children: [],
@@ -221,6 +223,14 @@ export default function ProjectWorkflow() {
   const [ragSources, setRagSources] = useState<Record<string, RagSourceInfo>>({})
   const [aiTraces, setAiTraces] = useState<Record<string, AiTraceInfo>>({})
 
+  // Target page count (per-project, default 2000)
+  const [targetPages, setTargetPages] = useState(2000)
+  // Format verification result from the new pipeline
+  const [formatVerification, setFormatVerification] = useState<{
+    overall_status: string
+    message?: string
+  } | null>(null)
+
   // Local chapter content edits
   const [chapterContent, setChapterContent] = useState<Record<string, string>>({})
 
@@ -235,6 +245,8 @@ export default function ProjectWorkflow() {
     try {
       const res = await client.get(`/projects/${id}`)
       setProject(res.data)
+      setTargetPages(res.data.target_pages || 2000)
+      setFormatVerification(null)
 
       // Initialize chapter content map
       const contentMap: Record<string, string> = {}
@@ -285,6 +297,17 @@ export default function ProjectWorkflow() {
     fetchProject()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleTargetPagesChange = async (value: number | null) => {
+    const v = value ?? 2000
+    setTargetPages(v)
+    if (!id) return
+    try {
+      await client.put(`/projects/${id}`, { target_pages: v })
+    } catch {
+      // 静默失败：生成请求仍会带上 targetPages 值
+    }
+  }
+
   const handleGenerate = async () => {
     if (!id) return
     setGenerating(true)
@@ -305,7 +328,7 @@ export default function ProjectWorkflow() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ project_id: id }),
+        body: JSON.stringify({ project_id: id, target_pages: targetPages }),
       })
     } catch {
       message.error('生成请求失败')
@@ -374,9 +397,11 @@ export default function ProjectWorkflow() {
                   break
                 }
                 case 'outline_generated': {
-                  // Deep pipeline: outline is ready
-                  setTotal(data.total_leaf_sections || data.total_parts || 0)
-                  setCurrentChapter(`大纲已生成：${data.total_leaf_sections} 个子章节，预计 ${data.estimated_pages} 页`)
+                  // New pipeline: outline ready with per-leaf page budget
+                  setTotal(data.total_leaves || data.total_leaf_sections || data.total_parts || 0)
+                  setCurrentChapter(
+                    `大纲已生成：共 ${data.total_leaves} 个小节，目标 ${data.target_pages || targetPages} 页，预计约 ${data.estimated_pages} 页`,
+                  )
                   break
                 }
                 case 'subsection_status': {
@@ -455,6 +480,82 @@ export default function ProjectWorkflow() {
                   )
                   break
                 }
+                case 'section_start': {
+                  // New pipeline: a leaf section is starting
+                  if (data.total) setTotal(data.total)
+                  setCurrentChapter(data.title || data.path || '')
+                  const subId = `sec_${data.index}_${data.title || data.path || ''}`
+                  setSseChapters((prev) => {
+                    const exists = prev.some((c) => c.id === subId)
+                    if (exists) return prev
+                    return [
+                      ...prev,
+                      { id: subId, title: data.title || data.path || '', status: 'pending' },
+                    ].slice(-20)
+                  })
+                  break
+                }
+                case 'section_done': {
+                  // New pipeline: a leaf section finished (index = completed count)
+                  setCompleted(data.index || 0)
+                  const subId = `sec_${data.index}_${data.title || data.path || ''}`
+                  setSseChapters((prev) =>
+                    prev.map((c) =>
+                      c.id === subId ? { ...c, status: 'generated' } : c,
+                    ),
+                  )
+                  // 生成失败时管道仍会带 error 字段发 section_done（内容为失败提示）
+                  if (data.error) {
+                    setFailedSections((prev) => {
+                      const exists = prev.some((f) => f.path === data.path)
+                      if (exists) return prev
+                      return [
+                        ...prev,
+                        {
+                          path: data.path || '',
+                          title: data.title || data.path || '',
+                          error: data.error || null,
+                        },
+                      ]
+                    })
+                  }
+                  break
+                }
+                case 'section_error': {
+                  setFailedSections((prev) => {
+                    const exists = prev.some((f) => f.path === data.path)
+                    if (exists) return prev
+                    return [
+                      ...prev,
+                      {
+                        path: data.path || '',
+                        title: data.title || data.path || '',
+                        error: data.error || null,
+                      },
+                    ]
+                  })
+                  setCompleted(data.index || 0)
+                  break
+                }
+                case 'progress': {
+                  setCompleted(data.completed || 0)
+                  if (data.total) setTotal(data.total)
+                  break
+                }
+                case 'format_verification': {
+                  setFormatVerification({
+                    overall_status: data.overall_status || 'pass',
+                    message: data.message || '',
+                  })
+                  if (data.overall_status === 'fail') {
+                    message.warning('格式校验未通过：' + (data.message || '存在缺失必需章节'))
+                  } else if (data.overall_status === 'pass_with_warnings') {
+                    message.info('格式校验通过（有提示）：' + (data.message || ''))
+                  } else {
+                    message.success('格式校验通过')
+                  }
+                  break
+                }
                 case 'done':
                   break
                 case 'error':
@@ -493,7 +594,7 @@ export default function ProjectWorkflow() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ project_id: id }),
+        body: JSON.stringify({ project_id: id, target_pages: targetPages }),
       })
     } catch {
       message.error('重试请求失败')
@@ -783,7 +884,17 @@ export default function ProjectWorkflow() {
           style={{ marginBottom: 24 }}
         />
 
-        <Space>
+        <Space wrap>
+          <InputNumber
+            min={200}
+            max={5000}
+            step={100}
+            value={targetPages}
+            onChange={handleTargetPagesChange}
+            addonBefore="目标页数"
+            style={{ width: 180 }}
+            disabled={generating || retrying}
+          />
           <Button
             type="primary"
             icon={<ThunderboltOutlined />}
@@ -867,6 +978,30 @@ export default function ProjectWorkflow() {
         </Card>
       )}
 
+      {/* Format verification result (new pipeline, persists after generation) */}
+      {formatVerification && !generating && !retrying && (
+        <Card size="small" style={{ marginBottom: 24 }} title="格式校验结果">
+          <Space>
+            <Tag
+              color={
+                formatVerification.overall_status === 'pass'
+                  ? 'success'
+                  : formatVerification.overall_status === 'pass_with_warnings'
+                    ? 'warning'
+                    : 'error'
+              }
+            >
+              {formatVerification.overall_status === 'pass'
+                ? '通过'
+                : formatVerification.overall_status === 'pass_with_warnings'
+                  ? '通过（有提示）'
+                  : '未通过'}
+            </Tag>
+            {formatVerification.message ? <span>{formatVerification.message}</span> : null}
+          </Space>
+        </Card>
+      )}
+
       {/* Failed sections warning with retry button */}
       {!generating && !retrying && failedSections.length > 0 && (
         <Card
@@ -923,6 +1058,7 @@ export default function ProjectWorkflow() {
                   chapter_type: ch.chapter_type || 'text',
                   review_status: ch.review_status || '',
                   status: ch.status,
+                  content: ch.final_content || ch.ai_generated_content || '',
                   children: (() => {
                     try {
                       const parsed = ch.children_json ? JSON.parse(ch.children_json) : [];

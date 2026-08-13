@@ -34,6 +34,7 @@ export interface ChapterTreeItem {
   chapter_type: string; // 'fixed_form' | 'table' | 'ai_generated' | 'attachment'
   review_status: string;
   status: string;
+  content?: string; // 整章内容（文件型章节 / markdown 解析章节）
   children?: SectionNode[];
 }
 
@@ -53,8 +54,10 @@ function buildTreeData(
   selectedPath: string[] | null,
 ): DataNode[] {
   return chapters.map((ch) => {
-    const isFileType = ch.chapter_type !== 'ai_generated';
     const children = ch.children || [];
+    // 是否按目录树展开取决于有无子结构：有子结构（children_json 或 markdown 解析）
+    // 就展开，即使 chapter_type=text（旧管线章节）也展开；仅无子结构的章节按文件型处理。
+    const isFileType = children.length === 0;
 
     // Determine icon and status tag
     let icon: React.ReactNode;
@@ -65,10 +68,8 @@ function buildTreeData(
       statusTag = ch.status === 'generated'
         ? <Tag color="success" style={{ fontSize: 10, lineHeight: '16px' }}>✓</Tag>
         : null;
-    } else if (children.length > 0) {
-      icon = <FolderOutlined style={{ color: '#1677ff' }} />;
     } else {
-      icon = <FileTextOutlined style={{ color: '#1677ff' }} />;
+      icon = <FolderOutlined style={{ color: '#1677ff' }} />;
     }
 
     // Build tree node
@@ -81,14 +82,17 @@ function buildTreeData(
           {statusTag}
         </Space>
       ),
-      isLeaf: isFileType || children.length === 0,
-      selectable: isFileType || children.length === 0,
+      isLeaf: isFileType,
+      selectable: isFileType,
     };
 
-    // Add sub-nodes for ai_generated chapters
-    if (!isFileType && children.length > 0) {
+    // Add sub-nodes when the chapter has a parsed sub-structure.
+    // 子节点路径以章节的 children 树为基准（不含章节标题）：旧项目 markdown 解析的
+    // children 顶层就是内容标题，而新管线 flatten 树顶层是章节标题节点，两者路径
+    // 应各自从 children[0] 起算，findSectionByPath 才能命中。
+    if (children.length > 0) {
       node.children = children.map((section, si) =>
-        buildSectionNode(ch.id, section, [ch.title], si, selectedPath),
+        buildSectionNode(ch.id, section, [], si, selectedPath),
       );
     }
 
@@ -140,7 +144,7 @@ function buildSectionNode(
       </Space>
     ),
     isLeaf: !hasChildren,
-    selectable: !hasChildren, // Only leaf nodes are selectable
+    selectable: true, // 容器也可选中（查看/编辑分组引导段）
   };
 
   if (hasChildren && section.children) {

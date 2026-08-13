@@ -91,11 +91,16 @@ def assemble_chapter_content(
                 child_contents.append(child_content)
 
         if child_contents:
-            # Only add heading if there's actual content below
-            parts.append(f"\n\n{marker}{title}\n")
+            # 容器：有引导段则输出 标题+引导段+子内容；无引导段则跳过裸标题，
+            # 绝不在无正文的情况下输出标题（杜绝"空标题"现象）。
+            lead_in = (node.get("lead_in") or "").strip()
+            if lead_in:
+                parts.append(f"\n\n{marker}{title}\n\n{lead_in}\n")
             parts.extend(child_contents)
     else:
-        # Leaf: retrieve generated content
+        # Leaf: retrieve generated content（优先用节点自带 path，兼容扁平任务）
+        if node.get("path"):
+            node_path = node["path"]
         path = " > ".join(node_path)
         content = generated_sections.get(path, "")
         if content.strip():

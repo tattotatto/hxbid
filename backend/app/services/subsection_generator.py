@@ -95,6 +95,20 @@ def _build_progressive_prompt(
         parts.append(f"【当前撰写位置】{ancestry}")
     parts.append(f"章节标题：{section_title}")
 
+    # ── 标题层级指令：以正确层级输出本节标题作为第一行 + 引导段先行 ──
+    if depth >= 1:
+        from app.services.content_assembler import HEADING_MARKERS
+        leaf_marker = HEADING_MARKERS.get(depth, "#### ").rstrip()
+        parts.append(
+            f"\n【格式指令（必须遵守）】\n"
+            f"你正在撰写目录中的一个叶子小节。输出内容必须以 "
+            f"“{leaf_marker} {section_title}” 作为第一行（正确层级的标题标记），"
+            f"随后立即写一段引导/综述文字（1-2 句概述本节定位与覆盖内容），"
+            f"再展开具体内容。禁止省略标题、禁止改用其他层级、"
+            f"禁止“标题后紧跟另一个标题”的空标题现象。"
+            f"每个段落至少包含 1 个可量化事实（人数/天数/频率/金额/编号等）。"
+        )
+
     # ── Layer 2: Parent context ──
     if len(section_path) >= 2:
         parent_title = section_path[-2] if len(section_path) >= 2 else ""
@@ -186,12 +200,88 @@ def _format_requirements_for_section(requirements: dict, section_title: str) -> 
 
 DEEP_SECTION_PROMPT_SUFFIX = """
 深度章节撰写额外要求：
-1. 本小节是标书中一个具体的子章节，请直接开始撰写实质内容，不需要写"本部分将介绍..."之类的引导语
-2. 内容必须有层次感：先概述，再分点详述，最后总结
-3. 每个要点必须包含具体操作步骤、量化指标或实际案例
-4. 与同级章节的内容要互补不重复，形成完整体系
-5. 适当使用表格呈现对比数据、人员配置、时间安排等信息
-6. 专业性要求：使用行业标准术语和规范表达"""
+1. 本节标题必须以正确层级输出为第一个标题（如当前节为"### 1. 门卫值守"，第一行就是
+   "### 1. 门卫值守"），不得省略、不得改用其他层级
+2. 标题之后立即写一段引导/综述（1-2 句概述本节内容与定位），再展开分点；禁止
+   "标题后紧跟标题"的空标题现象。引导要具体、点明覆盖内容，禁止"本节将介绍""本部分主要"等套话
+3. 内容必须有层次感：先概述，再分点详述，最后总结
+4. 每个要点必须包含具体操作步骤、量化指标或实际案例（人数/天数/频率/金额/编号等），
+   每个段落至少1个可量化事实
+5. 与同级章节的内容要互补不重复，形成完整体系
+6. 适当使用表格呈现对比数据、人员配置、时间安排等信息
+7. 专业性要求：使用行业标准术语和规范表达"""
+
+
+# ---------------------------------------------------------------------------
+# 容器引导段生成
+# ---------------------------------------------------------------------------
+
+async def generate_container_lead_in(
+    container_title: str,
+    section_path: List[str],
+    requirements: dict,
+    company_profile: dict | None = None,
+    child_summaries: List[str] | None = None,
+) -> str:
+    """为一个分组标题（容器节点）生成引导段文字（约 150-400 字）.
+
+    容器引导段负责：综述该分组定位与覆盖范围、点出与整体方案的关系，
+    让目录下每个分组标题都有正文，杜绝"裸标题 + 直接子标题"的空标题现象。
+
+    Args:
+        container_title: 容器标题（如"门卫值守管理方案"）
+        section_path: 从章节到该容器的完整路径（含章节标题）
+        requirements: 解析后的招标要求
+        company_profile: 公司信息
+        child_summaries: 子章节摘要列表 ["标题：内容摘要", ...]
+
+    Returns:
+        引导段文字（不含标题标记），失败返回空字符串。
+    """
+    from app.config import settings
+    from app.services.ai_pipeline import build_company_info_block
+
+    company_context = build_company_info_block(company_profile) if company_profile else ""
+    child_text = "\n".join(f"  - {s}" for s in (child_summaries or []))
+    ancestry = " > ".join(section_path[:-1]) if len(section_path) > 1 else ""
+
+    user_prompt = f"""请为投标文件中下面这个分组标题撰写一段引导语（综述性段落）。
+
+【文档位置】{ancestry or "（标书正文）"}
+【分组标题】{container_title}
+
+【该分组下包含的子主题】
+{child_text if child_text else "（无，请按标题自行概括覆盖范围）"}
+
+【公司信息】
+{company_context or "（无）"}
+
+写作要求：
+1. 2-4 句综述性文字，约 150-400 字，说明本分组的定位、覆盖范围、核心要点
+2. 结合子主题点名覆盖范围，体现与整份标书技术方案的衔接
+3. 不得写出任何子标题、不得使用"本节将介绍""本章节主要"等套话
+4. 必须包含至少 1 个具体事实（项目名称、服务范围、量化指标等）
+5. 只返回正文段落本身，不要返回标题或任何标记"""
+
+    try:
+        response = await ai_adapter.chat_completion(
+            messages=[
+                {"role": "system", "content": (
+                    "你是投标文件编辑专家，负责为标书分组标题撰写精炼的引导段。"
+                    "正文要简洁有力、信息密度高，禁止空泛套话。"
+                )},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            max_tokens=settings.GENERATION_LEADIN_MAX_TOKENS,
+        )
+        return (response or "").strip()
+    except Exception as exc:
+        logger.error(
+            "Container lead-in generation failed for '%s': %s",
+            container_title, exc,
+        )
+        return ""
 
 
 # ---------------------------------------------------------------------------

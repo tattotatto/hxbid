@@ -364,6 +364,7 @@ async def generate_bid(
                         matched_personnel=matched_personnel,
                         matched_contracts=matched_contracts,
                         db=gen_db,
+                        target_pages=data.target_pages or project.target_pages or settings.GENERATION_TARGET_PAGES_DEFAULT,
                     ):
                         yield event
                         if event.get("event") == "done":

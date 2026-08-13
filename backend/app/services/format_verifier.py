@@ -422,3 +422,128 @@ def verify_format(
         "warning_count": warning_count,
         "pass_count": len(all_checks) - fail_count - warning_count,
     }
+
+
+def validate_chapter_structure(
+    chapters: list,
+    format_template: dict | None,
+    requirements: dict | None,
+) -> dict:
+    """对账：锁定章节 vs 招标文件格式模板的必需章节 + 评分项覆盖.
+
+    与 verify_format 不同，本函数在生成前（锁定章节阶段）调用，输入是
+    已锁定的章节列表（ProjectChapter 对象或 {"title": ...} 字典），用于
+    提前补齐/校验必需章节，而不是等生成完才发现缺失。
+
+    Returns:
+        {
+            "overall_status": "pass" | "pass_with_warnings" | "fail",
+            "missing_required": [{"title", "type", "children"}, ...],  # 需自动补充
+            "order_issues": [{"title", "detail"}, ...],
+            "coverage_notes": [{"keyword", "detail"}, ...],  # 评分项未覆盖提示
+            "checks": [...],
+        }
+    """
+    def _title_of(ch) -> str:
+        if isinstance(ch, dict):
+            return ch.get("title", "")
+        return getattr(ch, "title", "")
+
+    titles = [_title_of(c) for c in chapters]
+    structure = (format_template or {}).get("document_structure", []) or []
+
+    checks: list[dict] = []
+    missing_required: list[dict] = []
+    order_issues: list[dict] = []
+    coverage_notes: list[dict] = []
+
+    if not structure:
+        return {
+            "overall_status": "pass",
+            "missing_required": [],
+            "order_issues": [],
+            "coverage_notes": [],
+            "checks": [],
+            "message": "无格式模板，跳过章节对账",
+        }
+
+    # 1. 必需章节完整性（模糊子串匹配）→ 收集缺失项供自动补充
+    for part in structure:
+        part_title = part.get("title", "")
+        if not part_title:
+            continue
+        required = part.get("required", True)
+        found = any(part_title in t for t in titles if t)
+        status = "pass" if found else ("fail" if required else "skip")
+        checks.append({
+            "check": "required_section",
+            "item": part_title,
+            "status": status,
+            "detail": "" if found else (
+                f"缺少必需章节：{part_title}" if required else f"可选章节未锁定：{part_title}"
+            ),
+            "can_auto_fix": required and not found,
+        })
+        if required and not found:
+            missing_required.append({
+                "title": part_title,
+                "type": part.get("type", "ai_generated"),
+                "children": part.get("children", []),
+            })
+
+    # 2. 顺序检查（按模板顶层顺序校验已匹配章节的相对顺序）
+    matched: list[tuple[int, str]] = []
+    for t in titles:
+        for i, part in enumerate(structure):
+            part_title = part.get("title", "")
+            if part_title and part_title in t:
+                matched.append((i, t))
+                break
+    order = [i for i, _ in matched]
+    for prev, cur in zip(order, order[1:]):
+        if cur < prev:
+            cur_title = matched[order.index(cur)][1]
+            order_issues.append({
+                "title": cur_title,
+                "detail": f"章节「{cur_title}」的锁定顺序与招标文件格式模板不一致，请调整后重新锁定",
+            })
+    if order_issues:
+        checks.append({
+            "check": "section_order",
+            "item": "all",
+            "status": "warning",
+            "detail": "；".join(i["detail"] for i in order_issues),
+            "can_auto_fix": False,
+        })
+
+    # 3. 评分项覆盖提示（供标题细化阶段参考）
+    criteria = (requirements or {}).get("evaluation_criteria")
+    keywords: list[str] = []
+    if isinstance(criteria, str):
+        keywords = [k.strip() for k in re.split(r'[;；、,，\n]', criteria) if k.strip()]
+    elif isinstance(criteria, list):
+        keywords = [str(k).strip() for k in criteria if str(k).strip()]
+    for kw in keywords:
+        if not kw:
+            continue
+        covered = any(kw in t or t in kw for t in titles if t)
+        if not covered:
+            coverage_notes.append({
+                "keyword": kw,
+                "detail": f"评分项「{kw}」未在锁定章节标题中体现，建议标题细化时覆盖",
+            })
+
+    overall = "fail" if missing_required else (
+        "pass_with_warnings" if order_issues or coverage_notes else "pass"
+    )
+    return {
+        "overall_status": overall,
+        "missing_required": missing_required,
+        "order_issues": order_issues,
+        "coverage_notes": coverage_notes,
+        "checks": checks,
+        "message": (
+            f"章节对账完成：必需章节齐全" if not missing_required
+            else f"缺少 {len(missing_required)} 个必需章节，已列出待自动补充"
+        ),
+    }

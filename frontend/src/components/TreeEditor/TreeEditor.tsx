@@ -48,19 +48,19 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
     }
 
     if (selectedSectionPath.length === 0) {
-      // File type chapter or root ai_generated → load ai_generated_content
-      // For now, we use content from children_json
-      setCurrentContent('');
+      // 文件型章节 / 根节点：直接展示整章内容（ai_generated_content / final_content）
+      setCurrentContent(selectedChapter.content || '');
       setHumanEdited(false);
       return;
     }
 
     // Find section content from children tree
+    // 容器节点读引导段（lead_in），叶子读 content
     const section = findSectionByPath(
       selectedChapter.children || [],
       selectedSectionPath,
     );
-    setCurrentContent(section?.content || '');
+    setCurrentContent(section?.lead_in || section?.content || '');
     setHumanEdited(section?.human_edited || false);
   }, [selectedChapterId, selectedSectionPath, chapters]);
 
@@ -81,58 +81,52 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
     if (!selectedChapterId) return;
     setSaving(true);
     try {
-      // Check if this chapter has structured children_json (new pipeline)
       const chapter = chapters.find(c => c.id === selectedChapterId);
-      const hasStructuredChildren = chapter?.children && chapter.children.length > 0
-        && !('content' in chapter.children[0]) === false; // has children_json with content fields
+      const token = localStorage.getItem('token') || '';
 
-      if (selectedSectionPath.length > 0) {
-        // Legacy mode: save by reconstructing full chapter content
-        const token = localStorage.getItem('token') || '';
-
-        // Build updated full content by walking the tree and replacing this section
-        const sectionTitle = selectedSectionPath[selectedSectionPath.length - 1];
-        const fullContent = rebuildFullContent(
-          chapter?.children || [],
-          selectedSectionPath,
-          currentContent,
+      // 编辑章节内小节：先写回 children_json（容器写 lead_in / 叶子写 content），
+      // 保证新管线（children_json 为目录树来源）下编辑在刷新后不丢失。
+      if (selectedSectionPath.length > 0 && (chapter?.children?.length ?? 0) > 0) {
+        const secRes = await fetch(
+          `/api/v1/projects/${projectId}/chapters/${selectedChapterId}/sections/save`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              section_path: selectedSectionPath,
+              content: currentContent,
+            }),
+          },
         );
+        if (!secRes.ok) throw new Error('保存小节失败');
+      }
 
-        // Save full chapter via project chapters API
-        const res = await fetch(`/api/v1/projects/${projectId}/chapters/${selectedChapterId}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            final_content: fullContent,
-          }),
-        });
-        if (!res.ok) throw new Error('保存失败');
-        message.success('保存成功');
-        if (onContentUpdate) {
-          onContentUpdate(selectedChapterId, fullContent);
-        }
-      } else {
-        // New pipeline mode: save single section
-        const token = localStorage.getItem('token') || '';
-        const res = await fetch(`/api/v1/bid/${projectId}/chapters/${selectedChapterId}/sections/save`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            section_path: selectedSectionPath,
-            content: currentContent,
-          }),
-        });
-        if (!res.ok) throw new Error('保存失败');
-        message.success('保存成功');
-        if (onContentUpdate) {
-          onContentUpdate(selectedChapterId, currentContent);
-        }
+      // 重建整章内容后写回 final_content（渲染/导出使用）：
+      // - 编辑章节内小节：替换该小节内容后重建整章 markdown；
+      // - 编辑整章（文件型 / 旧项目 markdown 解析章节）：children 为空时直接取当前内容。
+      const fullContent = rebuildFullContent(
+        chapter?.children || [],
+        selectedSectionPath,
+        currentContent,
+      );
+
+      const res = await fetch(`/api/v1/projects/${projectId}/chapters/${selectedChapterId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          final_content: fullContent,
+        }),
+      });
+      if (!res.ok) throw new Error('保存失败');
+      message.success('保存成功');
+      if (onContentUpdate) {
+        onContentUpdate(selectedChapterId, fullContent);
       }
     } catch (err: any) {
       message.error(err.message || '保存失败');
@@ -264,7 +258,25 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Rebuild full markdown content from tree structure after editing a section
+// 依据节点层级生成 markdown 标题（# ~ ######）
+// - 嵌套树（children_json v2）节点带 depth：depth 1 → ##、depth 2 → ###、...
+// - 旧 markdown 解析树节点带 level：level 1 → #、level 2 → ##、...
+function headingOf(node: any): string {
+  let level: number;
+  if (node.depth != null) {
+    level = node.depth + 1;
+  } else {
+    level = node.level || 2;
+  }
+  level = Math.min(Math.max(level, 1), 6);
+  return '#'.repeat(level) + ' ' + node.title;
+}
+
+// Rebuild full markdown content from tree structure after editing a section.
+// 规则：
+// - 容器节点输出 heading + lead_in（兜底 content），并递归其子内容；
+// - 叶子节点输出 heading + content；
+// - 无正文（无 lead_in / content）的节点绝不输出裸标题（杜绝"空标题"）。
 function rebuildFullContent(
   children: any[],
   sectionPath: string[],
@@ -274,23 +286,31 @@ function rebuildFullContent(
 
   const parts: string[] = [];
   for (const node of children) {
+    const hasChildren = !!(node.children && node.children.length > 0);
     const isTarget = node.title === sectionPath[0];
+
     if (isTarget && sectionPath.length === 1) {
-      // This is the target section — replace its content
-      parts.push(`## ${node.title}\n\n${newContent}`);
-    } else if (isTarget && node.children && node.children.length > 0) {
+      // Target is right here — edited content replaces lead_in (容器) / content (叶子)
+      const body = newContent.trim() ? newContent : '';
+      if (body) {
+        parts.push(`${headingOf(node)}\n\n${body}`);
+      }
+      if (hasChildren) {
+        const childContent = rebuildFullContent(node.children, [], '');
+        if (childContent) parts.push(childContent);
+      }
+    } else if (isTarget && hasChildren) {
       // Go deeper
-      parts.push(`## ${node.title}\n\n${rebuildFullContent(node.children, sectionPath.slice(1), newContent)}`);
+      parts.push(`${headingOf(node)}\n\n${rebuildFullContent(node.children, sectionPath.slice(1), newContent)}`);
     } else {
-      // Not the target — keep original content
-      const content = node.content || '';
-      if (content) {
-        parts.push(`## ${node.title}\n\n${content}`);
-      } else {
-        parts.push(`## ${node.title}`);
-        if (node.children && node.children.length > 0) {
-          parts.push(rebuildFullContent(node.children, [], ''));
-        }
+      // Not the target — keep original content (lead_in for containers, content for leaves)
+      const body = (node.lead_in || node.content || '').trim();
+      if (body) {
+        parts.push(`${headingOf(node)}\n\n${body}`);
+      }
+      if (hasChildren) {
+        const childContent = rebuildFullContent(node.children, [], '');
+        if (childContent) parts.push(childContent);
       }
     }
   }

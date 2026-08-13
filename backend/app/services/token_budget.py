@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -158,8 +160,8 @@ def get_budget_for_section(
     modifier = DEPTH_MODIFIER.get(depth, 0.5)
     max_tokens = max(int(cat.max_tokens * modifier), 256)
     estimated_chars = int(max_tokens * CHARS_PER_TOKEN)
-    # Chinese bid format: ~500-800 chars per page (with tables, spacing)
-    estimated_pages = max(1, int(estimated_chars / 650))
+    # Chinese bid format: ~500-600 chars per page (with tables, spacing)
+    estimated_pages = max(1, int(estimated_chars / settings.GENERATION_CHARS_PER_PAGE))
 
     return {
         "max_tokens": max_tokens,
@@ -231,10 +233,68 @@ def assign_budgets(
         for node in all_leaf_budgets:
             node["max_tokens"] = max(int(node["max_tokens"] * scale), 256)
             node["estimated_pages"] = max(
-                int(node["max_tokens"] * CHARS_PER_TOKEN / 650), 1
+                int(node["max_tokens"] * CHARS_PER_TOKEN / settings.GENERATION_CHARS_PER_PAGE), 1
             )
 
     return outline_tree
+
+
+def hint_to_tokens(hint: str) -> int:
+    """Map a token_budget_hint keyword to its category's max_tokens.
+
+    Unknown/empty hints fall back to the medium tier (8192).
+    """
+    for cat in BUDGET_CATEGORIES:
+        if cat.key == hint:
+            return cat.max_tokens
+    return 8192
+
+
+def assign_target_budgets(leaf_tasks: list[dict], target_pages: int) -> list[dict]:
+    """Assign per-leaf max_tokens scaled to a whole-document page target.
+
+    Each leaf starts from base = hint_to_tokens(hint) * DEPTH_MODIFIER[depth].
+    The total of all bases is scaled so the sum of estimated pages lands on
+    *target_pages*, then each leaf's max_tokens is clamped into the
+    configured [GENERATION_LEAF_MIN_TOKENS, GENERATION_LEAF_MAX_TOKENS] band so
+    every individual call stays cheap and reliable. Pages come from leaf count,
+    not from giant single calls.
+
+    *leaf_tasks* is mutated in-place; each leaf gets ``max_tokens`` and
+    ``estimated_pages`` written back. Returns the same list.
+    """
+    if not leaf_tasks:
+        return leaf_tasks
+
+    min_tokens = settings.GENERATION_LEAF_MIN_TOKENS
+    max_tokens = settings.GENERATION_LEAF_MAX_TOKENS
+    chars_per_page = settings.GENERATION_CHARS_PER_PAGE
+
+    total_target_chars = target_pages * chars_per_page
+    total_target_tokens = total_target_chars / CHARS_PER_TOKEN
+
+    base_sum = 0
+    for task in leaf_tasks:
+        hint = task.get("token_budget_hint", "medium")
+        depth = task.get("depth", 1)
+        modifier = DEPTH_MODIFIER.get(depth, 0.5)
+        task["_base_tokens"] = hint_to_tokens(hint) * modifier
+        base_sum += task["_base_tokens"]
+
+    if base_sum <= 0:
+        scale = 1.0
+    else:
+        scale = total_target_tokens / base_sum
+
+    for task in leaf_tasks:
+        raw = int(task.pop("_base_tokens", 0) * scale)
+        task["max_tokens"] = max(min(raw, max_tokens), min_tokens)
+        task["estimated_pages"] = max(
+            1,
+            int(task["max_tokens"] * CHARS_PER_TOKEN / chars_per_page),
+        )
+
+    return leaf_tasks
 
 
 def collect_leaf_sections(outline_tree: list) -> List[dict]:
@@ -274,7 +334,7 @@ def get_section_length_guidance(section_title: str, max_tokens: int) -> str:
     stop early at an arbitrary point.
     """
     estimated_chars = int(max_tokens * CHARS_PER_TOKEN)
-    estimated_pages = max(1, int(estimated_chars / 650))
+    estimated_pages = max(1, int(estimated_chars / settings.GENERATION_CHARS_PER_PAGE))
 
     return (
         f"\n\n【篇幅要求】本章节目标篇幅约 {estimated_chars:,} 字（约 {estimated_pages} 页）。"

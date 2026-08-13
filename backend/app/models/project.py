@@ -78,6 +78,13 @@ class BidProject(Base):
         default="[]",
         comment="用户确认锁定的章节结构JSON — 从招标文件第六章提取并经用户审核的章节列表",
     )
+    target_pages: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=2000,
+        server_default="2000",
+        comment="目标页数 — 生成篇幅按此规划（默认 2000 页）",
+    )
     created_by: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="SET NULL"),

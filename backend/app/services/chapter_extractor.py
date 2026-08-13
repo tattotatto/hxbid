@@ -197,6 +197,47 @@ async def extract_chapters_from_text(
         raise
 
 
+def merge_format_template_fallback(
+    chapters: list[dict],
+    format_template: dict,
+) -> tuple[list[dict], list[str]]:
+    """章节提取结果过少时的兜底：用格式模板 document_structure 补全必需章节.
+
+    （"AI 定位格式章节"的最后防线——当 AI 从'投标文件格式'章节未能解析出
+    完整章节列表时，回退到上传阶段提取的格式模板，保证必需章节不缺失。）
+
+    Returns:
+        (合并后的章节列表, 自动补充的章节标题列表)
+    """
+    structure = (format_template or {}).get("document_structure", []) or []
+    existing_titles = " ".join(c.get("title", "") for c in chapters)
+    merged = list(chapters)
+    added: list[str] = []
+    next_order = max((c.get("order_index", 0) for c in chapters), default=0) + 1
+
+    for part in structure:
+        part_title = part.get("title", "")
+        if not part_title or part_title in existing_titles:
+            continue
+        if not part.get("required", True):
+            continue
+        merged.append({
+            "order_index": next_order,
+            "number": part.get("number", str(next_order)),
+            "title": part_title,
+            "type": part.get("type", "ai_generated"),
+            "required": True,
+            "format_notes": "按招标文件'投标文件格式'模板自动补充（必选章节）",
+            "children": part.get("children", []),
+        })
+        next_order += 1
+        added.append(part_title)
+
+    if added:
+        logger.info("Format-template fallback merged %d required chapters: %s", len(added), added)
+    return merged, added
+
+
 async def extract_chapters_from_pdf(
     pdf_path: str,
     ai_adapter,

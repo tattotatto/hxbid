@@ -98,6 +98,21 @@ async def extract_chapters(
         health = extraction_result["health"]
         source_pages = extraction_result["source_pages"]
 
+        # 兜底：AI 提取结果过少时，用格式模板 document_structure 补全必需章节
+        from app.services.chapter_extractor import merge_format_template_fallback
+        format_template = {}
+        try:
+            format_template = json.loads(project.format_template_json) if project.format_template_json else {}
+        except json.JSONDecodeError:
+            format_template = {}
+        if len(chapters) < 3 and format_template.get("document_structure"):
+            chapters, auto_added = merge_format_template_fallback(chapters, format_template)
+            if auto_added:
+                logger.info(
+                    "Chapter extraction fallback: merged %d required chapters for project %s",
+                    len(auto_added), project_id,
+                )
+
         # Save to project
         project.chapter_structure_json = json.dumps(chapters, ensure_ascii=False)
         await db.commit()
@@ -230,44 +245,135 @@ async def lock_chapters(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="章节数据格式错误")
 
+    # Load format template for strict alignment（招标文件'投标文件格式'章节）
+    format_template = {}
+    try:
+        format_template = json.loads(project.format_template_json) if project.format_template_json else {}
+    except json.JSONDecodeError:
+        format_template = {}
+
     # Delete existing chapters
     for ch in list(project.chapters):
         await db.delete(ch)
     await db.flush()
 
-    # Create ProjectChapter records
-    for ch_data in chapters:
-        ch_type = ch_data.get("type", "ai_generated")
-        chapter = ProjectChapter(
+    structure = format_template.get("document_structure", []) or []
+    global_rules = format_template.get("global_format_rules", {}) or {}
+
+    def _find_structure_part(title: str):
+        for part in structure:
+            part_title = part.get("title", "")
+            if part_title and (part_title in title or title in part_title):
+                return part
+        return None
+
+    def _build_meta(ch_data: dict, part: dict | None) -> str:
+        meta = {
+            "number": ch_data.get("number", ""),
+            "format_notes": ch_data.get("format_notes", ""),
+            "scoring_context": ch_data.get("scoring_context", ""),
+            "table_columns": ch_data.get("table_columns", []),
+        }
+        if part:
+            # 合并招标文件格式模板中的表/签章/序号约束，供生成阶段严格遵循
+            meta["table_schema"] = part.get("table_schema", [])
+            meta["fixed_text_segments"] = part.get("fixed_text_segments", [])
+            meta["signature_block"] = part.get("signature_block", {})
+            meta["numbering_style"] = global_rules.get("numbering_style", "chinese_legal")
+        return json.dumps(meta, ensure_ascii=False)
+
+    def _make_chapter(
+        title: str,
+        order_index: int,
+        ch_type: str,
+        meta: str,
+        children: list,
+    ) -> ProjectChapter:
+        return ProjectChapter(
             project_id=project_id,
-            title=ch_data.get("title", ""),
-            order_index=ch_data.get("order_index", 0),
+            title=title,
+            order_index=order_index,
             status="pending",
             chapter_type=ch_type,
-            chapter_meta_json=json.dumps({
-                "number": ch_data.get("number", ""),
-                "format_notes": ch_data.get("format_notes", ""),
-                "scoring_context": ch_data.get("scoring_context", ""),
-                "table_columns": ch_data.get("table_columns", []),
-            }, ensure_ascii=False),
-            children_json=json.dumps(ch_data.get("children", []), ensure_ascii=False),
+            chapter_meta_json=meta,
+            children_json=json.dumps(children, ensure_ascii=False),
             review_status="locked" if ch_type in ("fixed_form", "table", "attachment") else "refining",
         )
+
+    # Create ProjectChapter records（含格式模板元数据合并）
+    created: list[ProjectChapter] = []
+    for ch_data in chapters:
+        ch_type = ch_data.get("type", "ai_generated")
+        chapter = _make_chapter(
+            title=ch_data.get("title", ""),
+            order_index=ch_data.get("order_index", 0),
+            ch_type=ch_type,
+            meta=_build_meta(ch_data, _find_structure_part(ch_data.get("title", ""))),
+            children=ch_data.get("children", []),
+        )
         db.add(chapter)
+        created.append(chapter)
+
+    # ── 章节对账：校验必需章节齐全 + 按模板顺序自动补充缺失项 ──
+    requirements = json.loads(project.parsed_requirements_json) if project.parsed_requirements_json else {}
+    from app.services.format_verifier import validate_chapter_structure
+    validation = validate_chapter_structure(chapters, format_template, requirements)
+    auto_added: list[str] = []
+
+    if structure and validation.get("missing_required"):
+        consumed: set[str] = set()
+        final_order: list[ProjectChapter] = []
+        for part in structure:
+            part_title = part.get("title", "")
+            if not part_title:
+                continue
+            match = next(
+                (c for c in created if c.id not in consumed and part_title in c.title),
+                None,
+            )
+            if match:
+                final_order.append(match)
+                consumed.add(match.id)
+            elif part.get("required", True):
+                ch_type = part.get("type", "ai_generated")
+                placeholder = _make_chapter(
+                    title=part_title,
+                    order_index=0,  # 下方统一重新编号
+                    ch_type=ch_type,
+                    meta=_build_meta({}, part),
+                    children=part.get("children", []),
+                )
+                db.add(placeholder)
+                final_order.append(placeholder)
+                auto_added.append(part_title)
+        # 追加模板之外的自由章节（用户额外锁定）
+        for c in created:
+            if c.id not in consumed:
+                final_order.append(c)
+        # 按模板顺序重新编号
+        for i, c in enumerate(final_order):
+            c.order_index = i
+        created = final_order
 
     # Update project status
     project.status = "collecting"  # Ready for resource collection
     await db.commit()
 
     logger.info(
-        "Locked %d chapters for project %s",
-        len(chapters), project_id,
+        "Locked %d chapters for project %s (auto-added: %s)",
+        len(created), project_id, auto_added,
     )
+
+    message = f"已锁定 {len(created)} 个章节。文件/表格类型章节可直接生成，AI撰写章节请先细化标题。"
+    if auto_added:
+        message += f" 已按招标文件格式自动补充必需章节：{'、'.join(auto_added)}。"
+    if validation.get("coverage_notes"):
+        message += f" 有 {len(validation['coverage_notes'])} 个评分项未在章节标题中体现，建议细化标题时覆盖。"
 
     return LockChaptersResponse(
         success=True,
-        chapters_count=len(chapters),
-        message=f"已锁定 {len(chapters)} 个章节。文件/表格类型章节可直接生成，AI撰写章节请先细化标题。",
+        chapters_count=len(created),
+        message=message,
     )
 
 
@@ -389,6 +495,7 @@ async def refine_chapter_titles(
             chapter_meta=chapter_meta,
             requirements=requirements,
             ai_adapter=ai,
+            target_pages=project.target_pages or settings.GENERATION_TARGET_PAGES_DEFAULT,
         )
 
         # Save to chapter
@@ -499,18 +606,19 @@ async def lock_refined_titles(
             detail="请先细化标题（POST /refine）再锁定",
         )
 
-    from app.services.title_refiner import flatten_children_to_tasks
-    tasks = flatten_children_to_tasks(children, [chapter.title])
+    from app.services.title_refiner import annotate_tree_depths, count_leaves
 
-    # Store tasks in children_json as flattened leaf list
-    chapter.children_json = json.dumps(tasks, ensure_ascii=False)
+    # 持久化嵌套目录树（保留层级），标注 depth；生成时再按需扁平化为任务
+    annotated = annotate_tree_depths(children, 1)
+    chapter.children_json = json.dumps(annotated, ensure_ascii=False)
     chapter.review_status = "generating"
     await db.commit()
 
+    leaf_count = count_leaves(annotated)
     return LockTitlesResponse(
         success=True,
-        leaf_count=len(tasks),
-        message=f"已锁定 {chapter.title} 的子标题，共 {len(tasks)} 个生成任务。",
+        leaf_count=leaf_count,
+        message=f"已锁定 {chapter.title} 的子标题，共 {leaf_count} 个生成任务。",
     )
 
 

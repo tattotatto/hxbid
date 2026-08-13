@@ -19,6 +19,7 @@ class ProjectUpdate(BaseModel):
     bid_deadline: Optional[date] = None
     status: Optional[str] = Field(default=None, max_length=20)
     bid_result: Optional[str] = Field(default=None, max_length=20)
+    target_pages: Optional[int] = Field(default=None, ge=100, le=10000)
 
 
 class ChapterRead(BaseModel):
@@ -50,6 +51,7 @@ class ProjectRead(BaseModel):
     outline_json: str
     generation_state_json: str = ""
     chapter_structure_json: str = "[]"
+    target_pages: int = 2000
     chapters: List[ChapterRead] = []
     created_at: datetime
     updated_at: datetime

@@ -29,7 +29,9 @@ TITLE_REFINE_SYSTEM_PROMPT = """你是投标文件大纲设计专家。你的任
 - 避免使用空泛标题（如"概述""其他"）
 - 每个标题应该是具体的、可独立撰写的内容单元
 
-叶子节点是最终的生成任务，每个叶子节点应该是一个可以用 800-2000 字写清楚的具体主题。"""
+叶子节点是最终的生成任务，每个叶子节点应该是一个可以用 800-2000 字写清楚的具体主题。
+
+分组标题（有 children 的节点）由系统在生成内容时自动补充引导段，因此你只需产出具体、非空泛的分组标题，不要用"概述""其他"等占位。"""
 
 REFINE_CHAT_SYSTEM_PROMPT = """你是投标文件大纲编辑助手。用户正在审阅标题细化结果，
 你可以帮助用户修改子标题树。
@@ -63,6 +65,7 @@ async def refine_chapter_titles(
     chapter_meta: dict,
     requirements: dict,
     ai_adapter,
+    target_pages: int = 2000,
 ) -> list[dict]:
     """将 AI 撰写章节的标题细化为子标题树.
 
@@ -71,6 +74,7 @@ async def refine_chapter_titles(
         chapter_meta: 章节元数据（scoring_context, format_notes 等）
         requirements: 解析后的招标要求
         ai_adapter: AI 适配器
+        target_pages: 整份标书目标页数，用于放大叶子节点数（页数越多，标题越细）
 
     Returns:
         子标题树列表，每个节点:
@@ -95,18 +99,24 @@ async def refine_chapter_titles(
     if requirements.get("special_requirements"):
         req_lines.append(f"特殊要求：{'；'.join(requirements['special_requirements'])}")
 
+    # 按目标页数放大叶子数：默认 2000 页时每章 75-175 个叶子（技术部分单章即可覆盖大部分评分项）
+    scale = max(1.0, min(4.0, target_pages / 800))
+    leaf_min = int(30 * scale)
+    leaf_max = int(70 * scale)
+
     user_prompt = f"""请将以下章节展开为 3-4 级子标题树。
 
 【章节标题】{chapter_title}
 【评分上下文】{scoring_context or "无特殊评分要求"}
 【格式说明】{format_notes or "无特殊格式要求"}
+【整份标书目标页数】约 {target_pages} 页——请据此把标题展开到足够细，确保每个叶子节点都能写出 800-2000 字的充实内容，避免叶子过少导致内容空洞。
 
 【招标项目信息】
 {chr(10).join(req_lines) if req_lines else "无额外信息"}
 
 要求：
-- 二级标题 6-12 个
-- 总叶子节点数 15-40 个
+- 二级标题 8-16 个
+- 总叶子节点数 {leaf_min}-{leaf_max} 个
 - 评分权重高的方向展开更深
 - 每个叶子节点是一个具体的、可独立撰写的主题
 
@@ -135,22 +145,11 @@ token_budget_hint: tiny|small|medium|large|xlarge
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,
-            max_tokens=8192,
+            max_tokens=16384,
             response_format={"type": "json_object"},
         )
         result = json.loads(response)
         children = result.get("children", [])
-
-        # Count leaf nodes
-        def count_leaves(nodes):
-            count = 0
-            for n in nodes:
-                kids = n.get("children", [])
-                if kids:
-                    count += count_leaves(kids)
-                else:
-                    count += 1
-            return count
 
         leaf_count = count_leaves(children)
         logger.info(
@@ -163,6 +162,32 @@ token_budget_hint: tiny|small|medium|large|xlarge
     except (json.JSONDecodeError, Exception) as exc:
         logger.error("Title refinement failed for '%s': %s", chapter_title, exc)
         return []
+
+
+def annotate_tree_depths(nodes: list, base: int = 0) -> list:
+    """递归为树的每个节点写入 depth（从 base 起算），返回原树。
+
+    容器与叶子节点都会标注；叶子节点的 depth 与 flatten_children_to_tasks
+    产出的任务 depth（len(path)-1）保持一致。
+    """
+    for node in nodes:
+        node["depth"] = base
+        kids = node.get("children", [])
+        if kids:
+            annotate_tree_depths(kids, base + 1)
+    return nodes
+
+
+def count_leaves(nodes: list) -> int:
+    """统计树中叶子节点（无 children 的节点）总数。"""
+    count = 0
+    for n in nodes:
+        kids = n.get("children", [])
+        if kids:
+            count += count_leaves(kids)
+        else:
+            count += 1
+    return count
 
 
 async def chat_refine_titles(

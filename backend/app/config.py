@@ -55,9 +55,18 @@ class Settings(BaseSettings):
     # === Multi-level Bid Generation ===
     GENERATION_DEEP_OUTLINE_ENABLED: bool = True
     GENERATION_MAX_OUTLINE_DEPTH: int = 4
-    GENERATION_MIN_LEAF_SECTIONS: int = 50
-    GENERATION_MAX_LEAF_SECTIONS: int = 300
+    GENERATION_MIN_LEAF_SECTIONS: int = 120
+    GENERATION_MAX_LEAF_SECTIONS: int = 400
     GENERATION_LEGACY_MODE: bool = False  # True = use old flat outline
+
+    # 目标页数驱动（每项目可配置，默认 2000 页）
+    GENERATION_TARGET_PAGES_DEFAULT: int = 2000
+    GENERATION_CHARS_PER_PAGE: int = 550  # 宋体小四 1.5 倍行距实际约 500-600 字/页
+
+    # 单节 token 边界与引导段预算
+    GENERATION_LEAF_MIN_TOKENS: int = 512
+    GENERATION_LEAF_MAX_TOKENS: int = 16384
+    GENERATION_LEADIN_MAX_TOKENS: int = 1024
 
     # Token budgets by section category
     GENERATION_TOKEN_BUDGET_TINY: int = 1536
