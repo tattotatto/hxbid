@@ -11,6 +11,7 @@ import asyncio
 import datetime
 import json
 import logging
+import re
 from typing import Any, AsyncIterator, Callable, Dict, List
 
 from sqlalchemy.orm import selectinload
@@ -25,6 +26,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# 匹配 markdown 标题行（# 至 ####），用于裁掉正文末尾的孤立标题
+_TRAILING_HEADING_RE = re.compile(r"^#{1,4}\s+\S")
+
+
+def _strip_trailing_headings(text: str) -> str:
+    """裁掉正文末尾的孤立标题行.
+
+    AI 在预算耗尽时可能以标题行收尾（标题后无正文），组装后会被空标题校验判定为
+    "空标题"（标题紧跟下一标题）。这里把末尾连续的空行和标题行清掉，保证每节都
+    以正文收尾；若整节只有标题（极端情况），保留原样，避免把整节内容清空。
+    """
+    if not text or not text.strip():
+        return text
+    lines = text.rstrip().split("\n")
+    while True:
+        end = len(lines)
+        while end > 0 and not lines[end - 1].strip():
+            end -= 1
+        if end == 0:
+            break
+        if _TRAILING_HEADING_RE.match(lines[end - 1].strip()):
+            lines = lines[: end - 1]
+            continue
+        break
+    stripped = "\n".join(lines).strip()
+    return stripped or text
 
 SYSTEM_PROMPT = """你是投标书撰写系统的AI助手，专注于为投标人撰写保安/物业服务类投标文件。
 
@@ -1294,6 +1322,9 @@ async def generate_from_chapter_structure(
                 except Exception as exc:
                     logger.error("Section '%s' generation failed: %s", title, exc)
                     full_content = f"\n\n[本节生成失败：{exc}]\n\n"
+
+                # 预算耗尽时 AI 可能以孤立标题行收尾，裁掉避免"空标题"
+                full_content = _strip_trailing_headings(full_content)
 
                 return {
                     "chapter_id": task_info["chapter_id"],

@@ -64,9 +64,12 @@ class Settings(BaseSettings):
     GENERATION_CHARS_PER_PAGE: int = 550  # 宋体小四 1.5 倍行距实际约 500-600 字/页
 
     # 单节 token 边界与引导段预算
-    GENERATION_LEAF_MIN_TOKENS: int = 512
+    # 注意：当前生产模型为推理模型（如 deepseek-v4-pro），max_tokens 会被"思考
+    # tokens"（reasoning_tokens）先行消耗，余量不足时返回空内容。因此 MIN/LEADIN
+    # 预算需为"思考 + 正文"预留空间（见 ai_pipeline 生成探针）。
+    GENERATION_LEAF_MIN_TOKENS: int = 2048
     GENERATION_LEAF_MAX_TOKENS: int = 16384
-    GENERATION_LEADIN_MAX_TOKENS: int = 1024
+    GENERATION_LEADIN_MAX_TOKENS: int = 4096
 
     # Token budgets by section category
     GENERATION_TOKEN_BUDGET_TINY: int = 1536

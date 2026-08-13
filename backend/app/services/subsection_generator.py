@@ -160,13 +160,38 @@ def _build_progressive_prompt(
     return "\n".join(parts)
 
 
+def _coerce_to_str_list(values) -> List[str]:
+    """把 requirements 的列表字段归一化为字符串列表.
+
+    正常解析结果为字符串数组；但 AI 偶发返回对象数组（如
+    [{"item": "...", "description": "..."}]），此处兜底成 "item：description"
+    的字符串，避免生成流程因 join(dict) 崩溃。
+    """
+    if not values:
+        return []
+    if not isinstance(values, list):
+        return [str(values)]
+    out: List[str] = []
+    for v in values:
+        if isinstance(v, str):
+            out.append(v)
+        elif isinstance(v, dict):
+            name = v.get("item") or v.get("name") or v.get("title") or ""
+            desc = v.get("description") or v.get("detail") or ""
+            s = "：".join(x for x in (name, desc) if x)
+            out.append(s or str(v))
+        else:
+            out.append(str(v))
+    return out
+
+
 def _format_requirements_for_section(requirements: dict, section_title: str) -> str:
     """Format the requirements dict, filtering for relevance to *section_title*."""
     lines: List[str] = []
     title_lower = section_title.lower()
 
     # Service requirements — always relevant for 服务/技术 sections
-    service_reqs = requirements.get("service_requirements", [])
+    service_reqs = _coerce_to_str_list(requirements.get("service_requirements", []))
     if service_reqs and any(kw in title_lower for kw in ["服务", "技术", "方案", "管理"]):
         lines.append(f"服务要求：{'；'.join(service_reqs)}")
 
@@ -176,12 +201,16 @@ def _format_requirements_for_section(requirements: dict, section_title: str) -> 
         lines.append(f"人员要求：{personnel}")
 
     # Special requirements — always include
-    special = requirements.get("special_requirements", [])
+    special = _coerce_to_str_list(requirements.get("special_requirements", []))
     if special:
         lines.append(f"特殊要求：{'；'.join(special)}")
 
     # Evaluation criteria — relevant for 方案 sections
     eval_criteria = requirements.get("evaluation_criteria", "")
+    if isinstance(eval_criteria, list):
+        eval_criteria = "；".join(_coerce_to_str_list(eval_criteria))
+    elif isinstance(eval_criteria, dict):
+        eval_criteria = str(eval_criteria)
     if eval_criteria and any(kw in title_lower for kw in ["方案", "技术", "服务", "质量"]):
         lines.append(f"评标标准：{eval_criteria}")
 
