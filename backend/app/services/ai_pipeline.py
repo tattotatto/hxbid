@@ -1140,10 +1140,24 @@ async def generate_from_chapter_structure(
         format_template = {}
 
     # ── Check review status ──
-    unrefined = [c for c in chapters if c.chapter_type == "ai_generated" and c.review_status not in ("generating", "generated")]
+    # 接受 refining（用户尚未手动细化，由 ai_pipeline 走 fallback 路径生成）
+    # 和 generating/generated（已锁定或正在/已生成）。
+    # 仅 pending_review 才是真正「未就绪」的拒绝场景——理论上 outline/confirm
+    # 后章节默认就是 refining，不会到这里。
+    unrefined = [
+        c for c in chapters
+        if c.chapter_type == "ai_generated"
+        and c.review_status not in ("refining", "generating", "generated")
+    ]
     if unrefined:
         titles = ", ".join(c.title for c in unrefined[:3])
         raise ValueError(f"以下 AI 撰写章节尚未细化标题：{titles}。请先完成标题细化并锁定。")
+
+    # 凡是 refining 的章节,把状态推进到 generating,UI 一致显示「正在生成」
+    for c in chapters:
+        if c.chapter_type == "ai_generated" and c.review_status == "refining":
+            c.review_status = "generating"
+    await db.flush()
 
     yield {
         "event": "status",
