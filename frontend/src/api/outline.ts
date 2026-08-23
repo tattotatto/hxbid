@@ -6,12 +6,27 @@ export interface OutlineChapter {
   order_index: number
   number: string
   title: string
-  type: ChapterType
+  /** 章节类型；后端 ProjectChapter 行用 chapter_type，extract/chat 输出用 type。
+   *  读取时统一用 chapterType 兼容两者（见 normalize 函数）。*/
+  type?: ChapterType
+  chapter_type?: ChapterType
   required?: boolean
   format_notes?: string
   scoring_context?: string
   table_columns?: string[]
   children?: OutlineChapter[]
+}
+
+/** 把后端多种返回形态统一为 {type, title, ...} — 上层不必关心字段名差异 */
+function normalize(ch: any): OutlineChapter {
+  return {
+    ...ch,
+    type: ch.type ?? ch.chapter_type ?? 'ai_generated',
+    order_index: ch.order_index ?? 0,
+    number: ch.number ?? '',
+    title: ch.title ?? '(未命名)',
+    children: Array.isArray(ch.children) ? ch.children.map(normalize) : [],
+  }
 }
 
 export interface OutlineGetResponse {
@@ -33,11 +48,11 @@ export interface OutlineConfirmResponse {
 export const outlineApi = {
   /** 从 GET /bid/{pid}/chapters 提取顶层 chapter_structure_json 树 */
   get: async (projectId: string): Promise<OutlineGetResponse> => {
-    const res = await client.get<{ chapters?: OutlineChapter[] }>(`/bid/${projectId}/chapters`)
-    // 兼容旧返回：可能是 {chapters: [...]} 也可能直接是数组
+    const res = await client.get<{ chapters?: any[] }>(`/bid/${projectId}/chapters`)
     const data = res.data as any
-    const chapters: OutlineChapter[] = Array.isArray(data) ? data : (data?.chapters ?? [])
-    return { chapters }
+    const raw: any[] = Array.isArray(data) ? data : (data?.chapters ?? [])
+    // 统一 type/title/number 字段，递归处理 children
+    return { chapters: raw.map(normalize) }
   },
 
   /** 触发 AI 提取章节结构：上传解析后必须调用，status -> structure_ready */

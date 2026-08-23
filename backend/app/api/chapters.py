@@ -516,6 +516,9 @@ async def get_chapters(
                     "id": ch.id,
                     "title": ch.title,
                     "order_index": ch.order_index,
+                    # 同时给 type 和 chapter_type —— 前端 OutlineEditor 用 type，
+                    # 历史 ProjectChapter 字段叫 chapter_type，避免误判为「暂无章节」。
+                    "type": ch.chapter_type,
                     "chapter_type": ch.chapter_type,
                     "chapter_meta": json.loads(ch.chapter_meta_json) if ch.chapter_meta_json else {},
                     "children": json.loads(ch.children_json) if ch.children_json else [],
@@ -532,6 +535,8 @@ async def get_chapters(
     except json.JSONDecodeError:
         chapters = []
 
+    # chapter_structure_json 已经包含 type 字段（来自 extract-chapters / chat 输出），
+    # 这里不需要改键名。
     return {
         "locked": False,
         "chapters": chapters,

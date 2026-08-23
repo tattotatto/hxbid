@@ -153,18 +153,25 @@ function makeNewChapter(orderIndex: number): OutlineChapter {
 }
 
 function buildTreeData(chapters: OutlineChapter[]): DataNode[] {
-  return chapters.map((ch, idx) => ({
-    key: String(idx),
-    title: (
-      <Space size={4}>
-        <Tag color={TYPE_COLORS[ch.type] ?? 'default'} style={{ marginRight: 0 }}>
-          {TYPE_LABELS[ch.type] ?? ch.type}
-        </Tag>
-        <span style={{ fontWeight: 500 }}>{ch.title || '(未命名)'}</span>
-      </Space>
-    ),
-    children: ch.children ? buildTreeData(ch.children) : undefined,
-  }))
+  return chapters.map((ch, idx) => {
+    // 兼容后端两种返回形态：
+    // 1. chapter_structure_json（extract/chat 输出） → 字段名 type
+    // 2. ProjectChapter 行 → 字段名 chapter_type
+    // 历史上前端只用 type，导致已 confirm 的项目回看 /outline 页面渲染「暂无章节」。
+    const type = ch.type ?? (ch as any).chapter_type ?? 'ai_generated'
+    return {
+      key: String(idx),
+      title: (
+        <Space size={4}>
+          <Tag color={TYPE_COLORS[type] ?? 'default'} style={{ marginRight: 0 }}>
+            {TYPE_LABELS[type] ?? type}
+          </Tag>
+          <span style={{ fontWeight: 500 }}>{ch.title || '(未命名)'}</span>
+        </Space>
+      ),
+      children: ch.children ? buildTreeData(ch.children) : undefined,
+    }
+  })
 }
 
 // ---------------------------------------------------------------------------
