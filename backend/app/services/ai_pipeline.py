@@ -1128,6 +1128,10 @@ async def generate_from_chapter_structure(
     if not chapters:
         raise ValueError("No chapters found — please lock chapter structure first")
 
+    # fallback 路径（chapter 自身作为唯一叶子）下为每章建一个伪树，
+    # 让 assemble 阶段 children_json 回写能包含 content，供 TreeEditor / 校验用。
+    _chapter_fallback_trees: Dict[str, list] = {}
+
     # ── 加载格式模板（招标文件'投标文件格式'章节提取的结构化定义）──
     format_template = {}
     try:
@@ -1242,6 +1246,14 @@ async def generate_from_chapter_structure(
                         "token_budget_hint": "large",
                     },
                 })
+                # 同步建一个伪树（单叶子），让 assemble 阶段回写时能找到 children_json
+                _chapter_fallback_trees[chapter.id] = [{
+                    "title": chapter.title,
+                    "depth": 0,
+                    "token_budget_hint": "large",
+                    "path": [chapter.title],
+                    "_is_fallback_leaf": True,
+                }]
             else:
                 _collect_leaf_tasks(children, chapter.id, chapter.title, [chapter.title])
 
@@ -1432,7 +1444,7 @@ async def generate_from_chapter_structure(
         return nodes
 
     chapter_trees = {
-        c.title: _load_chapter_tree(c)
+        c.title: (_chapter_fallback_trees.get(c.id) or _load_chapter_tree(c))
         for c in chapters
         if c.chapter_type == "ai_generated"
     }
