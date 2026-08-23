@@ -150,7 +150,19 @@ class AIAdapter:
             kwargs["response_format"] = response_format
 
         response = await client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        # 防御：推理模型（deepseek-v4-*）会先消耗 reasoning_tokens，再输出 content。
+        # max_tokens 不够时 finish_reason='length' 且 content 为空 — 上游 json.loads 会崩。
+        # 这里显式 raise，让调用方知道是 token 预算问题而不是数据问题。
+        if not content:
+            finish = choice.finish_reason
+            raise RuntimeError(
+                f"AI returned empty content (finish_reason={finish}, "
+                f"max_tokens={kwargs.get('max_tokens')}). "
+                f"Increase max_tokens to leave room after reasoning_tokens."
+            )
+        return content
 
     # ------------------------------------------------------------------
     # Chat completion (streaming)

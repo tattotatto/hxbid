@@ -168,7 +168,9 @@ async def extract_chapters_from_text(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=8192,
+            # deepseek-v4-flash 在长 prompt 上 reasoning_tokens ~8k；
+            # max_tokens=8192 时 content 被全吃掉 → 0 章节；提到 16384 给正文留余量。
+            max_tokens=16384,
             response_format={"type": "json_object"},
         )
         result = json.loads(response)
