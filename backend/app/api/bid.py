@@ -179,6 +179,7 @@ async def upload_and_parse(
             pass
 
     return ParseResponse(
+        project_id=project.id,
         project_name=project.name,
         requirements=requirements,
         format_template=format_template,
@@ -245,6 +246,7 @@ async def upload_history(
             pass
 
     return ParseResponse(
+        project_id=project.id,
         project_name=project.name,
         requirements=requirements,
     )
@@ -1288,7 +1290,9 @@ async def export_bid(
                 company_profile = {
                     "company_name": cp.company_name or "",
                     "legal_rep_name": cp.legal_rep_name or "",
-                    "unified_credit_code": cp.unified_credit_code or "",
+                    "unified_credit_code": getattr(cp, "unified_credit_code", "")
+                    or cp.business_license_number
+                    or "",
                 }
             try:
                 requirements = json.loads(project.parsed_requirements_json or "{}")

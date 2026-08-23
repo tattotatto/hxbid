@@ -115,6 +115,9 @@ async def extract_chapters(
 
         # Save to project
         project.chapter_structure_json = json.dumps(chapters, ensure_ascii=False)
+        # 提取成功 → 进入「目录待确认」门。前端会跳到 /outline 让用户审阅/编辑/对话修改，
+        # 用户在 outline 页面点击「确认并继续」才会物化 ProjectChapter 并推进到 collecting。
+        project.status = "structure_ready"
         await db.commit()
 
         logger.info(
@@ -167,6 +170,17 @@ async def chat_edit_chapters(
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # 「目录确认门」guard：仅在 structure_ready 状态允许对话修改顶层章节结构。
+    # 锁定后由 outline/confirm 物化 ProjectChapter，章节结构进入 children_json 维度。
+    if project.status != "structure_ready":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"当前项目状态 {project.status} 不允许编辑章节结构。"
+                "请先确认目录（POST /outline/confirm）后再操作章节内容。"
+            ),
+        )
 
     # Get current chapters
     chapters_json = project.chapter_structure_json
@@ -233,6 +247,17 @@ async def lock_chapters(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # 「目录确认门」guard：UI 流程必须先调 outline/confirm 才能物化 ProjectChapter。
+    # lock 保留为 admin fallback，server 侧也要求状态对齐。
+    if project.status != "structure_ready":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"当前项目状态 {project.status} 不允许锁定。"
+                "请走标准流程：先 POST /outline/confirm。"
+            ),
+        )
+
     chapters_json = project.chapter_structure_json
     if not chapters_json or chapters_json in ("[]", "{}", ""):
         raise HTTPException(
@@ -240,12 +265,116 @@ async def lock_chapters(
             detail="请先提取章节（POST /extract-chapters）再进行锁定",
         )
 
+    created, auto_added, validation = await _materialise_chapters(project, db)
+    await db.commit()
+
+    logger.info(
+        "Locked %d chapters for project %s (auto-added: %s)",
+        len(created), project_id, auto_added,
+    )
+
+    message = f"已锁定 {len(created)} 个章节。文件/表格类型章节可直接生成，AI撰写章节请先细化标题。"
+    if auto_added:
+        message += f" 已按招标文件格式自动补充必需章节：{'、'.join(auto_added)}。"
+    if validation.get("coverage_notes"):
+        message += f" 有 {len(validation['coverage_notes'])} 个评分项未在章节标题中体现，建议细化标题时覆盖。"
+
+    # Update project status — admin fallback 路径，UI 不直接调用
+    project.status = "collecting"
+    await db.commit()
+
+    return LockChaptersResponse(
+        success=True,
+        chapters_count=len(created),
+        message=message,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /{project_id}/outline/confirm
+# ---------------------------------------------------------------------------
+
+class OutlineConfirmResponse(BaseModel):
+    success: bool = False
+    chapters_count: int = 0
+    status: str = ""
+
+
+@router.post("/{project_id}/outline/confirm", response_model=OutlineConfirmResponse)
+async def confirm_outline(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """冻结用户审阅/编辑后的章节结构并推进到「信息搜集」阶段.
+
+    这是「目录确认门」唯一合法的状态出口：从 structure_ready 推进到 collecting。
+    物化 ProjectChapter 行的逻辑与 /chapters/lock 共享 _materialise_chapters。
+    """
+    result = await db.execute(
+        select(BidProject)
+        .where(BidProject.id == project_id)
+        .options(selectinload(BidProject.chapters))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status != "structure_ready":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"当前项目状态 {project.status} 不允许确认目录。"
+                "请先 POST /extract-chapters，再走确认流程。"
+            ),
+        )
+
+    chapters_json = project.chapter_structure_json
+    if not chapters_json or chapters_json in ("[]", "{}", ""):
+        raise HTTPException(
+            status_code=400,
+            detail="章节数据为空，请先 POST /extract-chapters",
+        )
+
+    created, auto_added, _validation = await _materialise_chapters(project, db)
+    project.status = "collecting"
+    await db.commit()
+
+    logger.info(
+        "Outline confirmed for project %s: %d chapters (auto-added: %s)",
+        project_id, len(created), auto_added,
+    )
+
+    return OutlineConfirmResponse(
+        success=True,
+        chapters_count=len(created),
+        status="collecting",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper shared by /chapters/lock and /outline/confirm
+# ---------------------------------------------------------------------------
+
+async def _materialise_chapters(
+    project: BidProject,
+    db: AsyncSession,
+) -> tuple[list[ProjectChapter], list[str], dict]:
+    """根据 project.chapter_structure_json + format_template 物化 ProjectChapter 行.
+
+    Returns:
+        (created_chapters, auto_added_titles, validation_report)
+
+    行为与历史 /chapters/lock 完全一致；调用方负责 db.commit() 与 project.status 推进。
+    """
     try:
-        chapters = json.loads(chapters_json)
+        chapters = json.loads(project.chapter_structure_json or "[]")
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="章节数据格式错误")
 
-    # Load format template for strict alignment（招标文件'投标文件格式'章节）
+    if not isinstance(chapters, list):
+        raise HTTPException(status_code=400, detail="章节数据格式错误：应为数组")
+
     format_template = {}
     try:
         format_template = json.loads(project.format_template_json) if project.format_template_json else {}
@@ -290,7 +419,7 @@ async def lock_chapters(
         children: list,
     ) -> ProjectChapter:
         return ProjectChapter(
-            project_id=project_id,
+            project_id=project.id,
             title=title,
             order_index=order_index,
             status="pending",
@@ -355,26 +484,7 @@ async def lock_chapters(
             c.order_index = i
         created = final_order
 
-    # Update project status
-    project.status = "collecting"  # Ready for resource collection
-    await db.commit()
-
-    logger.info(
-        "Locked %d chapters for project %s (auto-added: %s)",
-        len(created), project_id, auto_added,
-    )
-
-    message = f"已锁定 {len(created)} 个章节。文件/表格类型章节可直接生成，AI撰写章节请先细化标题。"
-    if auto_added:
-        message += f" 已按招标文件格式自动补充必需章节：{'、'.join(auto_added)}。"
-    if validation.get("coverage_notes"):
-        message += f" 有 {len(validation['coverage_notes'])} 个评分项未在章节标题中体现，建议细化标题时覆盖。"
-
-    return LockChaptersResponse(
-        success=True,
-        chapters_count=len(created),
-        message=message,
-    )
+    return created, auto_added, validation
 
 
 # ---------------------------------------------------------------------------

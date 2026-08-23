@@ -22,6 +22,7 @@ BACKEND_FILES = [
     # Models
     "backend/app/models/project.py",
     # Schemas
+    "backend/app/schemas/bid.py",
     "backend/app/schemas/project.py",
     # Services
     "backend/app/services/ai_pipeline.py",
@@ -36,10 +37,17 @@ BACKEND_FILES = [
 ]
 
 FRONTEND_FILES = [
+    "frontend/src/App.tsx",
     "frontend/src/pages/project/ProjectWorkflow.tsx",
+    "frontend/src/pages/project/ProjectCreate.tsx",
+    "frontend/src/pages/project/OutlineConfirm.tsx",
+    "frontend/src/api/outline.ts",
     "frontend/src/components/TreeEditor/TreeEditor.tsx",
     "frontend/src/components/TreeEditor/TreePanel.tsx",
     "frontend/src/components/TreeEditor/EditPanel.tsx",
+    "frontend/src/components/OutlineEditor/OutlineTree.tsx",
+    "frontend/src/components/OutlineEditor/OutlineChat.tsx",
+    "frontend/src/components/OutlineEditor/ChatBubble.tsx",
 ]
 
 print("=" * 60)
@@ -110,6 +118,7 @@ CONTAINER_MAP = {
     "backend/app/api/router.py": "/app/app/api/router.py",
     "backend/app/api/collection.py": "/app/app/api/collection.py",
     "backend/app/models/project.py": "/app/app/models/project.py",
+    "backend/app/schemas/bid.py": "/app/app/schemas/bid.py",
     "backend/app/schemas/project.py": "/app/app/schemas/project.py",
     "backend/app/services/ai_pipeline.py": "/app/app/services/ai_pipeline.py",
     "backend/app/services/chapter_chat.py": "/app/app/services/chapter_chat.py",

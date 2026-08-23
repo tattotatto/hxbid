@@ -15,6 +15,7 @@ import {
   Divider,
   Select,
   InputNumber,
+  Alert,
 } from 'antd'
 import {
   ThunderboltOutlined,
@@ -22,6 +23,7 @@ import {
   ArrowLeftOutlined,
   ExperimentOutlined,
   FileTextOutlined,
+  FileSearchOutlined,
 } from '@ant-design/icons'
 import client from '../../api/client'
 import GenerationProgress from '../../components/GenerationProgress'
@@ -73,6 +75,7 @@ interface AiTraceInfo {
 const steps = [
   { title: '上传招标文件' },
   { title: 'AI 解析' },
+  { title: '目录确认' },
   { title: '信息搜集' },
   { title: 'AI 生成' },
   { title: '在线编辑' },
@@ -82,10 +85,11 @@ const steps = [
 const statusStepMap: Record<string, number> = {
   draft: 0,
   parsed: 1,
-  collecting: 2,
-  generating: 3,
-  review: 4,
-  exported: 5,
+  structure_ready: 2,
+  collecting: 3,
+  generating: 4,
+  review: 5,
+  exported: 6,
 }
 
 // Parse markdown headings from AI-generated content into a tree structure
@@ -883,6 +887,28 @@ export default function ProjectWorkflow() {
           items={steps}
           style={{ marginBottom: 24 }}
         />
+
+        {/* 「目录确认门」提示：仅当 status === structure_ready 时显示，
+            引导用户回到 outline 页面确认目录。 */}
+        {project.status === 'structure_ready' && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="AI 已提取章节结构，请先确认目录后再进入信息搜集"
+            description="您可以手动调整章节、让 AI 对话修改，或直接进入目录确认页。"
+            action={
+              <Button
+                type="primary"
+                size="small"
+                icon={<FileSearchOutlined />}
+                onClick={() => navigate(`/projects/${id}/outline`)}
+              >
+                前往目录确认 →
+              </Button>
+            }
+          />
+        )}
 
         <Space wrap>
           <InputNumber

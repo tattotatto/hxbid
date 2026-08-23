@@ -5,6 +5,7 @@ import Workbench from './pages/Workbench'
 import ProjectList from './pages/project/ProjectList'
 import ProjectCreate from './pages/project/ProjectCreate'
 import ProjectWorkflow from './pages/project/ProjectWorkflow'
+import OutlineConfirm from './pages/project/OutlineConfirm'
 import Qualifications from './pages/resources/Qualifications'
 import Personnel from './pages/resources/Personnel'
 import HistoryBids from './pages/resources/HistoryBids'
@@ -27,6 +28,7 @@ function App() {
         <Route path="projects" element={<ProjectList />} />
         <Route path="projects/new" element={<ProjectCreate />} />
         <Route path="projects/:id" element={<ProjectWorkflow />} />
+        <Route path="projects/:id/outline" element={<OutlineConfirm />} />
         <Route path="resources/qualifications" element={<Qualifications />} />
         <Route path="resources/personnel" element={<Personnel />} />
         <Route path="resources/history" element={<HistoryBids />} />

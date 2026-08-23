@@ -4,6 +4,7 @@ import { Card, Steps, Form, Input, DatePicker, Button, Upload, message, Progress
 import { InboxOutlined } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
 import client from '../../api/client'
+import { outlineApi } from '../../api/outline'
 
 const { Dragger } = Upload
 
@@ -57,11 +58,29 @@ export default function ProjectCreate() {
           setUploadPercent(Math.round((e.loaded / e.total) * 100))
         }
       })
-      xhr.addEventListener('load', () => {
+      xhr.addEventListener('load', async () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          message.success('招标文件上传解析成功')
-          navigate('/projects')
-          onSuccess?.(JSON.parse(xhr.responseText))
+          let resp: any
+          try { resp = JSON.parse(xhr.responseText) } catch { resp = {} }
+          const projectId: string | undefined = resp?.project_id
+          message.success('招标文件上传解析成功，正在提取章节结构…')
+          try {
+            if (projectId) {
+              await outlineApi.extract(projectId)
+            }
+          } catch (err: any) {
+            const detail =
+              err?.response?.data?.detail ||
+              err?.message ||
+              '提取章节失败，请到项目页重试'
+            message.warning(detail)
+          }
+          if (projectId) {
+            navigate(`/projects/${projectId}/outline`)
+          } else {
+            navigate('/projects')
+          }
+          onSuccess?.(resp)
         } else {
           let detail = '上传解析失败'
           try { detail = JSON.parse(xhr.responseText)?.detail || detail } catch {}
