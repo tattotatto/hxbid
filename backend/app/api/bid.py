@@ -1275,7 +1275,46 @@ async def export_bid(
         except Exception:
             pass
 
+    # -- Build 开标一览表 content (when strict mode is enabled) --
+    bid_opening_content = None
+    if format_template and format_template.get("document_structure"):
+        try:
+            from app.services.template_filler import (
+                build_bid_opening_table,
+                extract_bid_opening_data,
+            )
+            company_profile = {}
+            if cp:
+                company_profile = {
+                    "company_name": cp.company_name or "",
+                    "legal_rep_name": cp.legal_rep_name or "",
+                    "unified_credit_code": cp.unified_credit_code or "",
+                }
+            try:
+                requirements = json.loads(project.parsed_requirements_json or "{}")
+            except Exception:
+                requirements = {}
+
+            opening_data = extract_bid_opening_data(
+                project=project,
+                requirements=requirements,
+                company_profile=company_profile,
+            )
+            bid_opening_content = build_bid_opening_table(**opening_data)
+            logger.info(
+                "Built bid opening summary table for project %s (%d chars)",
+                data.project_id, len(bid_opening_content),
+            )
+        except Exception as exc:
+            logger.warning("Failed to build opening table, skipping: %s", exc)
+            bid_opening_content = None
+
     # -- Render .docx (no separate attachments section) --
+    try:
+        requirements_for_render = json.loads(project.parsed_requirements_json or "{}")
+    except Exception:
+        requirements_for_render = {}
+
     docx_path = render_bid_to_docx(
         chapters_payload,
         project.name,
@@ -1283,6 +1322,9 @@ async def export_bid(
         chapter_images=chapter_images if any(chapter_images) else None,
         company_name=cp.company_name if cp else "",
         format_template=format_template,
+        bid_opening_content=bid_opening_content,
+        requirements=requirements_for_render,
+        project=project,
     )
     docx_filename = Path(docx_path).name
 

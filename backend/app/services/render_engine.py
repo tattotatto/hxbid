@@ -136,14 +136,13 @@ def _add_page_number(paragraph):
     run_end._element.append(fld_end)
 
 
-def _add_cover_page(doc, project_name, style, company_name=""):
+def _add_cover_page(doc, project_name, style, company_name="", tender_number="", copy_label=""):
     """Append a regulated Chinese bid cover page to *doc*.
 
     Format follows the standard Chinese bidding document convention:
       - Project name (large, bold, centred)
       - "投 标 文 件" (medium, bold, centred)
-      - 投标人：company name
-      - 法定代表人或委托代理人：(blank line for signing)
+      - 招标编号、项目名称、投标人（盖公章）、法定代表人或委托代理人（签字或盖章）、日期
       - Date
     """
     # ── Leading vertical space ──
@@ -151,6 +150,14 @@ def _add_cover_page(doc, project_name, style, company_name=""):
         spacer = doc.add_paragraph()
         spacer.paragraph_format.space_after = Pt(0)
         spacer.paragraph_format.space_before = Pt(0)
+
+    # ── "正本/副本" 标识（如有）放在右上角 ──
+    if copy_label:
+        p_copy = doc.add_paragraph()
+        p_copy.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p_copy.paragraph_format.space_after = Pt(6)
+        r_copy = p_copy.add_run(copy_label)
+        _set_run_font(r_copy, style["heading1_font_name"], Pt(14), bold=True)
 
     # ── Project name (20 pt 黑体 bold, centred) ──
     p_name = doc.add_paragraph()
@@ -166,11 +173,39 @@ def _add_cover_page(doc, project_name, style, company_name=""):
     r_bid = p_bid.add_run("投 标 文 件")
     _set_run_font(r_bid, style["heading1_font_name"], Pt(18), bold=False)
 
+    # ── 招标编号 (如有) ──
+    if tender_number:
+        p_tn_label = doc.add_paragraph()
+        p_tn_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_tn_label.paragraph_format.space_after = Pt(4)
+        r_tn_l = p_tn_label.add_run("招标编号：")
+        _set_run_font(r_tn_l, style["heading2_font_name"], Pt(14), bold=True)
+
+        p_tn = doc.add_paragraph()
+        p_tn.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_tn.paragraph_format.space_after = Pt(16)
+        r_tn = p_tn.add_run(tender_number)
+        _set_run_font(r_tn, style["heading2_font_name"], Pt(14), bold=False)
+
+    # ── 项目名称 (如有) ──
+    if tender_number:
+        p_pn_label = doc.add_paragraph()
+        p_pn_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_pn_label.paragraph_format.space_after = Pt(4)
+        r_pn_l = p_pn_label.add_run("项目名称：")
+        _set_run_font(r_pn_l, style["heading2_font_name"], Pt(14), bold=True)
+
+        p_pn = doc.add_paragraph()
+        p_pn.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_pn.paragraph_format.space_after = Pt(24)
+        r_pn = p_pn.add_run(project_name)
+        _set_run_font(r_pn, style["heading2_font_name"], Pt(14), bold=False)
+
     # ── 投标人 (14 pt 黑体 bold, centred) ──
     p_company_label = doc.add_paragraph()
     p_company_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_company_label.paragraph_format.space_after = Pt(4)
-    r_cl = p_company_label.add_run("投标人：")
+    r_cl = p_company_label.add_run("投标人（盖公章）：")
     _set_run_font(r_cl, style["heading2_font_name"], Pt(14), bold=True)
 
     p_company = doc.add_paragraph()
@@ -183,20 +218,20 @@ def _add_cover_page(doc, project_name, style, company_name=""):
     p_rep_label = doc.add_paragraph()
     p_rep_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_rep_label.paragraph_format.space_after = Pt(4)
-    r_rl = p_rep_label.add_run("法定代表人或委托代理人：")
+    r_rl = p_rep_label.add_run("法定代表人或其委托代理人（签字或盖章）：")
     _set_run_font(r_rl, style["heading2_font_name"], Pt(14), bold=True)
 
     # Blank line for signing
     p_rep = doc.add_paragraph()
     p_rep.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_rep.paragraph_format.space_after = Pt(24)
-    r_rep = p_rep.add_run("（签字）")
+    r_rep = p_rep.add_run("（签字或盖章）")
     _set_run_font(r_rep, style["body_font_name"], Pt(12), bold=False)
 
     # ── Date ──
     p_date = doc.add_paragraph()
     p_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_date = p_date.add_run(date.today().strftime("%Y年%m月%d日"))
+    r_date = p_date.add_run("日期：    年    月    日")
     _set_run_font(r_date, style["heading2_font_name"], Pt(14), bold=False)
 
     # Page break so TOC starts on a fresh page
@@ -395,6 +430,20 @@ def _render_static_toc(doc, toc_entries, style):
     run_note = p_note.add_run('（以下为Word自动目录，在Word中右键选择“更新域”可生成带页码的精确目录）')
     _set_run_font(run_note, style["body_font_name"], Pt(9), color=RGBColor(128, 128, 128))
 
+    _insert_word_toc_field(doc, style)
+
+
+def _insert_word_toc_field(doc, style):
+    """Insert a Word TOC field for auto-generation.
+
+    Renders nothing visible — the user must right-click → 'Update Field' in
+    Word to populate it. Placeholder text guides the user.
+    """
+    p_note = doc.add_paragraph()
+    _set_paragraph_spacing(p_note, 1.0)
+    run_note = p_note.add_run('（请在Word中右键点击此处，选择"更新域"以生成自动目录）')
+    _set_run_font(run_note, style["body_font_name"], Pt(9), color=RGBColor(128, 128, 128))
+
     p_toc = doc.add_paragraph()
     p_toc.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
@@ -418,7 +467,7 @@ def _render_static_toc(doc, toc_entries, style):
     r_sep._element.append(fld_sep)
 
     # Placeholder
-    r_placeholder = p_toc.add_run('（请在Word中右键点击此处，选择"更新域"以更新页码）')
+    r_placeholder = p_toc.add_run('（目录将在此处由 Word 自动生成 — 在 Word 中右键此区域 → "更新域"）')
     _set_run_font(r_placeholder, style["body_font_name"], Pt(9), color=RGBColor(128, 128, 128))
 
     # fldChar end
@@ -426,6 +475,109 @@ def _render_static_toc(doc, toc_entries, style):
     fld_end = OxmlElement("w:fldChar")
     fld_end.set(qn("w:fldCharType"), "end")
     r_end._element.append(fld_end)
+
+
+def _render_word_toc_page(doc, style):
+    """Render a TOC page that contains ONLY a Word TOC field.
+
+    No static entries — Word's auto-generation populates them when the user
+    opens the document and updates fields. This is the strict-mode TOC.
+    """
+    # ── TOC heading (Word will update this when fields are refreshed) ──
+    h = doc.add_heading("目  录", level=1)
+    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in h.runs:
+        _set_run_font(
+            run,
+            style["heading1_font_name"],
+            style["heading1_font_size"],
+            bold=True,
+        )
+
+    # ── Single TOC field — Word populates at open-time ──
+    _insert_word_toc_field(doc, style)
+
+
+def _render_bid_opening_summary_section(doc, opening_content, style):
+    """Render the (一)开标一览表 as a standalone section.
+
+    The content is a markdown table generated by build_bid_opening_table().
+    We render:
+      - Heading "（一）开标一览表" (centred, 黑体 14pt bold)
+      - The 2-col table itself (11 rows of 项目/内容)
+      - Notes 1-4
+      - Signature block
+    """
+    # ── Section heading ──
+    h = doc.add_heading("（一）开标一览表", level=2)
+    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in h.runs:
+        _set_run_font(
+            run,
+            style["heading2_font_name"],
+            style["heading2_font_size"],
+            bold=True,
+        )
+
+    # ── Render the markdown table ──
+    lines = opening_content.split("\n")
+    table_rows = []
+    in_table = False
+    note_lines = []
+    signature_lines = []
+
+    state = "table"  # table | notes | signature
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("|") and state == "table":
+            if _is_table_separator(stripped):
+                continue
+            table_rows.append(_parse_table_cells(stripped))
+        elif state == "table":
+            # Move to notes when we see 注：
+            state = "notes"
+
+        if state == "notes":
+            if stripped.startswith("**注：**"):
+                note_lines.append(stripped.replace("**注：**", "注：").strip())
+                continue
+            if stripped.startswith("**备注：**"):
+                note_lines.append("备注：" + stripped.replace("**备注：**", "").strip())
+                continue
+            # Numbered note lines
+            if re.match(r"^\d+[\.、]\s*", stripped):
+                note_lines.append(stripped)
+                continue
+            # If still in notes but line doesn't match, move to signature
+            if note_lines and (stripped.startswith("投 标 人") or "盖章" in stripped):
+                state = "signature"
+            elif not note_lines:
+                continue  # skip until we see 注：
+
+        if state == "signature":
+            signature_lines.append(stripped)
+
+    # Render the bid opening table (项目 / 内容, 2 cols)
+    if table_rows:
+        _render_table(doc, table_rows, style)
+
+    # Render notes
+    for nl in note_lines:
+        p = doc.add_paragraph()
+        _set_paragraph_spacing(p, style["body_line_spacing"])
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = p.add_run(nl)
+        _set_run_font(run, style["body_font_name"], style["body_font_size"])
+
+    # Render signature block
+    for sl in signature_lines:
+        p = doc.add_paragraph()
+        _set_paragraph_spacing(p, style["body_line_spacing"])
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = p.add_run(sl)
+        _set_run_font(run, style["body_font_name"], style["body_font_size"])
 
 
 def _safe_filename(name):
@@ -1228,7 +1380,7 @@ def _looks_like_file_section_heading(line):
 
 # ── Public API ────────────────────────────────────────────────────────
 
-def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images=None, company_name="", format_template=None):
+def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images=None, company_name="", format_template=None, bid_opening_content=None, requirements=None, project=None):
     """Render bid chapters into a formatted ``.docx`` file.
 
     Parameters
@@ -1244,6 +1396,15 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
         Each inner list contains ``{"path": str, "label": str}`` dicts.
     company_name : str
         Company name for cover page and header. Pulled from CompanyProfile.
+    format_template : dict | None
+        Structured format requirements extracted from tender document. When
+        provided, the renderer enforces strict structure: 开标一览表 on
+        first page after cover, Word TOC field (no static TOC), each
+        sub-section starts on a new page.
+    bid_opening_content : str | None
+        Pre-rendered markdown content for (一)开标一览表 (from build_bid_opening_table).
+        When provided AND format_template present, rendered standalone on the
+        first page after the cover (per tender: "此表应放于投标文件封面后第一页").
 
     Returns
     -------
@@ -1254,23 +1415,23 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     if style_config:
         style.update(style_config)
 
-    # 应用招标文件规定的全局格式规则（优先级高于默认和用户配置）
+    strict_mode = bool(
+        format_template and format_template.get("document_structure")
+    )
     if format_template and format_template.get("global_format_rules"):
         rules = format_template["global_format_rules"]
-        # 封面元素由 _add_cover_page 处理
-        # 目录标题在 _add_toc_page 中已使用 "目录"，如需覆盖在此处理
         logger.info(
-            "Format template received (rendering-level enforcement deferred to future release): numbering=%s",
-            rules.get("numbering_style", "unknown"),
+            "Format template: strict_mode=%s, numbering=%s",
+            strict_mode, rules.get("numbering_style", "unknown"),
         )
+
     # Use company name as header_text default if not explicitly configured
-    # Also strip any legacy hardcoded default that may still exist in old templates
     if not style.get("header_text") or style.get("header_text") == "云南宏曦科技有限公司":
         style["header_text"] = company_name
 
     doc = Document()
 
-    # ── Page setup (default section for the whole document) ──
+    # ── Page setup ──
     section = doc.sections[0]
     section.top_margin = style["margin_top"]
     section.bottom_margin = style["margin_bottom"]
@@ -1289,7 +1450,6 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     footer = section.footer
     footer.is_linked_to_previous = False
 
-    # Load company profile for footer
     footer_company = ""
     footer_address = ""
     try:
@@ -1307,11 +1467,9 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     except Exception:
         pass
 
-    # Company info line (name left, address right) — borderless 2-col table
     if footer_company or footer_address:
         ft = footer.add_table(rows=1, cols=2, width=Cm(16))
         ft.autofit = True
-        # Remove table borders
         tbl = ft._tbl
         tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement("w:tblPr")
         tblBorders = OxmlElement("w:tblBorders")
@@ -1320,7 +1478,6 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
             border_el.set(qn("w:val"), "nil")
             tblBorders.append(border_el)
         tblPr.append(tblBorders)
-        # Remove cell borders
         for cell in (ft.cell(0, 0), ft.cell(0, 1)):
             tc = cell._tc
             tcPr = tc.get_or_add_tcPr()
@@ -1330,19 +1487,16 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
                 be.set(qn("w:val"), "nil")
                 tcBorders.append(be)
             tcPr.append(tcBorders)
-        # Left: company name
         lp = ft.cell(0, 0).paragraphs[0]
         lp.alignment = WD_ALIGN_PARAGRAPH.LEFT
         lr = lp.add_run(footer_company)
         _set_run_font(lr, style["body_font_name"], Pt(9))
-        # Right: address
         rp = ft.cell(0, 1).paragraphs[0]
         rp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         if footer_address:
             rr = rp.add_run(f"地址：{footer_address}")
             _set_run_font(rr, style["body_font_name"], Pt(9))
 
-    # Page number below company info
     fp = footer.add_paragraph()
     _add_page_number(fp)
 
@@ -1350,25 +1504,241 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     from app.services.content_assembler import normalize_chapters_numbering
     chapters = normalize_chapters_numbering(chapters)
 
+    # ── Extract tender number from project/requirements ──
+    tender_number = ""
+    if project is not None:
+        tender_number = getattr(project, "tender_number", "") or ""
+    if not tender_number and requirements:
+        tender_number = (
+            requirements.get("tender_number")
+            or requirements.get("招标编号")
+            or ""
+        )
+
     # ── Cover page ──
-    _add_cover_page(doc, project_name, style, company_name)
+    _add_cover_page(doc, project_name, style, company_name, tender_number=tender_number)
+
+    # ── (一)开标一览表：封面后第一页（独立成页）──
+    if strict_mode and bid_opening_content:
+        _render_bid_opening_summary_section(doc, bid_opening_content, style)
+        _insert_page_break(doc)  # 开标一览表后强制分页，再放目录
 
     # ── Table of Contents ──
-    # Extract heading entries from all chapter content BEFORE rendering,
-    # so we can generate a static (always-visible) TOC.
-    toc_entries = _extract_toc_entries(chapters)
-    _render_static_toc(doc, toc_entries, style)
-    _insert_page_break(doc)  # chapters start after TOC
+    if strict_mode:
+        # 严格模式：只放 Word TOC field（用户右键"更新域"自动生成）
+        _render_word_toc_page(doc, style)
+        _insert_page_break(doc)
+    else:
+        # 兼容模式：保留旧行为（静态目录 + Word field）
+        toc_entries = _extract_toc_entries(chapters)
+        _render_static_toc(doc, toc_entries, style)
+        _insert_page_break(doc)
 
     # ── Body: each chapter ──
+    if strict_mode:
+        _render_body_strict(doc, chapters, format_template, style)
+    else:
+        _render_body_legacy(doc, chapters, style)
+
+    # ── Save file ──
+    output_dir = Path(settings.OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(project_name)
+    output_path = output_dir / f"投标文件-{safe_name}-{uuid.uuid4().hex[:8]}.docx"
+    doc.save(str(output_path))
+    logger.info("Generated bid docx: %s (%.1f KB)", output_path, output_path.stat().st_size / 1024)
+    return str(output_path)
+
+
+def _render_body_strict(doc, chapters, format_template, style):
+    """严格模式：按 format_template.document_structure 渲染正文.
+
+    每个 part 的每个 sub-section（(一)(二)(三)...）都强制分页。
+    缺失的子章节自动插入占位+签章（避免空白页）。
+
+    内容分发策略：
+    - 若现有 chapter 已有 children，按 title 精确匹配
+    - 否则把 chapter 的整段 content 按 H2/H3 markdown 标记切分，
+      再按出现顺序分配给 structure 中的 children（按位置对应）
+    - 仍分配不到的内容作为 fallback 全量塞进最后一个匹配的 child
+    """
+    structure = format_template.get("document_structure", []) or []
+    if not structure:
+        # fallback to legacy if no structure
+        _render_body_legacy(doc, chapters, style)
+        return
+
+    # Index existing chapters by title for lookup
+    by_title: dict = {}
+    for ch in chapters:
+        title = ch.get("title", "")
+        if title:
+            by_title[title] = ch
+
+    rendered_set: set = set()
+
+    for part_idx, part in enumerate(structure):
+        part_title = part.get("title", "")
+        part_number = part.get("number", "")
+        if not part_title:
+            continue
+
+        # Render the top-level part heading on a new page
+        if part_idx > 0 or rendered_set:
+            _insert_page_break(doc)
+
+        # Top-level part heading (e.g. "一、商务部分")
+        full_part_title = f"{part_number}、{part_title}" if part_number else part_title
+        h = doc.add_heading(full_part_title, level=1)
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in h.runs:
+            _set_run_font(
+                run,
+                style["heading1_font_name"],
+                style["heading1_font_size"],
+                bold=True,
+            )
+        rendered_set.add(part_title)
+
+        # ── Render each sub-section ──
+        children = part.get("children", []) or []
+        existing_chapter = by_title.get(part_title)
+        existing_children = (
+            existing_chapter.get("children", []) if existing_chapter else []
+        ) or []
+        by_child_title = {c.get("title", ""): c for c in existing_children}
+
+        # Split existing chapter content into sub-blocks by H2/H3 markers
+        chapter_content = (existing_chapter or {}).get("content", "") or ""
+        sub_blocks = _split_content_by_h2(chapter_content)
+
+        for child_idx, child in enumerate(children):
+            child_title = child.get("title", "")
+            if not child_title:
+                continue
+
+            # Skip (一)开标一览表 here — already rendered standalone
+            if "开标一览表" in child_title and part_title in ("商务部分", "一、商务部分"):
+                continue
+
+            # ── Force page break BEFORE every (一)(二)... sub-section ──
+            _insert_page_break(doc)
+
+            child_number = child.get("number", "")
+            child_type = child.get("type", "ai_generated")
+
+            # Sub-section heading
+            full_child_title = (
+                f"{child_number}{child_title}"
+                if child_number and not child_title.startswith(child_number)
+                else child_title
+            )
+            h = doc.add_heading(full_child_title, level=2)
+            h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in h.runs:
+                _set_run_font(
+                    run,
+                    style["heading2_font_name"],
+                    style["heading2_font_size"],
+                    bold=True,
+                )
+
+            # ── Resolve child content ──
+            existing_child = by_child_title.get(child_title)
+            child_content = (
+                (existing_child or {}).get("content")
+                or (existing_child or {}).get("ai_generated_content")
+                or child.get("content", "")
+                or ""
+            )
+
+            # Fallback: pull from split sub-blocks by position (round-robin)
+            if not child_content.strip() and sub_blocks:
+                if child_idx - (1 if part_title in ("商务部分", "一、商务部分") and children and "开标一览表" in children[0].get("title", "") else 0) < len(sub_blocks):
+                    adjusted_idx = child_idx
+                    if part_title in ("商务部分", "一、商务部分") and children:
+                        first_title = children[0].get("title", "")
+                        if "开标一览表" in first_title:
+                            adjusted_idx = child_idx - 1
+                    if 0 <= adjusted_idx < len(sub_blocks):
+                        child_content = sub_blocks[adjusted_idx]
+
+            if not child_content.strip():
+                # Placeholder
+                p = doc.add_paragraph()
+                _set_paragraph_spacing(p, style["body_line_spacing"])
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                pf = p.paragraph_format
+                pf.first_line_indent = Pt(24)
+                run = p.add_run("（待补充：本节内容按招标文件要求由投标人填写）")
+                _set_run_font(run, style["body_font_name"], style["body_font_size"])
+
+            if child_type == "table":
+                _render_child_content(doc, child_content, style, prefer_table=True)
+            elif child_type == "fixed_form":
+                _render_file_section_content(doc, child_content, style)
+            else:
+                _render_child_content(doc, child_content, style)
+
+            # ── Auto-append signature block for fixed_form sections ──
+            if child_type in ("fixed_form", "table") or child.get("required"):
+                _append_signature_block(doc, style)
+
+    # ── Render any chapters not covered by structure (defensive) ──
+    for ch in chapters:
+        if ch.get("title", "") not in rendered_set:
+            _insert_page_break(doc)
+            h = doc.add_heading(ch.get("title", ""), level=1)
+            h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in h.runs:
+                _set_run_font(
+                    run,
+                    style["heading1_font_name"],
+                    style["heading1_font_size"],
+                    bold=True,
+                )
+            _render_child_content(doc, ch.get("content", ""), style)
+            rendered_set.add(ch.get("title", ""))
+
+
+def _split_content_by_h2(content: str) -> list[str]:
+    """Split content by H2 (## ) and H3 (### ) markdown headings into blocks.
+
+    Returns a list of content strings, each starting with its heading (if any).
+    The first block may have leading content before any heading.
+    """
+    if not content:
+        return []
+    # Normalize line endings
+    text = content.replace("\r\n", "\n")
+    lines = text.split("\n")
+    blocks: list[list[str]] = [[]]
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^#{2,3}\s+\S", stripped):
+            blocks.append([line])
+        else:
+            if not blocks:
+                blocks.append([])
+            blocks[-1].append(line)
+    # Strip leading/trailing blank lines from each block
+    result = []
+    for blk in blocks:
+        # Trim leading/trailing empty lines
+        while blk and not blk[0].strip():
+            blk.pop(0)
+        while blk and not blk[-1].strip():
+            blk.pop()
+        if blk:
+            result.append("\n".join(blk))
+    return result
+
+
+def _render_body_legacy(doc, chapters, style):
+    """旧版正文渲染（无 format_template 时使用，保持向后兼容）."""
     for i, chapter in enumerate(chapters):
-        # Insert page break before every chapter except the first
-        # (first chapter already follows the TOC page break).
-        # Using _insert_page_break() ensures each major section starts
-        # on a fresh page and never bleeds from the previous section.
         if i > 0:
             _insert_page_break(doc)
-        # Chapter heading – 黑体 16pt (三号) bold, centred
         h = doc.add_heading(chapter["title"], level=1)
         h.alignment = WD_ALIGN_PARAGRAPH.CENTER
         for run in h.runs:
@@ -1379,16 +1749,156 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
                 bold=True,
             )
 
-        # Preprocess content to remove obvious markdown artifacts
         content = chapter.get("content", "")
-
-        # ── Direct text rendering for file-type sections (pre-filled, no markdown) ──
         section_type = chapter.get("section_type", "")
         if section_type == "file":
             _render_file_section_content(doc, content, style)
             continue
+        _render_child_content(doc, content, style)
 
-        content = _preprocess_content(content)
+
+def _render_child_content(doc, content, style, prefer_table=False):
+    """渲染子章节正文（支持 markdown 表格、标题、列表、段落）."""
+    if not content:
+        return
+    content = _preprocess_content(content)
+
+    lines = content.split("\n")
+    table_rows = []
+    sc_table_rows = []
+    sc_table_keys = []
+    in_sc_table = False
+
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        stripped = line.strip()
+
+        if not stripped:
+            if table_rows:
+                _render_table(doc, table_rows, style)
+                table_rows = []
+            if sc_table_rows:
+                _render_table(doc, sc_table_rows, style)
+                sc_table_rows = []
+                sc_table_keys = []
+                in_sc_table = False
+            doc.add_paragraph()
+            idx += 1
+            continue
+
+        if _is_semicolon_table_title(stripped):
+            if table_rows:
+                _render_table(doc, table_rows, style)
+                table_rows = []
+            if sc_table_rows:
+                _render_table(doc, sc_table_rows, style)
+                sc_table_rows = []
+                sc_table_keys = []
+                in_sc_table = False
+            p_title = doc.add_paragraph()
+            _set_paragraph_spacing(p_title, style["body_line_spacing"])
+            p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run_title = p_title.add_run(stripped)
+            _set_run_font(run_title, style["body_font_name"], style["body_font_size"], bold=True)
+            in_sc_table = True
+            idx += 1
+            continue
+
+        if in_sc_table and _is_semicolon_table_row(stripped):
+            vals = _parse_semicolon_table_row(stripped)
+            if not sc_table_keys:
+                sc_table_keys = _extract_semicolon_keys(stripped)
+                sc_table_rows.append(sc_table_keys)
+            sc_table_rows.append(vals)
+            idx += 1
+            continue
+
+        if in_sc_table and not _is_semicolon_table_row(stripped):
+            if sc_table_rows:
+                _render_table(doc, sc_table_rows, style)
+            sc_table_rows = []
+            sc_table_keys = []
+            in_sc_table = False
+
+        if _is_table_row(stripped):
+            table_rows.append(_parse_table_cells(stripped))
+            idx += 1
+            continue
+
+        if _is_table_separator(stripped):
+            idx += 1
+            continue
+
+        if table_rows:
+            _render_table(doc, table_rows, style)
+            table_rows = []
+        if sc_table_rows:
+            _render_table(doc, sc_table_rows, style)
+            sc_table_rows = []
+            sc_table_keys = []
+            in_sc_table = False
+
+        if _is_markdown_heading(stripped):
+            level, heading_text = _get_heading_level_and_text(stripped)
+            heading_text = _clean_lone_symbols(heading_text)
+            if heading_text:
+                if level == 1:
+                    h_para = doc.add_heading(heading_text, level=1)
+                    h_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in h_para.runs:
+                        _set_run_font(
+                            run, style["heading1_font_name"],
+                            style["heading1_font_size"], bold=True,
+                        )
+                elif level == 2:
+                    h_para = doc.add_heading(heading_text, level=2)
+                    h_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in h_para.runs:
+                        _set_run_font(
+                            run, style["heading2_font_name"],
+                            style["heading2_font_size"], bold=True,
+                        )
+                else:
+                    h_para = doc.add_heading(heading_text, level=3)
+                    h_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in h_para.runs:
+                        _set_run_font(
+                            run, style["heading3_font_name"],
+                            style["heading3_font_size"], bold=True,
+                        )
+            idx += 1
+            continue
+
+        # Default: body paragraph
+        if not (stripped.startswith("[IMG:") or stripped.startswith("[IDPAIR:")):
+            _add_body_paragraph(doc, stripped, style)
+        idx += 1
+
+    # Flush remaining
+    if table_rows:
+        _render_table(doc, table_rows, style)
+    if sc_table_rows:
+        _render_table(doc, sc_table_rows, style)
+
+
+def _append_signature_block(doc, style):
+    """Append the standard Chinese bid signature block:
+        投标人： （盖章）
+        法定代表人或其委托代理人： （签字或盖章）
+        日 期：   年   月   日
+    """
+    doc.add_paragraph()
+    for line in (
+        "投 标 人： （盖章）",
+        "法定代表人或其委托代理人： （签字或盖章）",
+        "日 期：    年    月    日",
+    ):
+        p = doc.add_paragraph()
+        _set_paragraph_spacing(p, style["body_line_spacing"])
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = p.add_run(line)
+        _set_run_font(run, style["body_font_name"], style["body_font_size"])
 
         # Parse content line-by-line, accumulating table rows
         lines = content.split('\n')

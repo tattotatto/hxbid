@@ -216,6 +216,15 @@ EXTRACT_FORMAT_SYSTEM_PROMPT = """你是招标文件格式分析专家。你的�
 4. 识别签章/落款要求的位置和格式
 5. 识别全局格式规则（如"所有页面须加盖骑缝章"、"目录包含三级标题"等）
 
+强制要求：
+- 商务部分必须包含全部 7 个固定子章节（required=true）：
+  (一)开标一览表 [type=table]、(二)投标函 [type=fixed_form]、(三)法定代表人身份证明书 [type=fixed_form]、
+  (四)法定代表人授权委托书 [type=fixed_form]、(五)投标保证金及基本户凭证 [type=fixed_form/attachment]、
+  (六)廉洁诚信承诺书 [type=fixed_form]、(七)与招标人干部职工不存在关联关系的承诺书 [type=fixed_form]
+- (一)开标一览表 必须出现在商务部分的最前面，type="table"，table_columns 必须完整
+- 商务部分的7个固定子章节顺序必须严格按 (一)~(七) 排列
+- 商务部分 / 技术部分 / 资格审查部分 的一级标题和编号必须严格按原文
+
 每个提取项标注 confidence（0.0-1.0），表示提取可信度。
 未知/不确定的字段使用 null 或空值，不要猜测。"""
 

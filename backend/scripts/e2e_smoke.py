@@ -71,9 +71,10 @@ TREE_TECH = [
 ]
 
 CHAPTERS = [
-    {"title": "投标函", "order_index": 0, "chapter_type": "fixed_form", "children": []},
-    {"title": "项目整体服务方案", "order_index": 1, "chapter_type": "ai_generated", "children": TREE_SERVICE},
-    {"title": "技术实施方案", "order_index": 2, "chapter_type": "ai_generated", "children": TREE_TECH},
+    {"title": "商务部分", "order_index": 1, "chapter_type": "ai_generated", "children": []},
+    {"title": "技术部分", "order_index": 2, "chapter_type": "ai_generated", "children": []},
+    {"title": "资格审查部分", "order_index": 3, "chapter_type": "ai_generated", "children": []},
+    {"title": "投标人认为需要提供的其他内容", "order_index": 4, "chapter_type": "ai_generated", "children": []},
 ]
 
 # 注意：与真实解析结果一致 —— service_requirements 是字符串数组，
@@ -83,6 +84,7 @@ REQUIREMENTS = {
     "procurement_type": "service",
     "project_location": "昆明市",
     "project_duration": "一年",
+    "tender_number": "E2E-2026-TEST-001",
     "service_requirements": [
         "保安服务：门岗值守与巡逻服务",
         "保洁服务：公共区域保洁服务",
@@ -90,18 +92,60 @@ REQUIREMENTS = {
     ],
     "special_requirements": ["不得转包分包", "服务响应时间不超过30分钟"],
     "evaluation_criteria": "服务方案40%、技术方案30%、报价30%，综合评分法评标",
+    "service_location": "昆明市官渡区",
+    "vat_rate": "6%",
+    "invoice_type": "增值税专用发票",
+    "bid_deposit_amount": "50000",
+    "bid_deposit_method": "电汇",
+    "quantity_months": "11",
+    "unit_price_excluding_tax": "487300.00",
+    "total_price_excluding_tax": "5360300.00",
 }
 
 FORMAT_TEMPLATE = {
     "document_structure": [
-        {"title": "投标函", "type": "fixed_form", "required": True},
-        {"title": "项目整体服务方案", "type": "ai_generated", "required": True},
-        {"title": "技术实施方案", "type": "ai_generated", "required": True},
+        {
+            "number": "一", "title": "商务部分", "type": "ai_generated", "required": True,
+            "children": [
+                {"number": "（一）", "title": "开标一览表", "type": "table", "required": True},
+                {"number": "（二）", "title": "投标函", "type": "fixed_form", "required": True},
+                {"number": "（三）", "title": "法定代表人身份证明书", "type": "fixed_form", "required": True},
+                {"number": "（四）", "title": "法定代表人授权委托书", "type": "fixed_form", "required": True},
+                {"number": "（五）", "title": "投标保证金及基本户凭证", "type": "fixed_form", "required": True},
+                {"number": "（六）", "title": "廉洁诚信承诺书", "type": "fixed_form", "required": True},
+                {"number": "（七）", "title": "与招标人干部职工不存在关联关系的承诺书", "type": "fixed_form", "required": True},
+            ],
+        },
+        {
+            "number": "二", "title": "技术部分", "type": "ai_generated", "required": True,
+            "children": [
+                {"number": "（一）", "title": "本项目投入服务人员", "type": "table", "required": True},
+                {"number": "（二）", "title": "项目服务方案", "type": "ai_generated", "required": True},
+                {"number": "（三）", "title": "服务承诺", "type": "ai_generated", "required": True},
+                {"number": "（四）", "title": "队伍管理制度、器材车辆保养方案及应急预案", "type": "ai_generated", "required": True},
+                {"number": "（五）", "title": "其他材料", "type": "ai_generated", "required": True},
+            ],
+        },
+        {
+            "number": "三", "title": "资格审查部分", "type": "ai_generated", "required": True,
+            "children": [
+                {"number": "（一）", "title": "投标人基本情况表", "type": "table", "required": True},
+                {"number": "（二）", "title": "企业信誉情况", "type": "fixed_form", "required": True},
+                {"number": "（三）", "title": "项目人员承诺书", "type": "fixed_form", "required": True},
+            ],
+        },
+        {
+            "number": "四", "title": "投标人认为需要提供的其他内容", "type": "ai_generated", "required": True,
+            "children": [],
+        },
     ],
     "global_format_rules": {
+        "numbering_style": "chinese_legal",
         "font": "宋体",
         "font_size": "小四",
-        "heading_levels": ["一、", "1.1", "1.1.1"],
+        "heading_levels": ["一、", "（一）", "1.", "（1）"],
+        "toc_heading_title": "目录",
+        "cover_page_required": True,
     },
 }
 
@@ -410,6 +454,75 @@ async def main() -> int:
         else:
             print(f"  - {e['title']}: type={e['type']} status={e['status']}")
     checks.append(("整体无空标题", rep["empty_headings_total"] == 0))
+
+    # ---- docx 严格格式校验 ----
+    print("\n导出 docx 并校验严格格式...")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
+            exp_resp = await client.post(
+                f"{API_BASE}/bid/export",
+                headers=headers,
+                json={"project_id": project_id, "format": "docx"},
+            )
+            exp_resp.raise_for_status()
+            exp_data = exp_resp.json()
+            docx_url = exp_data.get("docx_url", "")
+            if not docx_url:
+                checks.append(("docx 导出返回 URL", False))
+            else:
+                dl = await client.get(f"{API_BASE}{docx_url}", headers=headers)
+                dl.raise_for_status()
+                docx_bytes = dl.content
+
+                # Parse docx with python-docx
+                from docx import Document
+                from io import BytesIO
+
+                doc = Document(BytesIO(docx_bytes))
+                all_para_text = [p.text for p in doc.paragraphs]
+                # Collect text including tables
+                table_texts = []
+                for tbl in doc.tables:
+                    for row in tbl.rows:
+                        for cell in row.cells:
+                            table_texts.append(cell.text)
+
+                # Check 1: contains 开标一览表
+                full_doc_text = "\n".join(all_para_text + table_texts)
+                has_opening = "开标一览表" in full_doc_text
+                checks.append(("docx 含「开标一览表」", has_opening))
+                print(f"  - 含「开标一览表」: {has_opening}")
+
+                # Check 2: has Word TOC field (look for fldChar in document.xml)
+                # We need to peek at the raw XML for the fldChar element
+                from docx.oxml.ns import qn
+                body_xml = doc.element.body.xml if hasattr(doc.element.body, 'xml') else ''
+                has_toc_field = "TOC" in body_xml and "fldChar" in body_xml
+                checks.append(("docx 含 Word TOC 域（fldChar + TOC）", has_toc_field))
+                print(f"  - 含 Word TOC 域: {has_toc_field}")
+
+                # Check 3: must have 商务部分, 技术部分, 资格审查部分, 投标人认为需要提供的其他内容
+                required_parts = ["商务部分", "技术部分", "资格审查部分", "投标人认为需要提供的其他内容"]
+                missing = [p for p in required_parts if p not in full_doc_text]
+                checks.append((f"docx 含全部一级章节 {required_parts}", not missing))
+                print(f"  - 含全部一级章节: missing={missing}")
+
+                # Check 4: must have sub-sections numbered (一)(二) etc.
+                required_subs = ["（一）开标一览表", "（二）投标函", "（三）法定代表人身份证明书",
+                                 "（四）法定代表人授权委托书"]
+                missing_subs = [s for s in required_subs if s not in full_doc_text]
+                checks.append((f"docx 含商务部分子章节 ({len(required_subs) - len(missing_subs)}/{len(required_subs)})", not missing_subs))
+                print(f"  - 含商务部分子章节: missing={missing_subs}")
+
+                # Check 5: file size sanity check (must be > 10KB for a real bid)
+                size_kb = len(docx_bytes) / 1024
+                checks.append((f"docx 大小合理（{size_kb:.1f} KB ≥ 10 KB）", size_kb >= 10))
+                print(f"  - docx 大小: {size_kb:.1f} KB")
+    except Exception as exc:
+        print(f"  ⚠️  docx 校验异常: {exc}")
+        import traceback
+        traceback.print_exc()
+        checks.append(("docx 导出与校验", False))
 
     # ---- 报告 ----
     print("\n" + "=" * 70)

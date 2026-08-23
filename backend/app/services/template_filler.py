@@ -431,3 +431,200 @@ async def generate_all_file_sections(
             logger.warning("Failed to generate file section '%s': %s", st, exc)
 
     return generated
+
+
+# ---------------------------------------------------------------------------
+# 开标一览表：纯项目数据驱动的固定表格生成器（不调用 AI，避免金额编造）
+# ---------------------------------------------------------------------------
+
+def build_bid_opening_table(
+    project_name: str = "",
+    tender_number: str = "",
+    company_name: str = "",
+    unit_price: str = "",
+    unit_price_currency: str = "人民币，元/月",
+    quantity_months: str = "11",
+    total_price: str = "",
+    vat_rate: str = "",
+    service_location: str = "",
+    service_period: str = "",
+    invoice_type: str = "增值税专用发票",
+    bid_deposit_method: str = "",
+    bid_deposit_amount: str = "",
+    remarks: str = "",
+) -> str:
+    """根据项目数据直接生成开标一览表的 markdown 表格内容.
+
+    严格按招标文件"投标文件格式"中开标一览表的列定义（11 行 + 备注 + 签章），
+    不调用 AI，避免大模型编造金额。
+
+    Returns:
+        一个 markdown 表格字符串（含表头、表体、备注、签章块）。
+    """
+    rows = [
+        ("项目名称", project_name or "[待补充：项目名称]"),
+        ("招标编号", tender_number or "[待补充：招标编号]"),
+        ("投标人名称", company_name or "[待补充：投标人名称]"),
+        (
+            "不含税单价",
+            f"小写：{unit_price or '[待补充]'}\n（币种：{unit_price_currency}）",
+        ),
+        ("数量（月）", quantity_months or "[待补充]"),
+        (
+            "不含税总价",
+            f"小写：{total_price or '[待补充]'}\n（币种：人民币，元）",
+        ),
+        ("增值税税率（%）", vat_rate or "[待补充]"),
+        ("服务地点", service_location or "[待补充：服务地点]"),
+        ("服务期限", service_period or "[待补充：服务期限]"),
+        ("发票类型", invoice_type or "增值税专用发票"),
+        (
+            "投标保证金",
+            f"递交方式：{bid_deposit_method or '[待补充]'}\n金额：{bid_deposit_amount or '[待补充]'} 元",
+        ),
+    ]
+
+    # Build markdown table (2 columns: 项目 / 内容)
+    lines = ["| 项目 | 内容 |", "|:---|:---|"]
+    for label, content in rows:
+        # Escape pipe chars in content
+        content_escaped = content.replace("|", "\\|").replace("\n", "<br>")
+        lines.append(f"| {label} | {content_escaped} |")
+
+    md = "\n".join(lines)
+
+    # Append fixed remarks from tender spec
+    md += "\n\n"
+    md += "**注：**\n"
+    md += "1. 此表应放于投标文件封面后第一页。\n"
+    md += "2. 投标报价包含但不限于完成合同规定的全部工作所需支付的一切成本（管理）费用和拟获得的利润，并考虑应承担的人工及物价费用涨跌幅的风险。该费用包括但不限于人工费、被装费、加班费、劳保费、保险及管理费、通信设备、交通工具、应急装备、警卫器械、相关易耗品、办公设备、利润、规费、税金（增值税除外）等为实施和完成服务工作所需的全部费用、政策性文件规定、执行过程中所有风险以及合同包含的所有风险、责任等。\n"
+    md += "3. 不含税总价=不含税单价*数量。\n"
+    md += "4. 投标报价最多保留两位小数。\n"
+
+    if remarks:
+        md += f"\n**备注：** {remarks}\n"
+
+    # Signature
+    md += "\n\n"
+    md += "投 标 人： （盖章）\n\n"
+    md += "法定代表人或其委托代理人： （签字或盖章）\n\n"
+    md += "日 期： 年 月 日\n"
+
+    return md
+
+
+def extract_bid_opening_data(
+    project=None,
+    requirements: dict | None = None,
+    company_profile: dict | None = None,
+    tender_format_section: dict | None = None,
+) -> dict:
+    """从项目数据中提取开标一览表所需的字段.
+
+    Returns:
+        dict with keys matching build_bid_opening_table kwargs.
+    """
+    requirements = requirements or {}
+    company_profile = company_profile or {}
+
+    # 招标编号 from project or requirements
+    tender_number = ""
+    if project is not None:
+        tender_number = getattr(project, "tender_number", "") or ""
+    if not tender_number:
+        # parse from format_section.tables or requirements
+        tender_number = (
+            requirements.get("tender_number")
+            or requirements.get("bid_number")
+            or requirements.get("招标编号")
+            or ""
+        )
+
+    # 项目名称
+    project_name = ""
+    if project is not None:
+        project_name = getattr(project, "name", "") or ""
+    if not project_name:
+        project_name = requirements.get("project_name") or ""
+
+    # 公司名
+    company_name = (
+        company_profile.get("company_name")
+        or requirements.get("company_name")
+        or (getattr(project, "company_name", "") if project is not None else "")
+        or ""
+    )
+
+    # 报价 - 多个字段都尝试
+    unit_price = (
+        requirements.get("unit_price_excluding_tax")
+        or requirements.get("monthly_unit_price")
+        or requirements.get("单价")
+        or ""
+    )
+    total_price = (
+        requirements.get("total_price_excluding_tax")
+        or requirements.get("total_bid_price")
+        or requirements.get("投标报价")
+        or requirements.get("bid_price")
+        or ""
+    )
+    vat_rate = (
+        requirements.get("vat_rate")
+        or requirements.get("增值税税率")
+        or ""
+    )
+
+    # 服务期限
+    service_period = (
+        requirements.get("project_duration")
+        or requirements.get("service_period")
+        or requirements.get("服务期限")
+        or ""
+    )
+
+    # 服务地点
+    service_location = (
+        requirements.get("service_location")
+        or requirements.get("project_location")
+        or requirements.get("服务地点")
+        or ""
+    )
+
+    # 投标保证金
+    bid_deposit_amount = (
+        requirements.get("bid_deposit_amount")
+        or requirements.get("投标保证金金额")
+        or ""
+    )
+    bid_deposit_method = (
+        requirements.get("bid_deposit_method")
+        or requirements.get("投标保证金递交方式")
+        or "电汇"
+    )
+
+    # 数量（月）
+    quantity_months = str(requirements.get("quantity_months") or requirements.get("数量") or "11")
+
+    # 发票类型
+    invoice_type = (
+        requirements.get("invoice_type")
+        or requirements.get("发票类型")
+        or "增值税专用发票"
+    )
+
+    return {
+        "project_name": project_name,
+        "tender_number": tender_number,
+        "company_name": company_name,
+        "unit_price": unit_price,
+        "quantity_months": quantity_months,
+        "total_price": total_price,
+        "vat_rate": vat_rate,
+        "service_location": service_location,
+        "service_period": service_period,
+        "invoice_type": invoice_type,
+        "bid_deposit_method": bid_deposit_method,
+        "bid_deposit_amount": bid_deposit_amount,
+        "remarks": requirements.get("remarks", ""),
+    }
