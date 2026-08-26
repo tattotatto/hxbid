@@ -275,3 +275,84 @@ async def regenerate_section(
         extra_guidance=materials_guidance,
     ):
         yield chunk
+
+
+# ---------------------------------------------------------------------------
+# 章节对话（多轮）
+# ---------------------------------------------------------------------------
+
+SECTION_CHAT_SYSTEM_PROMPT = """你是投标文件章节编辑助手。用户在逐节审阅标书，通过多轮对话修改当前这一节。
+
+约束：
+1. 只针对当前节，不要改其他节
+2. 保持原文中公司信息、人员姓名、证书编号、项目名称等真实数据不变
+3. 直接回答用户的问题，或根据指令修改内容
+4. 禁止使用"首先""其次""此外""总而言之"等模板化连接词
+5. 每个段落至少包含1个具体事实（数字、日期、项目名、证书编号等）
+6. 你必须返回 JSON，格式：{"reply": "对用户指令的回复/说明", "revised_content": "修改后的完整本节内容；若无需修改则原样返回当前内容"}
+7. 只返回 JSON，不要包含任何其他文字"""
+
+
+async def chat_section(
+    chapter_title: str,
+    section_path: list[str],
+    current_content: str,
+    messages: list[dict],
+    ai_adapter=None,
+    *,
+    materials_guidance: str = "",
+) -> dict:
+    """章节多轮对话修改当前节.
+
+    Returns:
+        {"reply": str, "revised_content": str}
+    """
+    if not ai_adapter:
+        raise RuntimeError("AI 服务不可用")
+
+    section_title = section_path[-1] if section_path else chapter_title
+    ancestry = " > ".join([chapter_title] + section_path[:-1]) if len(section_path) > 1 else chapter_title
+
+    # 历史对话（前端已持有，防上下文膨胀由前端限制条数）
+    history = messages[-12:] if messages else []
+
+    materials_block = (
+        f"\n【可用的真实素材（标书中必须使用，严禁编造）】\n{materials_guidance}\n"
+        if materials_guidance else ""
+    )
+
+    user_prompt = f"""【文档位置】{ancestry}
+【当前节标题】{section_title}
+{materials_block}【当前内容】
+{current_content if current_content else "（尚未生成）"}
+
+【对话历史】
+{json.dumps(history, ensure_ascii=False) if history else "（无）"}
+
+请根据以上上下文，输出 JSON：{{"reply": "...", "revised_content": "..."}}"""
+
+    from app.services.ai_pipeline import _budget_hint_to_tokens
+
+    try:
+        response = await ai_adapter.chat_completion(
+            messages=[
+                {"role": "system", "content": SECTION_CHAT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            max_tokens=_budget_hint_to_tokens("medium"),
+            response_format={"type": "json_object"},
+        )
+        if not response:
+            raise RuntimeError("AI 返回空内容")
+        parsed = json.loads(response)
+        return {
+            "reply": parsed.get("reply", ""),
+            "revised_content": parsed.get("revised_content", current_content),
+        }
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"AI 返回非 JSON：{response[:200]!r}") from exc
+    except Exception as exc:
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"章节对话失败：{exc}") from exc

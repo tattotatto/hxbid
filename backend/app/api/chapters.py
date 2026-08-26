@@ -766,6 +766,18 @@ class SectionSaveResponse(BaseModel):
     success: bool = False
 
 
+class SectionChatRequest(BaseModel):
+    section_path: list = Field(..., min_length=1)
+    current_content: str = ""
+    messages: list = []
+    instruction: str = ""
+
+
+class SectionChatResponse(BaseModel):
+    reply: str = ""
+    revised_content: str = ""
+
+
 async def _materials_guidance_for_section(
     section_title: str,
     project_id: str,
@@ -949,6 +961,60 @@ async def save_section(
     except Exception as exc:
         logger.exception("Section save failed")
         raise HTTPException(status_code=500, detail=f"保存失败: {exc}")
+
+
+@router.post("/{project_id}/chapters/{chapter_id}/sections/chat", response_model=SectionChatResponse)
+async def chat_section(
+    project_id: str,
+    chapter_id: str,
+    data: SectionChatRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """章节多轮对话，返回 AI 回复与修改后的内容."""
+    result = await db.execute(
+        select(BidProject)
+        .where(BidProject.id == project_id)
+        .options(selectinload(BidProject.chapters))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    chapter = next((ch for ch in project.chapters if ch.id == chapter_id), None)
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+
+    try:
+        from app.services.collection import get_collected_resources
+        from app.services.materials_context import assemble_section_materials
+        from app.services.section_editor import chat_section as do_chat
+        from app.services.ai_adapter import ai_adapter as ai
+
+        collected = await get_collected_resources(project_id, db)
+        section_title = data.section_path[-1] if data.section_path else chapter.title
+        materials_guidance = assemble_section_materials(
+            section_title,
+            qualifications=collected.get("qualifications", []) if collected else None,
+            personnel=collected.get("personnel", []) if collected else None,
+            contracts=collected.get("contracts", []) if collected else None,
+            company=collected.get("company") if collected else None,
+        )
+
+        result = await do_chat(
+            chapter_title=chapter.title,
+            section_path=data.section_path,
+            current_content=data.current_content,
+            messages=data.messages,
+            ai_adapter=ai,
+            materials_guidance=materials_guidance,
+        )
+        return SectionChatResponse(**result)
+    except RuntimeError as exc:
+        logger.exception("Section chat failed")
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Section chat failed")
+        raise HTTPException(status_code=500, detail=f"章节对话失败: {exc}")
 
 
 @router.get("/{project_id}/chapters/{chapter_id}/sections")
