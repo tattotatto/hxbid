@@ -160,6 +160,7 @@ async def modify_section(
     current_content: str,
     instruction: str,
     children_json: str = "[]",
+    materials_guidance: str = "",
     ai_adapter=None,
 ) -> dict:
     """AI 针对性修改单个节的内容.
@@ -177,13 +178,17 @@ async def modify_section(
     siblings = collect_sibling_summaries(children_json, section_path)
     sibling_text = "\n".join(f"  - {s}" for s in siblings) if siblings else "（无同级节）"
 
+    materials_block = (
+        f"\n【可用的真实素材（标书中必须使用，严禁编造）】\n{materials_guidance}\n"
+        if materials_guidance else ""
+    )
+
     user_prompt = f"""【文档位置】{ancestry}
 【当前节标题】{section_title}
 
 【同级其他节摘要（请避免内容重复）】
 {sibling_text}
-
-【当前内容】
+{materials_block}【当前内容】
 {current_content if current_content else "（尚未生成）"}
 
 【修改要求】
@@ -243,6 +248,7 @@ async def regenerate_section(
     requirements: dict,
     children_json: str = "[]",
     company_profile: dict | None = None,
+    materials_guidance: str = "",
     ai_adapter=None,
 ) -> AsyncIterator[str]:
     """重新生成单个节的内容，流式返回.
@@ -266,6 +272,6 @@ async def regenerate_section(
         sibling_summaries=siblings[:8],
         reference_sections=[],
         company_profile=company_profile,
-        extra_guidance="",
+        extra_guidance=materials_guidance,
     ):
         yield chunk

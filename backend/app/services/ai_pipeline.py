@@ -20,6 +20,14 @@ from app.config import settings
 from app.database import async_session
 from app.services.ai_adapter import ai_adapter
 from app.services.deid import deidentify_text
+from app.services.materials_context import (
+    CONTRACT_KEYWORDS,
+    PERSONNEL_CTX_KEYWORDS,
+    QUAL_CTX_KEYWORDS,
+    assemble_section_materials,
+    build_personnel_context,
+    build_qualifications_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1832,35 +1840,9 @@ async def generate_bid_with_deep_outline(
             logger.warning("Failed to gather contract data: %s", exc)
 
     # Build personnel context block from matched_personnel
-    personnel_context = ""
-    if matched_personnel:
-        lines = ["【可用项目人员 — 以下为真实人员数据，标书中涉及人员配置时必须使用，严禁编造姓名、证书等信息】"]
-        for p in matched_personnel:
-            if isinstance(p, dict):
-                name = p.get("name", "")
-                edu = p.get("education", "")
-                tags = p.get("tags", "")
-                certs = p.get("certificates", [])
-            else:
-                name = getattr(p, "name", "")
-                edu = getattr(p, "education", "")
-                tags = getattr(p, "tags", "")
-                certs = getattr(p, "certificates", [])
-            if not name:
-                continue
-            lines.append(f"  - {name}，学历{edu}，持证/特长：{tags}")
-            for c in certs:
-                if isinstance(c, dict):
-                    cn = c.get("cert_name", "")
-                else:
-                    cn = getattr(c, "cert_name", "")
-                if cn:
-                    lines.append(f"    证书：{cn}")
-        if len(lines) > 1:
-            lines.append("")
-            lines.append("重要提醒：标书中涉及人员配置时，只能使用以上真实人员数据，严禁编造任何人名或证书信息。")
-            personnel_context = "\n".join(lines)
-            logger.info("Built personnel context: %d chars, %d people", len(personnel_context), len(lines) - 2)
+    personnel_context = build_personnel_context(matched_personnel or [])
+    if personnel_context:
+        logger.info("Built personnel context: %d chars", len(personnel_context))
 
     # ── Phase 3: Generate sections with configurable parallelism ──
     resume_note = "（断点续传）" if resume else ""
@@ -1869,13 +1851,6 @@ async def generate_bid_with_deep_outline(
     # Collect sibling titles per section for anti-duplication
     all_titles = [leaf.get("title", "") for leaf in leaves]
     total = len(leaves)
-
-    # Keywords for sections that need contract/业绩 data
-    CONTRACT_KEYWORDS = ["业绩", "类似项目", "项目经验", "成功案例", "既往", "合同业绩",
-                         "投标人认为需要提供的其他", "其他内容", "其他材料"]
-    # Keywords for sections that need personnel data
-    PERSONNEL_CTX_KEYWORDS = ["人员", "配置", "团队", "组织", "人力", "管理架构", "岗位",
-                               "项目负责人", "项目经理", "拟投入", "技术负责人"]
 
     # ── Identify pending sections (skip completed / max-retried) ──
     pending_sections: list = []
@@ -1903,6 +1878,9 @@ async def generate_bid_with_deep_outline(
             extra_parts.append(contract_context)
         if personnel_context and any(kw in title_lower for kw in PERSONNEL_CTX_KEYWORDS):
             extra_parts.append(personnel_context)
+        quals_context = build_qualifications_context(matched_qualifications or [])
+        if quals_context and any(kw in title_lower for kw in QUAL_CTX_KEYWORDS):
+            extra_parts.append(quals_context)
         # 文件类章节已生成完毕，提醒 AI 只需撰写技术方案部分
         if file_section_chapters:
             extra_parts.append("注意：投标文件中的投标函、承诺书、法定代表人证明等文件类内容已由系统自动填充，你只需撰写技术方案部分。")

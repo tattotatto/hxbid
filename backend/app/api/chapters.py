@@ -766,6 +766,34 @@ class SectionSaveResponse(BaseModel):
     success: bool = False
 
 
+async def _materials_guidance_for_section(
+    section_title: str,
+    project_id: str,
+    db: AsyncSession,
+) -> str:
+    """按节标题组装素材上下文，供单节修改/重新生成时注入提示.
+
+    抓取已收集的公司资质 / 人员 / 历史合同 / 公司信息，经
+    assemble_section_materials 按标题关键词命中并截断。任何失败返回空串，
+    不阻断主流程。
+    """
+    try:
+        from app.services.collection import get_collected_resources
+        from app.services.materials_context import assemble_section_materials
+
+        collected = await get_collected_resources(project_id, db)
+        return assemble_section_materials(
+            section_title,
+            qualifications=collected.get("qualifications", []) if collected else None,
+            personnel=collected.get("personnel", []) if collected else None,
+            contracts=collected.get("contracts", []) if collected else None,
+            company=collected.get("company") if collected else None,
+        )
+    except Exception as exc:
+        logger.warning("Materials guidance build failed for '%s': %s", section_title, exc)
+        return ""
+
+
 @router.post("/{project_id}/chapters/{chapter_id}/sections/modify", response_model=SectionModifyResponse)
 async def modify_section(
     project_id: str,
@@ -788,6 +816,9 @@ async def modify_section(
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found")
 
+    section_title = data.section_path[-1] if data.section_path else chapter.title
+    materials_guidance = await _materials_guidance_for_section(section_title, project_id, db)
+
     try:
         from app.services.section_editor import modify_section as do_modify
         from app.services.ai_adapter import ai_adapter as ai
@@ -798,6 +829,7 @@ async def modify_section(
             current_content=data.current_content,
             instruction=data.instruction,
             children_json=chapter.children_json,
+            materials_guidance=materials_guidance,
             ai_adapter=ai,
         )
         return SectionModifyResponse(**result)
@@ -840,6 +872,9 @@ async def regenerate_section(
     except Exception:
         pass
 
+    section_title = data.section_path[-1] if data.section_path else chapter.title
+    materials_guidance = await _materials_guidance_for_section(section_title, project_id, db)
+
     async def event_generator():
         try:
             from app.services.section_editor import regenerate_section as do_regenerate
@@ -853,6 +888,7 @@ async def regenerate_section(
                 requirements=requirements,
                 children_json=chapter.children_json,
                 company_profile=company_profile,
+                materials_guidance=materials_guidance,
                 ai_adapter=ai,
             ):
                 full += chunk
