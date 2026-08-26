@@ -103,6 +103,10 @@ async def analyze_collection_needs(
                 for pc in pc_rows if pc.requirement_name == name
             ]
             matches, match_status = _merge_matches(persisted, auto, "contract")
+            # 自动候选标 selection=auto（与 qualification/personnel 分支一致）
+            if match_status in ("auto", "matched"):
+                for m in matches:
+                    m.setdefault("selection", "auto")
         else:
             auto = _match_document(name, category, quals, company)
             persisted = [
@@ -156,6 +160,7 @@ async def analyze_collection_needs(
                 "name": role,
                 "category": "personnel",
                 "details": f"需{count}人" if count > 1 else "",
+                "count": count,
             },
             "matched": match_status in ("selected", "auto", "uploaded"),
             "matches": matches,
@@ -380,8 +385,12 @@ def _is_confident_auto(category: str, auto: list[dict]) -> bool:
 def _pick_auto_occupy(document_items: list, personnel_items: list) -> list[dict]:
     """从三态条目中选出需要自动占用的行（纯计算，不触库）.
 
+    每个需求按容量封顶：
+    - qualification/contract 需求 count=1，仅取首个 high-confidence 匹配；
+    - personnel 需求 count=item["requirement"].get("count", 1)，取前 count 个。
+
     Returns:
-        list of {"model", "requirement_name", "resource_id"}
+        list of {"model", "requirement_name", "resource_id", "count"}
         model ∈ {"qualification", "personnel", "contract"}
     """
     rows: list[dict] = []
@@ -394,15 +403,21 @@ def _pick_auto_occupy(document_items: list, personnel_items: list) -> list[dict]
             if not m.get("id") or m.get("confidence") != "high":
                 continue
             model = "contract" if category == "contract_performance" else "qualification"
-            rows.append({"model": model, "requirement_name": req_name, "resource_id": m["id"]})
+            rows.append({"model": model, "requirement_name": req_name, "resource_id": m["id"], "count": 1})
+            break  # 文档类需求容量恒为 1
     for item in personnel_items:
         if item.get("match_status") != "auto":
             continue
         role = item["requirement"]["name"]
+        count = item["requirement"].get("count", 1)
+        taken = 0
         for m in item.get("matches", []):
             if not m.get("id") or m.get("confidence") != "high":
                 continue
-            rows.append({"model": "personnel", "requirement_name": role, "resource_id": m["id"]})
+            rows.append({"model": "personnel", "requirement_name": role, "resource_id": m["id"], "count": count})
+            taken += 1
+            if taken >= count:
+                break
     return rows
 
 
@@ -411,14 +426,18 @@ async def _auto_occupy_confident_matches(
     rows: list[dict],
     db: AsyncSession,
 ) -> int:
-    """按 _pick_auto_occupy 的结果批量落库（幂等）.
+    """按 _pick_auto_occupy 的结果批量落库（幂等 + 容量封顶）.
 
-    幂等策略：若该需求已有任何已落库行则整体跳过（不重复占用）。
+    幂等/封顶策略：对每个需求，若「已落库行数 + 本批已插入行数」达到
+    spec["count"] 则跳过该需求后续行。本批已插入行数用内存 dict 按
+    (model, requirement_name) 累计（不依赖 session autoflush 可见性）。
     """
     occupied = 0
+    batch_inserted: dict[tuple[str, str], int] = {}
     for spec in rows:
         model_name = spec["model"]
         req_name = spec["requirement_name"]
+        capacity = spec["count"]
         if model_name == "qualification":
             existing = (await db.execute(
                 select(ProjectQualification).where(
@@ -440,7 +459,8 @@ async def _auto_occupy_confident_matches(
                     ProjectContract.requirement_name == req_name,
                 )
             )).scalars().all()
-        if existing:
+        key = (model_name, req_name)
+        if len(existing) + batch_inserted.get(key, 0) >= capacity:
             continue
         if model_name == "qualification":
             db.add(ProjectQualification(
@@ -464,6 +484,7 @@ async def _auto_occupy_confident_matches(
                 requirement_name=req_name,
                 match_status="matched",
             ))
+        batch_inserted[key] = batch_inserted.get(key, 0) + 1
         occupied += 1
     if occupied:
         await db.flush()
@@ -594,8 +615,8 @@ async def confirm_collection(project_id: str, db: AsyncSession) -> BidProject:
         items = await analyze_collection_needs(project_id, db)
         rows = _pick_auto_occupy(items["document_items"], items["personnel_items"])
         if rows:
-            await _auto_occupy_confident_matches(project_id, rows, db)
-            logger.info("confirm_collection auto-occupied %d rows", len(rows))
+            occupied = await _auto_occupy_confident_matches(project_id, rows, db)
+            logger.info("confirm_collection auto-occupied %d rows", occupied)
     except Exception as exc:
         logger.warning("Auto-occupy skipped: %s", exc)
 
