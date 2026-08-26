@@ -213,11 +213,12 @@ def _pick_auto_occupy(document_items: list, personnel_items: list) -> list[dict]
                 continue
             rows.append({"model": "personnel", "requirement_name": role, "resource_id": m["id"]})
     return rows
+```
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run（backend 目录）：`python -m pytest tests/test_collection_merge.py -v`
-Expected: PASS（4+4 例全绿）。
+Expected: PASS（TestMergeMatches 4 + TestIsConfidentAuto 5 + TestPickAutoOccupy 3 = 12 例全绿）。
 
 - [ ] **Step 5: 给三个 `_match_*` 函数打 confidence 标记**
 

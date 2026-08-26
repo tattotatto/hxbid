@@ -173,10 +173,11 @@
 - 先查本项目的 `ProjectQualification / ProjectPersonnel / ProjectContract`；
 - 每个 required doc / personnel item：**优先展示已落库选择**（含自动占用），没有落库选择时才走自动匹配候选。
 
-**b. 方案①自动占用。** 对无落库选择、但存在**确定性自动匹配**的项（排除"返回全部候选"兜底分支）：
-- 自动插入 `Project*` 行，`match_status="auto"`；
+**b. 方案①自动占用（实现裁定：改到 `confirm_collection` 时批量落库）。** `status` GET 保持只读（避免 GET 带写副作用）；对无落库选择、但存在**确定性自动匹配**的项（排除"返回全部候选"兜底分支），在用户点「确认并继续」时：
+- 批量插入 `Project*` 行，`match_status="auto"`；
 - 幂等：仅当该 requirement 无任何落库行时插入；
-- 在 status GET 上执行（内部工具可接受 GET 带写副作用；实现时注释说明）。人员匹配兜底（`_match_personnel` 的"无匹配返回前5人"）**不自动占用**，只作候选提示。
+- 人员匹配兜底（`_match_personnel` 的"无匹配返回前5人"）**不自动占用**，只作候选提示。
+- 进入生成时 `get_collected_resources` 读出全部落库行（含 auto），四类素材真正进生成。
 
 **c. 多选真正落库：**
 - `assign_personnel`：删除"移除同 role 旧记录"逻辑（`collection.py:288-296`），允许多人同 role（对应"需 N 人"）。
