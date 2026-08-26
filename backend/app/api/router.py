@@ -20,6 +20,7 @@ from app.api.dataset import router as dataset_router
 from app.api.collection import router as collection_router
 from app.api.contracts import router as contracts_router
 from app.api.company import router as company_router
+from app.api.bid_lesson import router as bid_lesson_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router, prefix="/auth", tags=["认证"])
@@ -36,3 +37,4 @@ api_router.include_router(analytics_router, prefix="/analytics", tags=["中标�
 api_router.include_router(dataset_router, prefix="/dataset", tags=["训练数据"])
 api_router.include_router(contracts_router, prefix="/contracts", tags=["历史合同"])
 api_router.include_router(company_router, prefix="/company", tags=["公司信息"])
+api_router.include_router(bid_lesson_router, prefix="/bid-lessons", tags=["历史标书"])
