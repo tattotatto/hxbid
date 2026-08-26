@@ -543,6 +543,67 @@ async def main() -> int:
         traceback.print_exc()
         checks.append(("docx 导出与校验", False))
 
+    # ---- 历史标书配对学习 ----
+    print("\n上传招标+标书配对并等待分析...")
+    try:
+        from io import BytesIO
+        from docx import Document as DocxDocument
+
+        # 生成一对小的 docx 作为测试素材
+        def _make_docx(text: str) -> bytes:
+            doc = DocxDocument()
+            for line in text.split("\n"):
+                doc.add_paragraph(line)
+            buf = BytesIO()
+            doc.save(buf)
+            return buf.getvalue()
+
+        tender_doc = _make_docx(
+            "招标文件\n第一章 投标邀请\n项目名称：示例监控项目\n第二章 投标人须知\n"
+            "资质要求：须持有保安服务许可证。\n技术需求：须具备 7×24 小时响应能力。\n"
+            "投标文件组成：（一）开标一览表（二）投标函（三）法定代表人身份证明书\n"
+            "评标办法：综合评分法\n"
+        )
+        bid_doc = _make_docx(
+            "投标文件\n（一）开标一览表\n项目名称：示例监控项目\n（二）投标函\n我方承诺满足全部要求。\n"
+            "（三）法定代表人身份证明书\n我方持有保安服务许可证。\n技术方案\n本方案提供 7×24 小时响应。\n"
+        )
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
+            up = await client.post(
+                f"{API_BASE}/bid-lessons/upload",
+                headers=headers,
+                files={
+                    "tender_file": ("tender.docx", tender_doc, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                    "bid_file": ("bid.docx", bid_doc, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                },
+                data={"name": "E2E-配对学习测试"},
+            )
+            up.raise_for_status()
+            pair_id = up.json()["id"]
+            checks.append(("配对上传成功", True))
+            print(f"  - 配对 id: {pair_id}")
+
+            # 轮询等待分析完成(最多 5 分钟)
+            lesson_ok = False
+            for _ in range(60):
+                await asyncio.sleep(5)
+                detail = await client.get(f"{API_BASE}/bid-lessons/{pair_id}", headers=headers)
+                detail.raise_for_status()
+                data = detail.json()
+                if data["status"] == "ready":
+                    lesson = data.get("lesson") or {}
+                    lesson_ok = bool(lesson.get("requirements_coverage")) and bool(lesson.get("lessons"))
+                    break
+                if data["status"] == "failed":
+                    print(f"  - 配对分析失败: {data.get('error')}")
+                    break
+            checks.append(("配对学习报告 ready 且含需求覆盖/要点", lesson_ok))
+            print(f"  - 配对分析状态: {'ready' if lesson_ok else '未完成'}")
+    except Exception as exc:
+        print(f"  ⚠️  配对学习校验异常: {exc}")
+        checks.append(("历史标书配对学习", False))
+
     # ---- 报告 ----
     print("\n" + "=" * 70)
     ok = True
