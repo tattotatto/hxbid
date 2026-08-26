@@ -117,7 +117,7 @@ async def _compare_bid(tender_analysis: dict, bid_text: str) -> dict:
     return result
 
 
-def _build_alignment_chunks(pair_id: str, name: str, lesson: dict) -> list[dict]:
+def _build_alignment_chunks(pair_id: str, name: str, lesson: dict, source_project_id: str = "") -> list[dict]:
     """把 requirements_coverage 转成 RAG 对齐片段.纯函数.
 
     每个 quality != missing 且有应答的条目 → 一个 chunk,
@@ -141,16 +141,17 @@ def _build_alignment_chunks(pair_id: str, name: str, lesson: dict) -> list[dict]
                 "pair_id": pair_id,
                 "pair_name": name,
                 "category": item.get("category", ""),
+                "source_project_id": source_project_id,
             },
         })
     return chunks
 
 
-def index_lesson_alignment(pair_id: str, name: str, lesson: dict) -> int:
+def index_lesson_alignment(pair_id: str, name: str, lesson: dict, source_project_id: str = "") -> int:
     """把对齐片段索引进向量库,返回成功条数."""
     if not vector_store.is_available():
         return 0
-    chunks = _build_alignment_chunks(pair_id, name, lesson)
+    chunks = _build_alignment_chunks(pair_id, name, lesson, source_project_id)
     indexed = 0
     for i, chunk in enumerate(chunks):
         ok = vector_store.index_chapter(
@@ -219,7 +220,7 @@ async def run_analysis(pair_id: str) -> None:
                 pair.status = "ready"
                 await db.commit()
 
-                indexed = index_lesson_alignment(pair.id, pair.name, lesson)
+                indexed = index_lesson_alignment(pair.id, pair.name, lesson, pair.project_id or "")
                 logger.info("lesson %s ready, indexed %d chunks", pair.id, indexed)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("lesson analysis failed for %s", pair_id)

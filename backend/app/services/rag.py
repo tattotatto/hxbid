@@ -449,12 +449,16 @@ async def retrieve_lesson_references(
     queries = _build_query_variants("投标要求应答写法", requirements)
     results: List[Dict[str, Any]] = []
     for q in queries:
-        hits = vector_store.search_similar(q, n_results=n_results)
+        try:
+            hits = vector_store.search_similar(q, n_results=n_results)
+        except Exception as exc:
+            logger.warning("Lesson reference search failed for query '%s...': %s", q[:50], exc)
+            continue
         for h in hits:
             md = h.get("metadata") or {}
             if md.get("source") != "lesson":
                 continue
-            if str(md.get("pair_id", "")) == str(project_id):
+            if str(md.get("source_project_id", "")) and str(md.get("source_project_id", "")) == str(project_id):
                 continue  # 避免自召回
             results.append(h)
     # 按距离去重
@@ -466,4 +470,14 @@ async def retrieve_lesson_references(
             continue
         seen.add(key)
         deduped.append(r)
-    return deduped[:n_results]
+    top = deduped[:n_results]
+    return [
+        {
+            "title": r["metadata"].get("title", ""),
+            "content": r["content"],
+            "distance": r.get("distance"),
+            "source_chapter_id": r["metadata"].get("chapter_id", ""),
+            "source_project_id": r["metadata"].get("project_id", ""),
+        }
+        for r in top
+    ]
