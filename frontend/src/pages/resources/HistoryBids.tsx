@@ -131,6 +131,8 @@ export default function HistoryBids() {
   const [reportLoading, setReportLoading] = useState(false)
   const [reportData, setReportData] = useState<BidLesson | null>(null)
 
+  const [relearning, setRelearning] = useState(false)
+
   const pollTimerRef = useRef<number | null>(null)
 
   const maybePoll = (items: BidLesson[]) => {
@@ -255,12 +257,16 @@ export default function HistoryBids() {
   // ── Relearn / Delete ──
 
   const handleRelearn = async (id: string) => {
+    if (relearning) return
+    setRelearning(true)
     try {
       await client.post(`/bid-lessons/${id}/relearn`)
       message.success('已重新触发分析')
       fetchList()
     } catch (err: any) {
       message.error(err.response?.data?.detail || '重试失败')
+    } finally {
+      setRelearning(false)
     }
   }
 
@@ -340,7 +346,7 @@ export default function HistoryBids() {
             查看报告
           </Button>
           {record.status === 'failed' && (
-            <Button size="small" icon={<ReloadOutlined />} onClick={() => handleRelearn(record.id)}>
+            <Button size="small" icon={<ReloadOutlined />} loading={relearning} onClick={() => handleRelearn(record.id)}>
               重试
             </Button>
           )}

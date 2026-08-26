@@ -158,7 +158,7 @@ function buildTreeData(chapters: OutlineChapter[]): DataNode[] {
     // 1. chapter_structure_json（extract/chat 输出） → 字段名 type
     // 2. ProjectChapter 行 → 字段名 chapter_type
     // 历史上前端只用 type，导致已 confirm 的项目回看 /outline 页面渲染「暂无章节」。
-    const type = ch.type ?? (ch as any).chapter_type ?? 'ai_generated'
+    const type = (ch.type ?? (ch as any).chapter_type ?? 'ai_generated') as ChapterType
     return {
       key: String(idx),
       title: (

@@ -477,7 +477,7 @@ async def retrieve_lesson_references(
             "content": r["content"],
             "distance": r.get("distance"),
             "source_chapter_id": r["metadata"].get("chapter_id", ""),
-            "source_project_id": r["metadata"].get("project_id", ""),
+            "source_project_id": r["metadata"].get("source_project_id", ""),
         }
         for r in top
     ]
