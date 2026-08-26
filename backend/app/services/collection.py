@@ -690,7 +690,11 @@ async def get_collected_resources(
     pp_result = await db.execute(
         select(ProjectPersonnel)
         .where(ProjectPersonnel.project_id == project_id)
-        .options(selectinload(ProjectPersonnel.personnel))
+        .options(
+            selectinload(ProjectPersonnel.personnel).selectinload(
+                Personnel.certificates
+            )
+        )
     )
     personnel = []
     for pp in pp_result.scalars():
@@ -701,6 +705,10 @@ async def get_collected_resources(
             "role": pp.role,
             "education": p.education if p else "",
             "tags": p.tags if p else "",
+            "certificates": [
+                {"cert_name": c.cert_name, "cert_number": c.cert_number}
+                for c in (p.certificates or [])
+            ] if p else [],
             "source": "collected",
         })
 

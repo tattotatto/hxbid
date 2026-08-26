@@ -23,6 +23,26 @@ class TestBuildQualificationsContext:
         assert build_qualifications_context([]) == ""
 
 
+class TestBuildPersonnelContext:
+    def test_renders_dict_form_certificates(self):
+        personnel = [
+            {
+                "name": "李四",
+                "role": "项目经理",
+                "education": "本科",
+                "certificates": [
+                    {"cert_name": "一级建造师", "cert_number": "JG-001"},
+                ],
+            },
+        ]
+        text = build_personnel_context(personnel)
+        assert "李四" in text
+        assert "证书：一级建造师" in text
+
+    def test_empty_returns_empty(self):
+        assert build_personnel_context([]) == ""
+
+
 class TestAssembleSectionMaterials:
     def test_qualification_section_gets_qual_ctx(self):
         text = assemble_section_materials(
