@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Card, Button, Space, Tag, Spin, message as antMessage } from 'antd'
-import { ArrowLeftOutlined, CheckCircleOutlined } from '@ant-design/icons'
+import { Card, Button, Space, Tag, Spin, Empty, message as antMessage } from 'antd'
+import { ArrowLeftOutlined, CheckCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import OutlineTree from '../../components/OutlineEditor/OutlineTree'
 import OutlineChat from '../../components/OutlineEditor/OutlineChat'
 import { outlineApi, OutlineChapter } from '../../api/outline'
@@ -12,6 +12,7 @@ const OutlineConfirm: React.FC = () => {
   const [chapters, setChapters] = useState<OutlineChapter[]>([])
   const [loading, setLoading] = useState(true)
   const [confirming, setConfirming] = useState(false)
+  const [extracting, setExtracting] = useState(false)
   const [convId, setConvId] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
 
@@ -39,6 +40,23 @@ const OutlineConfirm: React.FC = () => {
     if (id) {
       if (next) sessionStorage.setItem(`outline_conv_${id}`, next)
       else sessionStorage.removeItem(`outline_conv_${id}`)
+    }
+  }
+
+  const handleReextract = async () => {
+    if (!id || extracting) return
+    setExtracting(true)
+    try {
+      await outlineApi.extract(id)
+      const res = await outlineApi.get(id)
+      setChapters(res.chapters)
+      setError(null)
+      antMessage.success(`已提取 ${res.chapters.length} 个章节`)
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || '重新提取失败'
+      antMessage.error(detail)
+    } finally {
+      setExtracting(false)
     }
   }
 
@@ -109,8 +127,22 @@ const OutlineConfirm: React.FC = () => {
             <div style={{ textAlign: 'center', padding: 48 }}>
               <Spin />
             </div>
-          ) : error ? (
-            <div style={{ color: '#cf1322', padding: 16 }}>{error}</div>
+          ) : chapters.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 32 }}>
+              <Empty description={error || '尚未提取到章节结构，请重新提取'} />
+              <Button
+                type="primary"
+                icon={<ReloadOutlined />}
+                loading={extracting}
+                onClick={handleReextract}
+                style={{ marginTop: 16 }}
+              >
+                重新提取章节
+              </Button>
+              <div style={{ marginTop: 12, color: '#999', fontSize: 13 }}>
+                {extracting ? 'AI 正在解析章节结构，可能需要几分钟，请耐心等待…' : 'AI 提取可能需要几分钟'}
+              </div>
+            </div>
           ) : (
             <OutlineTree chapters={chapters} onChange={setChapters} />
           )}

@@ -103,6 +103,41 @@ CHAPTER_EXTRACT_SYSTEM_PROMPT = """你是招标文件分析专家。你的任务
 - 固定格式章节的 format_notes 应包含"须有签章：投标人（盖章）/法定代表人或委托代理人（签字或盖章）/日期"等落款要求"""
 
 
+async def _extract_with_retry(
+    ai_adapter,
+    user_prompt: str,
+    max_tokens: int = 32768,
+    max_attempts: int = 2,
+) -> str:
+    """调用 deepseek-v4-flash 提取章节，空内容时重试一次。
+
+    deepseek-v4-flash 是推理模型：reasoning_tokens 先吃输出预算，长招标文件下
+    推理消耗随机波动在 12k~20k。max_tokens=16384 时推理一旦超过 ~14.5k，
+    content 被挤成空 → finish_reason=length → RuntimeError → 0 章节。
+    实测 max_tokens=32768 安全（推理 18.5k + 正文 4.2k = 20.1k < 32k）；
+    重试兜底残余随机性（每次最长几分钟，仅在空内容时触发）。
+    """
+    messages = [
+        {"role": "system", "content": CHAPTER_EXTRACT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    for attempt in range(max_attempts):
+        try:
+            return await ai_adapter.chat_completion(
+                messages=messages,
+                temperature=0.3,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except RuntimeError as exc:
+            if attempt == max_attempts - 1:
+                raise
+            logger.warning(
+                "Chapter extract returned empty content (attempt %d/%d), retrying: %s",
+                attempt + 1, max_attempts, exc,
+            )
+
+
 async def extract_chapters_from_text(
     section_text: str,
     ai_adapter,
@@ -162,17 +197,7 @@ async def extract_chapters_from_text(
 直接返回JSON数组，不要包含其他文字。"""
 
     try:
-        response = await ai_adapter.chat_completion(
-            messages=[
-                {"role": "system", "content": CHAPTER_EXTRACT_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            # deepseek-v4-flash 在长 prompt 上 reasoning_tokens ~8k；
-            # max_tokens=8192 时 content 被全吃掉 → 0 章节；提到 16384 给正文留余量。
-            max_tokens=16384,
-            response_format={"type": "json_object"},
-        )
+        response = await _extract_with_retry(ai_adapter, user_prompt)
         result = json.loads(response)
 
         # Handle both {"chapters": [...]} and direct [...] formats
