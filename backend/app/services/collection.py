@@ -63,6 +63,23 @@ async def analyze_collection_needs(
         (await db.execute(select(Contract))).scalars().all()
     )
 
+    # ── 加载本项目已落库选择（用户手动链接 + 历史 auto）──
+    pq_rows = (await db.execute(
+        select(ProjectQualification)
+        .where(ProjectQualification.project_id == project_id)
+        .options(selectinload(ProjectQualification.qualification))
+    )).scalars().all()
+    pp_rows = (await db.execute(
+        select(ProjectPersonnel)
+        .where(ProjectPersonnel.project_id == project_id)
+        .options(selectinload(ProjectPersonnel.personnel))
+    )).scalars().all()
+    pc_rows = (await db.execute(
+        select(ProjectContract)
+        .where(ProjectContract.project_id == project_id)
+        .options(selectinload(ProjectContract.contract))
+    )).scalars().all()
+
     document_items = []
     personnel_items = []
 
@@ -73,14 +90,42 @@ async def analyze_collection_needs(
         category = doc.get("category", "other") if isinstance(doc, dict) else "other"
 
         if category == "contract_performance":
-            matches = _match_contracts(name, contracts)
+            auto = _match_contracts(name, contracts)
+            persisted = [
+                {
+                    "source": "contract", "selection": "selected",
+                    "id": pc.contract_id, "link_id": pc.id,
+                    "name": pc.contract.project_name if pc.contract else pc.requirement_name,
+                    "procurement_unit": pc.contract.procurement_unit if pc.contract else "",
+                    "contract_amount": pc.contract.contract_amount if pc.contract else "",
+                    "contract_date": str(pc.contract.contract_date) if pc.contract and pc.contract.contract_date else "",
+                }
+                for pc in pc_rows if pc.requirement_name == name
+            ]
+            matches, match_status = _merge_matches(persisted, auto, "contract")
         else:
-            matches = _match_document(name, category, quals, company)
+            auto = _match_document(name, category, quals, company)
+            persisted = [
+                {
+                    "source": "qualification", "selection": "selected",
+                    "id": pq.qualification_id, "link_id": pq.id,
+                    "name": pq.qualification.name if pq.qualification else pq.requirement_name,
+                    "cert_number": pq.qualification.cert_number if pq.qualification else "",
+                    "issuing_authority": pq.qualification.issuing_authority if pq.qualification else "",
+                }
+                for pq in pq_rows if pq.requirement_name == name
+            ]
+            matches, match_status = _merge_matches(persisted, auto, category)
+            # 自动候选标 selection=auto（已落库选择在 persisted 里已是 selected）
+            if match_status in ("auto", "matched"):
+                for m in matches:
+                    m.setdefault("selection", "auto")
+
         document_items.append({
             "requirement": {"name": name, "category": category},
-            "matched": len(matches) > 0,
+            "matched": match_status in ("selected", "auto", "uploaded"),
             "matches": matches,
-            "match_status": "matched" if matches else "missing",
+            "match_status": match_status,
         })
 
     # ── Required personnel ──
@@ -90,21 +135,36 @@ async def analyze_collection_needs(
         certs = p_req.get("certifications", []) if isinstance(p_req, dict) else []
         count = p_req.get("count", 1) if isinstance(p_req, dict) else 1
 
-        matches = _match_personnel(role, certs, personnel_list)
+        auto = _match_personnel(role, certs, personnel_list)
+        persisted = [
+            {
+                "source": "personnel", "selection": "selected",
+                "id": pp.personnel_id, "link_id": pp.id,
+                "name": pp.personnel.name if pp.personnel else "(未指定)",
+                "education": pp.personnel.education if pp.personnel else "",
+                "tags": pp.personnel.tags if pp.personnel else "",
+                "role": pp.role,
+            }
+            for pp in pp_rows if pp.role == role
+        ]
+        matches, match_status = _merge_matches(persisted, auto, "personnel")
+        if match_status in ("auto", "matched"):
+            for m in matches:
+                m.setdefault("selection", "auto")
         personnel_items.append({
             "requirement": {
                 "name": role,
                 "category": "personnel",
-                "details": f"需{cert_count}人" if count > 1 else "",
+                "details": f"需{count}人" if count > 1 else "",
             },
-            "matched": len(matches) > 0,
+            "matched": match_status in ("selected", "auto", "uploaded"),
             "matches": matches,
-            "match_status": "matched" if matches else "missing",
+            "match_status": match_status,
         })
 
     # ── Determine completeness ──
     all_matched = all(
-        item["match_status"] == "matched"
+        item["match_status"] in ("selected", "auto", "uploaded")
         for item in document_items + personnel_items
     )
 
@@ -149,6 +209,7 @@ def _match_document(
                 "name": q.name,
                 "cert_number": q.cert_number or "",
                 "issuing_authority": q.issuing_authority or "",
+                "confidence": "high",
             })
 
     return matches
@@ -167,17 +228,17 @@ def _match_personnel(
         # Match by tags containing role keywords or certifications
         role_keywords = role.lower().replace("项目", "").replace("负责人", "").replace("人员", "")
         if role_keywords and role_keywords in tags:
-            matches.append(_personnel_to_dict(p))
+            matches.append(_personnel_to_dict(p, confidence="high"))
             continue
 
         for cert in certs:
             if cert.lower() in tags:
-                matches.append(_personnel_to_dict(p))
+                matches.append(_personnel_to_dict(p, confidence="high"))
                 break
 
     # If no tag-based match, return all personnel as candidates
     if not matches and personnel_list:
-        matches = [_personnel_to_dict(p) for p in personnel_list[:5]]
+        matches = [_personnel_to_dict(p, confidence="low") for p in personnel_list[:5]]
 
     return matches
 
@@ -236,6 +297,7 @@ def _match_contracts(
             "contract_amount": c.contract_amount or "",
             "contract_date": str(c.contract_date) if c.contract_date else "",
             "service_period": c.service_period or "",
+            "confidence": "high",
         })
 
     # If no date-filtered match, return all as candidates
@@ -249,6 +311,7 @@ def _match_contracts(
                 "contract_amount": c.contract_amount or "",
                 "contract_date": str(c.contract_date) if c.contract_date else "",
                 "service_period": c.service_period or "",
+                "confidence": "low",
             }
             for c in contracts[:10]
         ]
@@ -256,7 +319,7 @@ def _match_contracts(
     return matches
 
 
-def _personnel_to_dict(p: Personnel) -> Dict[str, Any]:
+def _personnel_to_dict(p: Personnel, confidence: str = "high") -> Dict[str, Any]:
     return {
         "source": "personnel",
         "id": p.id,
@@ -264,6 +327,7 @@ def _personnel_to_dict(p: Personnel) -> Dict[str, Any]:
         "education": p.education or "",
         "phone": p.phone or "",
         "tags": p.tags or "",
+        "confidence": confidence,
     }
 
 
@@ -272,6 +336,138 @@ def _fuzzy_match(needle: str, haystack: str) -> bool:
     n = needle.lower().replace(" ", "").replace("（", "(").replace("）", ")")
     h = haystack.lower().replace(" ", "").replace("（", "(").replace("）", ")")
     return n in h or h in n
+
+
+def _merge_matches(
+    persisted: list[dict],
+    auto: list[dict],
+    category: str,
+) -> tuple[list[dict], str]:
+    """合并已落库选择与自动匹配候选.
+
+    Returns:
+        (matches, match_status):
+        - 有已落库选择 → (persisted, "selected")
+        - 无已落库、有确定性自动候选 → (auto, "auto")
+        - 无已落库、仅有非确定性候选 → (auto, "matched")
+        - 全无 → ([], "missing")
+    """
+    if persisted:
+        return persisted, "selected"
+    if not auto:
+        return [], "missing"
+    if _is_confident_auto(category, auto):
+        return auto, "auto"
+    return auto, "matched"
+
+
+def _is_confident_auto(category: str, auto: list[dict]) -> bool:
+    """自动匹配是否确定性（可安全自动占用）.
+
+    确定性条件：
+    - 候选带真实资源 id（排除公司资料无 id 的匹配，如营业执照）
+    - 候选带 confidence="high"（排除人员"无标签返回前 N 人"、合同
+      "无年份/服务关键词返回前 N 条"的兜底分支）
+    """
+    if not auto:
+        return False
+    first = auto[0]
+    if not first.get("id"):
+        return False
+    return first.get("confidence") == "high"
+
+
+def _pick_auto_occupy(document_items: list, personnel_items: list) -> list[dict]:
+    """从三态条目中选出需要自动占用的行（纯计算，不触库）.
+
+    Returns:
+        list of {"model", "requirement_name", "resource_id"}
+        model ∈ {"qualification", "personnel", "contract"}
+    """
+    rows: list[dict] = []
+    for item in document_items:
+        if item.get("match_status") != "auto":
+            continue
+        req_name = item["requirement"]["name"]
+        category = item["requirement"].get("category", "other")
+        for m in item.get("matches", []):
+            if not m.get("id") or m.get("confidence") != "high":
+                continue
+            model = "contract" if category == "contract_performance" else "qualification"
+            rows.append({"model": model, "requirement_name": req_name, "resource_id": m["id"]})
+    for item in personnel_items:
+        if item.get("match_status") != "auto":
+            continue
+        role = item["requirement"]["name"]
+        for m in item.get("matches", []):
+            if not m.get("id") or m.get("confidence") != "high":
+                continue
+            rows.append({"model": "personnel", "requirement_name": role, "resource_id": m["id"]})
+    return rows
+
+
+async def _auto_occupy_confident_matches(
+    project_id: str,
+    rows: list[dict],
+    db: AsyncSession,
+) -> int:
+    """按 _pick_auto_occupy 的结果批量落库（幂等）.
+
+    幂等策略：若该需求已有任何已落库行则整体跳过（不重复占用）。
+    """
+    occupied = 0
+    for spec in rows:
+        model_name = spec["model"]
+        req_name = spec["requirement_name"]
+        if model_name == "qualification":
+            existing = (await db.execute(
+                select(ProjectQualification).where(
+                    ProjectQualification.project_id == project_id,
+                    ProjectQualification.requirement_name == req_name,
+                )
+            )).scalars().all()
+        elif model_name == "personnel":
+            existing = (await db.execute(
+                select(ProjectPersonnel).where(
+                    ProjectPersonnel.project_id == project_id,
+                    ProjectPersonnel.role == req_name,
+                )
+            )).scalars().all()
+        else:
+            existing = (await db.execute(
+                select(ProjectContract).where(
+                    ProjectContract.project_id == project_id,
+                    ProjectContract.requirement_name == req_name,
+                )
+            )).scalars().all()
+        if existing:
+            continue
+        if model_name == "qualification":
+            db.add(ProjectQualification(
+                project_id=project_id,
+                qualification_id=spec["resource_id"],
+                requirement_name=req_name,
+                match_status="matched",
+            ))
+        elif model_name == "personnel":
+            db.add(ProjectPersonnel(
+                project_id=project_id,
+                personnel_id=spec["resource_id"],
+                role=req_name,
+                requirement_desc=req_name,
+                match_status="assigned",
+            ))
+        else:
+            db.add(ProjectContract(
+                project_id=project_id,
+                contract_id=spec["resource_id"],
+                requirement_name=req_name,
+                match_status="matched",
+            ))
+        occupied += 1
+    if occupied:
+        await db.flush()
+    return occupied
 
 
 # ── Assignment operations ────────────────────────────────────────────────
@@ -392,6 +588,17 @@ async def confirm_collection(project_id: str, db: AsyncSession) -> BidProject:
     project = await db.get(BidProject, project_id)
     if not project:
         raise ValueError(f"Project {project_id} not found")
+
+    # 批量自动占用确定性自动匹配（幂等：只为零落库的需求占用，用户可随后移除/替换）
+    try:
+        items = await analyze_collection_needs(project_id, db)
+        rows = _pick_auto_occupy(items["document_items"], items["personnel_items"])
+        if rows:
+            await _auto_occupy_confident_matches(project_id, rows, db)
+            logger.info("confirm_collection auto-occupied %d rows", len(rows))
+    except Exception as exc:
+        logger.warning("Auto-occupy skipped: %s", exc)
+
     project.status = "parsed"
     await db.flush()
     await db.refresh(project)
