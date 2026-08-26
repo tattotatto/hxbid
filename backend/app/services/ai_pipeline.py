@@ -12,7 +12,7 @@ import datetime
 import json
 import logging
 import re
-from typing import Any, AsyncIterator, Callable, Dict, List
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import selectinload
 
@@ -302,7 +302,7 @@ def _requirements_summary(requirements: dict) -> str:
 # 1. parse_bid_requirements
 # ---------------------------------------------------------------------------
 
-async def parse_bid_requirements(document_text: str) -> dict:
+async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] = None) -> dict:
     """Parse bidding document text into structured requirements via AI.
 
     Truncates input to MAX_INPUT_CHARS characters before sending to the model.
@@ -350,6 +350,7 @@ async def parse_bid_requirements(document_text: str) -> dict:
     response = await ai_adapter.chat_completion(
         messages=messages,
         temperature=0.3,
+        max_tokens=max_tokens,
         response_format={"type": "json_object"},
     )
 

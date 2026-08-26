@@ -36,7 +36,7 @@ def _truncate(text: str, limit: int = 12000) -> str:
 
 async def _analyze_tender(tender_text: str) -> dict:
     """分析招标文件:需求(复用 parse_bid_requirements)+ 格式(复用 extract_format_from_document)."""
-    requirements = await parse_bid_requirements(tender_text)
+    requirements = await parse_bid_requirements(tender_text, max_tokens=8192)
     format_template = None
     try:
         format_template = await extract_format_from_document(tender_text, ai_adapter)
