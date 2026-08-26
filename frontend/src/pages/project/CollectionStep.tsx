@@ -53,6 +53,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
   const [quickPersonnelRole, setQuickPersonnelRole] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [uploadReq, setUploadReq] = useState('')
+  const [company, setCompany] = useState<any>(null)
 
   const fetchStatus = useCallback(async () => {
     setLoading(true)
@@ -68,15 +69,21 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
 
   useEffect(() => { fetchStatus() }, [fetchStatus])
 
+  useEffect(() => {
+    client.get('/company/').then((r) => setCompany(r.data)).catch(() => {})
+  }, [])
+
   // ── Actions ──
 
-  const handleLinkQual = async (qualId: string, reqName: string) => {
+  const handleLinkQuals = async (quals: any[], reqName: string) => {
     try {
-      await client.post(`/collection/${projectId}/qualification/link`, {
-        qualification_id: qualId,
-        requirement_name: reqName,
-      })
-      message.success('已关联资质')
+      for (const q of quals) {
+        await client.post(`/collection/${projectId}/qualification/link`, {
+          qualification_id: q.id,
+          requirement_name: reqName,
+        })
+      }
+      message.success(`已关联 ${quals.length} 项资质`)
       setPickerOpen(false)
       fetchStatus()
     } catch {
@@ -146,6 +153,32 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
     }
   }
 
+  // 移除某条匹配（人员走 unassign，合同/资质走 unlink）
+  const removeMatch = async (item: ResourceMatch, m: any) => {
+    try {
+      if (item.requirement.category === 'personnel') {
+        await client.post(`/collection/${projectId}/personnel/unassign`, { assignment_id: m.link_id })
+      } else if (item.requirement.category === 'contract_performance') {
+        await client.post(`/collection/${projectId}/contract/unlink`, { requirement_name: item.requirement.name, resource_id: m.id })
+      } else {
+        await client.post(`/collection/${projectId}/qualification/unlink`, { requirement_name: item.requirement.name, resource_id: m.id })
+      }
+      message.success('已移除')
+      fetchStatus()
+    } catch {
+      message.error('移除失败')
+    }
+  }
+
+  // 三态状态 → 标签文案/颜色/图标
+  const statusMeta = (s: string) => {
+    if (s === 'selected') return { text: '已选择', color: 'green', icon: <CheckCircleOutlined /> }
+    if (s === 'uploaded') return { text: '已上传', color: 'green', icon: <CheckCircleOutlined /> }
+    if (s === 'auto') return { text: '自动匹配', color: 'blue', icon: <LinkOutlined /> }
+    if (s === 'matched') return { text: '候选', color: 'orange', icon: <LinkOutlined /> }
+    return { text: '待处理', color: 'red', icon: <CloseCircleOutlined /> }
+  }
+
   // ── Stats ──
 
   const docTotal = data?.document_items.length ?? 0
@@ -154,6 +187,11 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
   const persMatched = data?.personnel_items.filter((p) => p.match_status !== 'missing').length ?? 0
   const total = docTotal + persTotal
   const done = docMatched + persMatched
+
+  const allSelected = [
+    ...(data?.document_items ?? []),
+    ...(data?.personnel_items ?? []),
+  ].filter((it) => it.match_status === 'selected' || it.match_status === 'auto' || it.match_status === 'uploaded')
 
   // ── Render ──
 
@@ -179,18 +217,15 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
             loading={loading}
             dataSource={data.document_items}
             renderItem={(item: ResourceMatch) => {
-              const isDone = item.match_status !== 'missing'
-              const categoryLabel =
-                item.requirement.category === 'company' ? '公司证照' :
-                item.requirement.category === 'financial' ? '财务证明' :
-                item.requirement.category === 'qualification' ? '专业资质' :
-                item.requirement.category === 'contract_performance' ? '业绩合同' : '其他'
+              const meta = statusMeta(item.match_status)
+              const isDone = item.match_status === 'selected' || item.match_status === 'uploaded' || item.match_status === 'auto'
 
               return (
                 <List.Item
+                  style={isDone ? { background: '#f6ffed', borderLeft: '3px solid #52c41a', paddingLeft: 12 } : {}}
                   actions={[
                     isDone ? (
-                      <Tag color="green" icon={<CheckCircleOutlined />}>已匹配</Tag>
+                      <Tag color={meta.color} icon={meta.icon}>{meta.text}</Tag>
                     ) : (
                       <Space>
                         <Button
@@ -218,22 +253,29 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                   <List.Item.Meta
                     title={
                       <span>
-                        {isDone ? <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 8 }} /> :
-                         <CloseCircleOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />}
+                        <span style={{ marginRight: 8, color: meta.color }}>{meta.icon}</span>
                         {item.requirement.name}
                       </span>
                     }
                     description={
                       <span>
-                        <Tag>{categoryLabel}</Tag>
-                        {isDone && item.matches[0] && (
-                          <span style={{ color: '#666', fontSize: 12 }}>
-                            {item.matches[0].name}
-                            {item.requirement.category === 'contract_performance'
-                              ? item.matches[0].contract_date ? ` (${item.matches[0].contract_date})` : ''
-                              : item.matches[0].cert_number ? ` (${item.matches[0].cert_number})` : ''
-                            }
-                          </span>
+                        {item.matches.length > 0 && (
+                          <div style={{ marginTop: 4 }}>
+                            {item.matches.map((m: any, i: number) => (
+                              <Tag
+                                key={m.link_id || m.id || i}
+                                closable={!!m.link_id}
+                                color={m.selection === 'auto' ? 'blue' : 'green'}
+                                onClose={async (e) => {
+                                  e.preventDefault()
+                                  await removeMatch(item, m)
+                                }}
+                              >
+                                {m.name}
+                                {m.selection === 'auto' ? '（自动）' : ''}
+                              </Tag>
+                            ))}
+                          </div>
                         )}
                       </span>
                     }
@@ -252,12 +294,15 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
             loading={loading}
             dataSource={data.personnel_items}
             renderItem={(item: ResourceMatch) => {
-              const isDone = item.match_status !== 'missing'
+              const meta = statusMeta(item.match_status)
+              const isDone = item.match_status === 'selected' || item.match_status === 'uploaded' || item.match_status === 'auto'
+
               return (
                 <List.Item
+                  style={isDone ? { background: '#f6ffed', borderLeft: '3px solid #52c41a', paddingLeft: 12 } : {}}
                   actions={[
                     isDone ? (
-                      <Tag color="green" icon={<CheckCircleOutlined />}>已分配</Tag>
+                      <Tag color={meta.color} icon={meta.icon}>{meta.text}</Tag>
                     ) : (
                       <Space>
                         <Button
@@ -285,8 +330,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                   <List.Item.Meta
                     title={
                       <span>
-                        {isDone ? <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 8 }} /> :
-                         <CloseCircleOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />}
+                        <span style={{ marginRight: 8, color: meta.color }}>{meta.icon}</span>
                         {item.requirement.name}
                         {item.requirement.details && (
                           <span style={{ color: '#999', fontSize: 12, marginLeft: 8 }}>{item.requirement.details}</span>
@@ -294,12 +338,26 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                       </span>
                     }
                     description={
-                      isDone && item.matches[0] && (
-                        <span style={{ color: '#666', fontSize: 12 }}>
-                          已选：{item.matches[0].name}
-                          {item.matches[0].tags ? ` (${item.matches[0].tags})` : ''}
-                        </span>
-                      )
+                      <span>
+                        {item.matches.length > 0 && (
+                          <div style={{ marginTop: 4 }}>
+                            {item.matches.map((m: any, i: number) => (
+                              <Tag
+                                key={m.link_id || m.id || i}
+                                closable={!!m.link_id}
+                                color={m.selection === 'auto' ? 'blue' : 'green'}
+                                onClose={async (e) => {
+                                  e.preventDefault()
+                                  await removeMatch(item, m)
+                                }}
+                              >
+                                {m.name}
+                                {m.selection === 'auto' ? '（自动）' : ''}
+                              </Tag>
+                            ))}
+                          </div>
+                        )}
+                      </span>
                     }
                   />
                 </List.Item>
@@ -320,6 +378,34 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         />
       )}
 
+      {/* 已选资源汇总 */}
+      {allSelected.length > 0 && (
+        <Card title="已选资源汇总" size="small" style={{ marginBottom: 16 }}>
+          {allSelected.map((it) => (
+            <div key={it.requirement.name} style={{ marginBottom: 8 }}>
+              <Space>
+                <Tag color="blue">{it.requirement.name}</Tag>
+                <span style={{ color: '#666' }}>
+                  {it.matches.map((m: any) => m.name).join('、')}
+                </span>
+              </Space>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* 公司信息 */}
+      {company && (
+        <Card title="公司信息" size="small" style={{ marginBottom: 16 }}>
+          <Space wrap>
+            <Tag>{company.company_name}</Tag>
+            <span style={{ color: '#999' }}>统一社会信用代码：{company.business_license_number || '-'}</span>
+            <span style={{ color: '#999' }}>法定代表人：{company.legal_rep_name || '-'}</span>
+          </Space>
+          <div style={{ color: '#999', fontSize: 12, marginTop: 4 }}>生成标书时，公司信息将自动注入所有章节。</div>
+        </Card>
+      )}
+
       {/* Action bar */}
       <Card>
         <Space>
@@ -338,7 +424,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         requirementName={pickerReq}
         defaultMode={pickerDefaultMode}
         onCancel={() => setPickerOpen(false)}
-        onSelectQual={(qual) => handleLinkQual(qual.id, pickerReq)}
+        onSelectQuals={(list) => handleLinkQuals(list, pickerReq)}
         onSelectPersonnel={(list) => handleAssignPersonnelList(list, pickerReq)}
         onSelectContract={(list) => handleLinkContracts(list, pickerReq)}
         onSelectHistoryBid={(bid) => {

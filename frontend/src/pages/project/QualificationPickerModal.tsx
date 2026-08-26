@@ -49,16 +49,15 @@ interface CompanyProfile {
 type PickerMode = 'qualification' | 'personnel' | 'contract' | 'history_bid' | 'company'
 
 // 支持多选的模式
-const MULTI_SELECT_MODES: PickerMode[] = ['personnel', 'contract']
+const MULTI_SELECT_MODES: PickerMode[] = ['qualification', 'personnel', 'contract']
 
 interface Props {
   open: boolean
   requirementName: string
   defaultMode?: PickerMode
   onCancel: () => void
-  // 单选（资质、历史投标）
-  onSelectQual: (qual: Qualification) => void
-  // 多选（人员、合同）
+  // 多选（资质、人员、合同）
+  onSelectQuals: (quals: Qualification[]) => void
   onSelectPersonnel?: (personnel: Personnel[]) => void
   onSelectContract?: (contracts: Contract[]) => void
   // 单选
@@ -67,7 +66,7 @@ interface Props {
 
 export default function QualificationPickerModal({
   open, requirementName, defaultMode, onCancel,
-  onSelectQual, onSelectPersonnel, onSelectContract, onSelectHistoryBid,
+  onSelectQuals, onSelectPersonnel, onSelectContract, onSelectHistoryBid,
 }: Props) {
   const [mode, setMode] = useState<PickerMode>(defaultMode ?? 'qualification')
   const [quals, setQuals] = useState<Qualification[]>([])
@@ -128,13 +127,16 @@ export default function QualificationPickerModal({
     : historyBids
 
   const selectedRows = {
+    qualification: quals.filter((q) => selectedRowKeys.includes(q.id)),
     personnel: personnel.filter((p) => selectedRowKeys.includes(p.id)),
     contract: contracts.filter((c) => selectedRowKeys.includes(c.id)),
   }
 
   const handleConfirmMulti = () => {
     if (selectedRowKeys.length === 0) { message.warning('请至少选择一项'); return }
-    if (mode === 'personnel') {
+    if (mode === 'qualification') {
+      onSelectQuals(selectedRows.qualification)
+    } else if (mode === 'personnel') {
       onSelectPersonnel?.(selectedRows.personnel)
     } else if (mode === 'contract') {
       onSelectContract?.(selectedRows.contract)
@@ -156,9 +158,6 @@ export default function QualificationPickerModal({
     { title: '名称', dataIndex: 'name', key: 'name' },
     { title: '证书编号', dataIndex: 'cert_number', key: 'cert_number' },
     { title: '发证机构', dataIndex: 'issuing_authority', key: 'issuing_authority' },
-    { title: '', key: 'action', render: (_: any, r: Qualification) => (
-      <Button type="link" onClick={() => onSelectQual(r)}>选择</Button>
-    )},
   ]
 
   const personnelColumns = [
@@ -213,7 +212,7 @@ export default function QualificationPickerModal({
     const shared = { loading, size: 'small' as const, pagination: false as const }
     switch (mode) {
       case 'qualification':
-        return <Table dataSource={filteredQuals} columns={qualColumns} rowKey="id" {...shared} />
+        return <Table dataSource={filteredQuals} columns={qualColumns} rowKey="id" rowSelection={multiSelect} {...shared} />
       case 'personnel':
         return <Table dataSource={filteredPersonnel} columns={personnelColumns} rowKey="id" rowSelection={multiSelect} {...shared} />
       case 'contract':
