@@ -79,13 +79,21 @@ def _set_paragraph_spacing(paragraph, line_spacing=1.5):
 
 
 def _add_body_paragraph(doc, text, style):
-    """Add a standard body paragraph with first-line indent."""
+    """Add a standard body paragraph with first-line indent.
+
+    Inline markdown markers are stripped first (via ``_clean_lone_symbols``)
+    so ``**bold**`` / ``*italic*`` / ``#`` artifacts left by the AI never
+    appear literally in the final Word document.
+    """
+    cleaned = _clean_lone_symbols(text)
+    if not cleaned:
+        return None
     p = doc.add_paragraph()
     _set_paragraph_spacing(p, style["body_line_spacing"])
     p.alignment = WD_ALIGN_PARAGRAPH.LEFT
     pf = p.paragraph_format
     pf.first_line_indent = Pt(24)
-    run = p.add_run(text)
+    run = p.add_run(cleaned)
     _set_run_font(run, style["body_font_name"], style["body_font_size"])
     return p
 
@@ -568,7 +576,7 @@ def _render_bid_opening_summary_section(doc, opening_content, style):
         p = doc.add_paragraph()
         _set_paragraph_spacing(p, style["body_line_spacing"])
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        run = p.add_run(nl)
+        run = p.add_run(_clean_lone_symbols(nl))
         _set_run_font(run, style["body_font_name"], style["body_font_size"])
 
     # Render signature block
@@ -576,7 +584,7 @@ def _render_bid_opening_summary_section(doc, opening_content, style):
         p = doc.add_paragraph()
         _set_paragraph_spacing(p, style["body_line_spacing"])
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        run = p.add_run(sl)
+        run = p.add_run(_clean_lone_symbols(sl))
         _set_run_font(run, style["body_font_name"], style["body_font_size"])
 
 
@@ -861,7 +869,7 @@ def _render_table(doc, rows, style, is_first_row_header=True):
             cell = table.rows[ri].cells[ci]
             # Clear default empty paragraph
             cell.paragraphs[0].clear()
-            run = cell.paragraphs[0].add_run(cell_text)
+            run = cell.paragraphs[0].add_run(_clean_lone_symbols(cell_text))
             is_header = is_first_row_header and ri == 0
             _set_run_font(
                 run,
@@ -1328,7 +1336,8 @@ def _render_file_section_content(doc, content, style):
     """
     lines = content.split('\n')
     for line in lines:
-        stripped = line.strip()
+        # Strip markdown markers first so headings are detected on clean text
+        stripped = _clean_lone_symbols(line.strip())
         if not stripped:
             # Blank line → empty paragraph spacer
             spacer = doc.add_paragraph()
@@ -1799,7 +1808,7 @@ def _render_child_content(doc, content, style, prefer_table=False):
             p_title = doc.add_paragraph()
             _set_paragraph_spacing(p_title, style["body_line_spacing"])
             p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run_title = p_title.add_run(stripped)
+            run_title = p_title.add_run(_clean_lone_symbols(stripped))
             _set_run_font(run_title, style["body_font_name"], style["body_font_size"], bold=True)
             in_sc_table = True
             idx += 1
@@ -1867,6 +1876,14 @@ def _render_child_content(doc, content, style, prefer_table=False):
                             run, style["heading3_font_name"],
                             style["heading3_font_size"], bold=True,
                         )
+            idx += 1
+            continue
+
+        # Markdown bullet line (- x / * x): drop the marker, keep the text
+        if _is_bullet_item(stripped):
+            bullet_text = _get_bullet_text(stripped)
+            if bullet_text:
+                _add_body_paragraph(doc, bullet_text, style)
             idx += 1
             continue
 

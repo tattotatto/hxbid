@@ -530,6 +530,13 @@ async def main() -> int:
                 size_kb = len(docx_bytes) / 1024
                 checks.append((f"docx 大小合理（{size_kb:.1f} KB ≥ 10 KB）", size_kb >= 10))
                 print(f"  - docx 大小: {size_kb:.1f} KB")
+
+                # Diagnostic: AI 正文不应残留 markdown 标记（* #）。渲染层已统一清理，
+                # 这里若再出现说明有新的泄漏路径，标 warning 不阻塞（与空标题同一策略）。
+                md_leaks = [t for t in (all_para_text + table_texts) if ("*" in t or "#" in t)]
+                if md_leaks:
+                    print(f"  ⚠️  docx 发现 markdown 残留标记 {len(md_leaks)} 处"
+                          f"（warning，不阻塞通过）: {md_leaks[:3]}")
     except Exception as exc:
         print(f"  ⚠️  docx 校验异常: {exc}")
         import traceback
