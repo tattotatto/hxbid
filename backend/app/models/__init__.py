@@ -12,6 +12,7 @@ from app.models.template import BidTemplate
 from app.models.edit_rule import EditRule
 from app.models.company_profile import CompanyProfile
 from app.models.contract import Contract
+from app.models.bid_lesson import BidLesson
 
 __all__ = [
     "User",
@@ -28,4 +29,5 @@ __all__ = [
     "CompanyProfile",
     "Contract",
     "ProjectContract",
+    "BidLesson",
 ]
