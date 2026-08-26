@@ -431,3 +431,39 @@ async def assemble_chapter_context(
                 ch["content"] = ch["content"][:budget_per]
 
     return similar_chapters, matched_quals, matched_personnel, source_summary
+
+
+async def retrieve_lesson_references(
+    requirements: dict,
+    project_id: str,
+    n_results: int = 3,
+) -> List[Dict[str, Any]]:
+    """按相似招标要求召回已学习的「要求→应答」对齐对.
+
+    从 requirements 提取关键词构建查询,只保留 source=lesson 的结果,
+    供生成时把「这条要求当时是怎么应答的」注入参考。
+    """
+    if not vector_store.is_available():
+        return []
+
+    queries = _build_query_variants("投标要求应答写法", requirements)
+    results: List[Dict[str, Any]] = []
+    for q in queries:
+        hits = vector_store.search_similar(q, n_results=n_results)
+        for h in hits:
+            md = h.get("metadata") or {}
+            if md.get("source") != "lesson":
+                continue
+            if str(md.get("pair_id", "")) == str(project_id):
+                continue  # 避免自召回
+            results.append(h)
+    # 按距离去重
+    seen: set[str] = set()
+    deduped = []
+    for r in sorted(results, key=lambda x: x.get("distance", 1.0)):
+        key = (r.get("metadata", {}).get("pair_id", ""), r.get("content", "")[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    return deduped[:n_results]

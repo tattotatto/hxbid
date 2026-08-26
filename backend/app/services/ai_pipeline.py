@@ -1655,7 +1655,7 @@ async def generate_bid_with_deep_outline(
     from app.services.subsection_generator import prepare_outline_tree, get_outline_stats
     from app.services.content_assembler import build_final_chapters_payload
     from app.services.reference_analyzer import get_reference_outlines
-    from app.services.rag import retrieve_similar_chapters
+    from app.services.rag import retrieve_lesson_references, retrieve_similar_chapters
     from app.services.token_budget import collect_leaf_sections
     from app.models.project import BidProject
     from sqlalchemy import select as sa_select
@@ -1921,7 +1921,12 @@ async def generate_bid_with_deep_outline(
                     requirements=requirements,
                     project_id=project_id,
                 )
-                return [s.get("content", "") for s in similar if s.get("content")]
+                lessons = await retrieve_lesson_references(
+                    requirements, project_id, n_results=3
+                )
+                refs = [s.get("content", "") for s in similar if s.get("content")]
+                refs += [s.get("content", "") for s in lessons if s.get("content")]
+                return refs
         except Exception as exc:
             logger.debug("RAG failed for '%s': %s", leaf.get("title", ""), exc)
             return []
