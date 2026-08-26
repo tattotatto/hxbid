@@ -428,40 +428,53 @@ async def _auto_occupy_confident_matches(
 ) -> int:
     """按 _pick_auto_occupy 的结果批量落库（幂等 + 容量封顶）.
 
-    幂等/封顶策略：对每个需求，若「已落库行数 + 本批已插入行数」达到
-    spec["count"] 则跳过该需求后续行。本批已插入行数用内存 dict 按
-    (model, requirement_name) 累计（不依赖 session autoflush 可见性）。
+    rows 由 _pick_auto_occupy 产出、按需求连续分组。对每个 (model,
+    requirement_name) 只查一次既有行（查询发生在该需求任何 add 之前，
+    故 SELECT 只命中「调用前已落库」的行，不叠加 SQLAlchemy autoflush
+    把本批新行刷进库造成的双计数），再按 count 封顶插入前 N 个。
     """
     occupied = 0
-    batch_inserted: dict[tuple[str, str], int] = {}
+    current_key: tuple[str, str] | None = None
+    existing_count = 0
+    remaining = 0
+    inserted = 0
+
     for spec in rows:
         model_name = spec["model"]
         req_name = spec["requirement_name"]
         capacity = spec["count"]
-        if model_name == "qualification":
-            existing = (await db.execute(
-                select(ProjectQualification).where(
-                    ProjectQualification.project_id == project_id,
-                    ProjectQualification.requirement_name == req_name,
-                )
-            )).scalars().all()
-        elif model_name == "personnel":
-            existing = (await db.execute(
-                select(ProjectPersonnel).where(
-                    ProjectPersonnel.project_id == project_id,
-                    ProjectPersonnel.role == req_name,
-                )
-            )).scalars().all()
-        else:
-            existing = (await db.execute(
-                select(ProjectContract).where(
-                    ProjectContract.project_id == project_id,
-                    ProjectContract.requirement_name == req_name,
-                )
-            )).scalars().all()
         key = (model_name, req_name)
-        if len(existing) + batch_inserted.get(key, 0) >= capacity:
+
+        if key != current_key:
+            # 换到新需求：首次查询既有行（本需求尚未 add，只命中既有行）
+            current_key = key
+            if model_name == "qualification":
+                existing_count = len((await db.execute(
+                    select(ProjectQualification).where(
+                        ProjectQualification.project_id == project_id,
+                        ProjectQualification.requirement_name == req_name,
+                    )
+                )).scalars().all())
+            elif model_name == "personnel":
+                existing_count = len((await db.execute(
+                    select(ProjectPersonnel).where(
+                        ProjectPersonnel.project_id == project_id,
+                        ProjectPersonnel.role == req_name,
+                    )
+                )).scalars().all())
+            else:
+                existing_count = len((await db.execute(
+                    select(ProjectContract).where(
+                        ProjectContract.project_id == project_id,
+                        ProjectContract.requirement_name == req_name,
+                    )
+                )).scalars().all())
+            remaining = max(0, capacity - existing_count)
+            inserted = 0
+
+        if inserted >= remaining:
             continue
+
         if model_name == "qualification":
             db.add(ProjectQualification(
                 project_id=project_id,
@@ -484,8 +497,9 @@ async def _auto_occupy_confident_matches(
                 requirement_name=req_name,
                 match_status="matched",
             ))
-        batch_inserted[key] = batch_inserted.get(key, 0) + 1
+        inserted += 1
         occupied += 1
+
     if occupied:
         await db.flush()
     return occupied

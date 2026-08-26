@@ -149,50 +149,88 @@ class _FakeResult:
 
 class TestAutoOccupyConfidentMatches:
     @pytest.mark.asyncio
-    async def test_inserts_when_below_capacity(self):
-        # 已落库 1 行 + count=2 → 仍插入第 2 行
-        db = AsyncMock()
-        db.execute = AsyncMock(return_value=_FakeResult([object()]))
-        db.add = MagicMock()
-        db.flush = AsyncMock()
-
-        rows = [{"model": "personnel", "requirement_name": "项目经理", "resource_id": "p2", "count": 2}]
+    async def test_fills_count_when_no_existing(self):
+        # count=2、无既有行、2 条 high 候选 → 插入 2 行
+        db = self._make_db([[]])
+        rows = [
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p1", "count": 2},
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p2", "count": 2},
+        ]
         occupied = await _auto_occupy_confident_matches("proj1", rows, db)
-
-        assert occupied == 1
-        db.add.assert_called_once()
+        assert occupied == 2
+        assert db.add.call_count == 2
         db.flush.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_skips_when_at_capacity(self):
-        # 已落库 2 行 + count=2 → 跳过
-        db = AsyncMock()
-        db.execute = AsyncMock(return_value=_FakeResult([object(), object()]))
-        db.add = MagicMock()
-        db.flush = AsyncMock()
-
-        rows = [{"model": "personnel", "requirement_name": "项目经理", "resource_id": "p2", "count": 2}]
+    async def test_fills_remaining_when_partial_existing(self):
+        # count=2、既有 1 行、2 条 high 候选 → 只补 1 行
+        db = self._make_db([[object()]])
+        rows = [
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p1", "count": 2},
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p2", "count": 2},
+        ]
         occupied = await _auto_occupy_confident_matches("proj1", rows, db)
+        assert occupied == 1
+        assert db.add.call_count == 1
+        db.flush.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_caps_at_count_one(self):
+        # count=1、既有 0 行、2 条 high 候选 → 只插 1 行（cap=1 生效）
+        db = self._make_db([[]])
+        rows = [
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p1", "count": 1},
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p2", "count": 1},
+        ]
+        occupied = await _auto_occupy_confident_matches("proj1", rows, db)
+        assert occupied == 1
+        assert db.add.call_count == 1
+        db.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_already_full(self):
+        # count=2、既有 2 行 → 跳过，不插
+        db = self._make_db([[object(), object()]])
+        rows = [
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p1", "count": 2},
+            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p2", "count": 2},
+        ]
+        occupied = await _auto_occupy_confident_matches("proj1", rows, db)
         assert occupied == 0
         db.add.assert_not_called()
         db.flush.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_caps_batch_inserts(self):
-        # 同需求 3 行 + count=2 + 无已落库 → 本批只插入 2 行
-        db = AsyncMock()
-        db.execute = AsyncMock(return_value=_FakeResult([]))
-        db.add = MagicMock()
-        db.flush = AsyncMock()
-
+    async def test_queries_existing_once_per_key(self):
+        # 两个不同需求 → db.execute 只查两次（query-once-per-key，避免 autoflush 双计数）
+        db = self._make_db([[], []])
         rows = [
             {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p1", "count": 2},
             {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p2", "count": 2},
-            {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p3", "count": 2},
+            {"model": "personnel", "requirement_name": "技术负责人", "resource_id": "p3", "count": 1},
         ]
         occupied = await _auto_occupy_confident_matches("proj1", rows, db)
-
-        assert occupied == 2
-        assert db.add.call_count == 2
+        assert occupied == 3
+        assert db.execute.await_count == 2
         db.flush.assert_awaited_once()
+
+    def _make_db(self, existing_by_call):
+        """构造 AsyncMock db，让 execute(...).scalars().all() 按查询次序返回既有行.
+
+        新实现每 key 只查一次；这里对超出的查询回退为空列表（旧实现会因
+        逐行重查而多出查询，从而被上面的断言捕获）。
+        """
+        db = AsyncMock()
+        db.add = MagicMock()
+        db.flush = AsyncMock()
+        calls = iter(existing_by_call)
+
+        async def fake_execute(*args, **kwargs):
+            try:
+                rows = next(calls)
+            except StopIteration:
+                rows = []
+            return _FakeResult(rows)
+
+        db.execute = AsyncMock(side_effect=fake_execute)
+        return db
