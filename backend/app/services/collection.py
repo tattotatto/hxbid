@@ -516,16 +516,6 @@ async def assign_personnel(
     db: AsyncSession,
 ) -> ProjectPersonnel:
     """Assign a personnel record to a project with a specific role."""
-    # Remove any previous assignment for the same role in this project
-    existing = await db.execute(
-        select(ProjectPersonnel).where(
-            ProjectPersonnel.project_id == project_id,
-            ProjectPersonnel.role == role,
-        )
-    )
-    for old in existing.scalars():
-        await db.delete(old)
-
     pp = ProjectPersonnel(
         project_id=project_id,
         personnel_id=personnel_id,
@@ -549,6 +539,46 @@ async def unassign_personnel(
     if pp and pp.project_id == project_id:
         await db.delete(pp)
         await db.flush()
+
+
+async def unlink_qualification(
+    project_id: str,
+    requirement_name: str,
+    resource_id: str,
+    db: AsyncSession,
+) -> bool:
+    """解除某需求下指定资质链接（resource_id 为 qualification_id）."""
+    rows = (await db.execute(
+        select(ProjectQualification).where(
+            ProjectQualification.project_id == project_id,
+            ProjectQualification.requirement_name == requirement_name,
+            ProjectQualification.qualification_id == resource_id,
+        )
+    )).scalars().all()
+    for pq in rows:
+        await db.delete(pq)
+    await db.flush()
+    return len(rows) > 0
+
+
+async def unlink_contract(
+    project_id: str,
+    requirement_name: str,
+    resource_id: str,
+    db: AsyncSession,
+) -> bool:
+    """解除某业绩要求下指定合同链接（resource_id 为 contract_id）."""
+    rows = (await db.execute(
+        select(ProjectContract).where(
+            ProjectContract.project_id == project_id,
+            ProjectContract.requirement_name == requirement_name,
+            ProjectContract.contract_id == resource_id,
+        )
+    )).scalars().all()
+    for pc in rows:
+        await db.delete(pc)
+    await db.flush()
+    return len(rows) > 0
 
 
 async def link_qualification(
@@ -596,16 +626,6 @@ async def link_contract(
     db: AsyncSession,
 ) -> ProjectContract:
     """Link a historical contract to fulfil a performance-contract requirement."""
-    # Remove any previous contract for the same requirement in this project
-    existing = await db.execute(
-        select(ProjectContract).where(
-            ProjectContract.project_id == project_id,
-            ProjectContract.requirement_name == requirement_name,
-        )
-    )
-    for old in existing.scalars():
-        await db.delete(old)
-
     pc = ProjectContract(
         project_id=project_id,
         contract_id=contract_id,

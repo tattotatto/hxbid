@@ -64,3 +64,8 @@ class CollectedResources(BaseModel):
 class LinkContractRequest(BaseModel):
     contract_id: str
     requirement_name: str = ""
+
+
+class UnlinkResourceRequest(BaseModel):
+    requirement_name: str = ""
+    resource_id: str = ""

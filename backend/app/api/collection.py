@@ -18,6 +18,7 @@ from app.schemas.collection import (
     CollectionStatus,
     LinkContractRequest,
     LinkQualificationRequest,
+    UnlinkResourceRequest,
 )
 from app.services.collection import (
     analyze_collection_needs,
@@ -27,6 +28,8 @@ from app.services.collection import (
     link_contract,
     link_qualification,
     unassign_personnel,
+    unlink_contract,
+    unlink_qualification,
     upload_qualification,
 )
 from app.utils.permissions import require_editor
@@ -93,6 +96,40 @@ async def unassign_personnel_from_project(
     pp_id = data.get("assignment_id", "")
     await unassign_personnel(project_id, pp_id, db)
     return {"message": "unassigned"}
+
+
+# ── POST /{project_id}/qualification/unlink ─────────────────────────────
+
+
+@router.post("/{project_id}/qualification/unlink")
+async def unlink_qualification_from_project(
+    project_id: str,
+    data: UnlinkResourceRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    """解除某需求下指定资质的链接."""
+    deleted = await unlink_qualification(
+        project_id, data.requirement_name, data.resource_id, db
+    )
+    return {"deleted": deleted}
+
+
+# ── POST /{project_id}/contract/unlink ──────────────────────────────────
+
+
+@router.post("/{project_id}/contract/unlink")
+async def unlink_contract_from_project(
+    project_id: str,
+    data: UnlinkResourceRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    """解除某业绩要求下指定合同的链接."""
+    deleted = await unlink_contract(
+        project_id, data.requirement_name, data.resource_id, db
+    )
+    return {"deleted": deleted}
 
 
 # ── POST /{project_id}/qualification/upload ─────────────────────────────
