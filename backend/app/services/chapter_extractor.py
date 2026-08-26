@@ -106,16 +106,16 @@ CHAPTER_EXTRACT_SYSTEM_PROMPT = """你是招标文件分析专家。你的任务
 async def _extract_with_retry(
     ai_adapter,
     user_prompt: str,
-    max_tokens: int = 32768,
+    max_tokens: int = 65536,
     max_attempts: int = 2,
 ) -> str:
     """调用 deepseek-v4-flash 提取章节，空内容时重试一次。
 
-    deepseek-v4-flash 是推理模型：reasoning_tokens 先吃输出预算，长招标文件下
-    推理消耗随机波动在 12k~20k。max_tokens=16384 时推理一旦超过 ~14.5k，
-    content 被挤成空 → finish_reason=length → RuntimeError → 0 章节。
-    实测 max_tokens=32768 安全（推理 18.5k + 正文 4.2k = 20.1k < 32k）；
-    重试兜底残余随机性（每次最长几分钟，仅在空内容时触发）。
+    deepseek-v4-flash 是推理模型：reasoning_tokens 先吃输出预算，推理消耗随机
+    波动在 12k~20k+，且随输入规模与复杂度上升。max_tokens=16384 时推理一旦
+    超过 ~14.5k，content 被挤成空 → finish_reason=length → RuntimeError → 0 章节；
+    32768 实测安全（推理 18.5k + 正文 4.2k = 20.1k）。复杂标书章节正文更长，
+    65536 已实测被 API 接受（实测上限 ≥131072），给足余量；重试兜底残余随机性。
     """
     messages = [
         {"role": "system", "content": CHAPTER_EXTRACT_SYSTEM_PROMPT},
@@ -141,14 +141,17 @@ async def _extract_with_retry(
 async def extract_chapters_from_text(
     section_text: str,
     ai_adapter,
-    max_input_chars: int = 10000,
+    max_input_chars: int = 30000,
 ) -> list[dict]:
     """从格式章节文本中提取结构化章节列表.
 
     Args:
         section_text: 第六章"投标文件格式"的完整文本
         ai_adapter: AI适配器实例
-        max_input_chars: 最大输入字符数
+        max_input_chars: 最大输入字符数。默认 30000：复杂标书「投标文件格式」
+            章节文本可超过 1 万字符，截断太狠会漏掉靠后的章节（如技术方案、
+            资信标附录）。深挖推理模型也吃输入，30k 字符 ≈ 15k 中文 token，
+            配合 max_tokens=65536 输出预算实测安全。
 
     Returns:
         结构化章节列表，每个章节包含:
