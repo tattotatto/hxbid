@@ -563,7 +563,23 @@ async def _materialise_chapters(
                     payload = writeback_children.pop(part.get("title", ""), None)
                     if payload is not None:
                         part["children"] = list(part.get("children") or []) + payload
-                struct.extend(writeback_new_top)
+                for n in writeback_new_top:
+                    n.setdefault("order_index", len(struct))
+                    struct.append(n)
+                # placeholder 章节（由 format 模板补入、structure_json 无对应节点）→
+                # 镜像补为 struct 顶层节点，保证 §6.3 结构一致性；正常路径此循环为空
+                for title, payload in writeback_children.items():
+                    struct.append({
+                        "title": title,
+                        "type": "ai_generated",
+                        "source": "scoring_rubric",
+                        "children": payload,
+                        "order_index": len(struct),
+                    })
+                    logger.warning(
+                        "Rubric attach target %r absent from chapter_structure_json — mirrored as top-level",
+                        title,
+                    )
                 project.chapter_structure_json = json.dumps(struct, ensure_ascii=False)
     # 统一重编号（模板补入 / rubric 补入后 order_index 连续）
     for i, c in enumerate(created):
