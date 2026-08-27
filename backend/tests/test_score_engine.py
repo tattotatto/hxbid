@@ -68,10 +68,36 @@ class TestComputeReport:
         assert report["total"] == 50     # 这里 total 超过 max_total 属正常（判卷结果）
         assert report["unscored_note"] == ""
 
+    def test_no_unscored_scored_equals_max(self):
+        # §4.2：无 unscored 时 scored_total == max_total（items 加总 == max_total）
+        rubric = _rubric(items=[
+            {"id": "t1", "dimension": "技术部分", "name": "服务方案", "kind": "content", "points": 15, "criteria": "…", "key_terms": ["服务方案"]},
+            {"id": "t2", "dimension": "技术部分", "name": "针对性", "kind": "quality", "points": 15, "criteria": "…", "key_terms": ["针对性"]},
+            {"id": "t3", "dimension": "技术部分", "name": "创新性", "kind": "quality", "points": 15, "criteria": "…", "key_terms": ["创新性"]},
+        ])
+        rubric["max_total"] = 45
+        report = compute_report(rubric, [_g("t1", 15), _g("t2", 15), _g("t3", 15)])
+        assert report["scored_total"] == 45
+        assert report["total"] == 45
+
     def test_single_item_failure_marked_unscored_others_intact(self):
-        report = compute_report(_rubric(), [_g("t1", 15), _g("t2", 5), _g("p1", 30)])
-        # 覆盖：graded 全通过时没有 unscored
-        assert all(i["status"] != "unscored" for i in report["items"])
+        report = compute_report(_rubric(), [
+            _g("t1", 15),                 # graded → pass
+            _g("t2", 3),                  # graded → partial
+            _g("p1", 0, status="unscored", evidence="判卷失败"),  # 单项判卷失败 → unscored
+        ])
+        by_id = {i["id"]: i for i in report["items"]}
+        # 失败项置 unscored 且不得分
+        assert by_id["p1"]["status"] == "unscored"
+        assert by_id["p1"]["points_obtained"] == 0
+        # 其余两项照常判卷
+        assert by_id["t1"]["status"] == "pass"
+        assert by_id["t1"]["points_obtained"] == 15
+        assert by_id["t2"]["status"] == "partial"
+        assert by_id["t2"]["points_obtained"] == 3
+        # unscored 项满分剔除：scored_total 只含 t1+t2 满分，total 只计实际得分
+        assert report["scored_total"] == 20
+        assert report["total"] == 18
 
 
 class TestMatchDimensions:
