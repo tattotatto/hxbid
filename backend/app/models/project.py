@@ -72,6 +72,18 @@ class BidProject(Base):
         default="{}",
         comment="格式校验报告JSON — 最近一次生成后的格式合规校验结果",
     )
+    scoring_rubric_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="{}",
+        comment="评分指标JSON — 从招标文件评标办法章节提取/手动补入的结构化评分指标（§4.1）",
+    )
+    scoring_report_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="{}",
+        comment="自我评分报告JSON — 最近一次按评分指标对生成内容的评分结果（§4.2）",
+    )
     chapter_structure_json: Mapped[str] = mapped_column(
         Text,
         nullable=False,
