@@ -237,7 +237,33 @@ async def ensure_bot_user() -> tuple[str, str]:
         return user.id, token
 
 
-async def db_seed(project_id: str):
+# ---------------------------------------------------------------------------
+# 评分指标预置（确定性，绕过 AI 提取）：仅供生成阶段发出 scoring_report 与
+# confirm 自动补场景复用。tech-x 为内容型（章节标题不含「售后服务」→ gap_detect
+# 判为缺失 → 自动补节点）；tech-q 为 quality 型（不参与目录补全，只喂自我评分）。
+# ---------------------------------------------------------------------------
+RUBRIC_SEED = {
+    "status": "manual",
+    "method_name": "综合评分法",
+    "max_total": 20,
+    "applied": False,
+    "raw_text": "",
+    "items": [
+        {
+            "id": "tech-x", "dimension": "技术部分", "name": "售后服务方案",
+            "points": 10, "kind": "content", "criteria": "售后响应及时",
+            "key_terms": ["售后服务"],  # 技术部分章节标题不含该词 → gap_detect 判为缺失
+        },
+        {
+            "id": "tech-q", "dimension": "技术部分", "name": "方案的针对性",
+            "points": 10, "kind": "quality", "criteria": "贴合项目实际",
+            "key_terms": ["针对性"],  # quality 不参与目录补全，只喂评分
+        },
+    ],
+}
+
+
+async def db_seed(project_id: str, *, status: str = "draft", seed_rubric: bool = True):
     """写 project 字段 + 章节（含 children_json 嵌套树）."""
     from sqlalchemy import select
     from app.database import async_session
@@ -252,7 +278,9 @@ async def db_seed(project_id: str):
             ensure_ascii=False,
         )
         proj.target_pages = TARGET_PAGES
-        proj.status = "draft"
+        if seed_rubric:
+            proj.scoring_rubric_json = json.dumps(RUBRIC_SEED, ensure_ascii=False)
+        proj.status = status
 
         old = (await db.execute(
             select(ProjectChapter).where(ProjectChapter.project_id == project_id)
@@ -329,6 +357,51 @@ async def db_verify(project_id: str) -> dict:
         return report
 
 
+async def confirm_gap_smoke(headers: dict) -> list[tuple[str, bool]]:
+    """mini 场景：预置评分指标 → outline/confirm 自动补节点 → GET /chapters 断言 source 标记."""
+    checks: list[tuple[str, bool]] = []
+    pid = None
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
+            r = await client.post(f"{API_BASE}/projects", headers=headers,
+                                  json={"name": TEST_NAME + "-confirm"})
+            r.raise_for_status()
+            pid = r.json()["id"]
+            await db_seed(pid, status="structure_ready", seed_rubric=False)  # 走真实 PUT 预置
+            pr = await client.put(f"{API_BASE}/bid/{pid}/scoring-rubric",
+                                  headers=headers, json={"rubric": RUBRIC_SEED})
+            checks.append(("PUT /scoring-rubric 预置成功", pr.status_code == 200))
+            cr = await client.post(f"{API_BASE}/bid/{pid}/outline/confirm", headers=headers)
+            body = cr.json() if cr.status_code == 200 else {}
+            checks.append(("confirm 成功", cr.status_code == 200 and body.get("success")))
+            added = body.get("added_from_rubric") or []
+            checks.append(("按评标办法自动补充节点", len(added) >= 1))
+            print(f"  confirm 场景: 自动补充 {added}")
+
+            gr = await client.get(f"{API_BASE}/bid/{pid}/chapters", headers=headers)
+            flat: list[dict] = []
+
+            def walk(nodes):
+                for n in nodes or []:
+                    if isinstance(n, dict):
+                        flat.append(n)
+                        walk(n.get("children"))
+
+            walk((gr.json() or {}).get("chapters") or [])
+            checks.append(("补入节点带 source=scoring_rubric",
+                           any(n.get("source") == "scoring_rubric" for n in flat)))
+            print(f"  confirm 场景: GET /chapters 含 source=scoring_rubric 节点: "
+                  f"{any(n.get('source') == 'scoring_rubric' for n in flat)}")
+    finally:
+        if pid:
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
+                    await client.delete(f"{API_BASE}/projects/{pid}", headers=headers)
+            except Exception:
+                pass
+    return checks
+
+
 async def main() -> int:
     print("=" * 70)
     print(f"E2E 冒烟测试：新管线 generate_from_chapter_structure  (target_pages={TARGET_PAGES})")
@@ -403,7 +476,7 @@ async def main() -> int:
     print("事件序列:", " -> ".join(seq))
 
     checks = []
-    for name in ("status", "outline_generated", "section_start", "section_done", "progress", "format_verification", "done"):
+    for name in ("status", "outline_generated", "section_start", "section_done", "progress", "format_verification", "scoring_report", "done"):
         checks.append((f"事件 {name}", name in seq))
     # 管线级崩溃 = 出现 error 事件；单节 section_error 是 AI 瞬时失败被管线容错处理（重试+占位），允许。
     crash_evts = [d for ev, d in events if ev == "error"]
@@ -432,6 +505,15 @@ async def main() -> int:
         vs = verif.get("overall_status", "unknown")
         checks.append(("format_verification 发出", True))
         print(f"  格式校验: overall_status = {vs}")
+
+    scoring = next((d for ev, d in events if ev == "scoring_report"), None)
+    if scoring:
+        checks.append(("scoring_report 总分字段完整", isinstance(scoring.get("total"), (int, float))))
+        checks.append(("scoring_report 逐项字段完整", bool(scoring.get("items"))))
+        print(f"  自我评分: total={scoring.get('total')} scored_total={scoring.get('scored_total')} "
+              f"({len(scoring.get('items') or [])} 项)")
+    else:
+        checks.append(("scoring_report 发出", False))
 
     # ---- 落库校验 ----
     rep = await db_verify(project_id)
@@ -603,6 +685,9 @@ async def main() -> int:
     except Exception as exc:
         print(f"  ⚠️  配对学习校验异常: {exc}")
         checks.append(("历史标书配对学习", False))
+
+    # ---- mini 场景：评标办法驱动目录补全（confirm 自动补，独立项目）----
+    checks += await confirm_gap_smoke(headers)
 
     # ---- 报告 ----
     print("\n" + "=" * 70)
