@@ -163,3 +163,36 @@ async def test_run_scoring_single_dimension_failure_marks_unscored():
     assert report["scored_total"] == 0
     assert all(i["status"] == "unscored" for i in report["items"])
     assert any("判卷失败" in i["suggestion"] for i in report["items"])
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_backfills_omitted_item_as_unscored():
+    from app.services.score_engine import run_scoring
+
+    rubric = _rubric()
+    chapters = [{"title": "技术部分", "content": "服务方案正文……"}]
+
+    class OmitAI:
+        async def chat_completion(self, messages, **kwargs):
+            if "【评分维度】报价" in messages[1]["content"]:
+                return json.dumps({"items": [
+                    {"id": "p1", "points_obtained": 30, "status_source": "报价明细", "gap": "", "suggestion": ""},
+                ]})
+            # 技术部分维度：返回缺 t2（AI 畸形/贪心响应漏掉指标项）
+            return json.dumps({"items": [
+                {"id": "t1", "points_obtained": 13, "status_source": "技术部分（一）", "gap": "", "suggestion": ""},
+            ]})
+
+    report = await run_scoring(rubric, chapters, OmitAI())
+    by_id = {i["id"]: i for i in report["items"]}
+    # 判卷未覆盖的指标项回填 unscored，报告逐项完整，无静默丢失（§4.2）
+    assert len(report["items"]) == len(rubric["items"])
+    assert "t2" in by_id
+    assert by_id["t2"]["status"] == "unscored"
+    assert "判卷未覆盖" in by_id["t2"]["suggestion"]
+    # unscored 剔除折算：t1 13/15 + p1 30/30；t2 不参与计分
+    assert report["total"] == 43
+    assert report["scored_total"] == 45
+    # 未省略的两项照常判卷
+    assert by_id["t1"]["status"] == "partial"
+    assert by_id["p1"]["status"] == "pass"

@@ -149,6 +149,20 @@ async def run_scoring(rubric: dict, chapters: list[dict], ai) -> dict:
                     "gap": "",
                     "suggestion": f"判卷失败：{exc}",
                 })
+    # 判卷输出可能遗漏指标项（AI 畸形响应）——回填 unscored 行，保证报告逐项完整（§4.2）
+    graded_ids = {g.get("id") for g in graded}
+    for it in items:
+        if it.get("id") not in graded_ids:
+            graded.append({
+                "id": it.get("id"),
+                "dimension": it.get("dimension", ""),
+                "name": it.get("name", ""),
+                "points_obtained": 0,
+                "status": "unscored",
+                "evidence": "",
+                "gap": "",
+                "suggestion": "判卷未覆盖",
+            })
     return compute_report(rubric, graded)
 
 
