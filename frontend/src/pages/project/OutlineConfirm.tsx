@@ -4,6 +4,8 @@ import { Card, Button, Space, Tag, Spin, Empty, message as antMessage } from 'an
 import { ArrowLeftOutlined, CheckCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import OutlineTree from '../../components/OutlineEditor/OutlineTree'
 import OutlineChat from '../../components/OutlineEditor/OutlineChat'
+import ScoringRubricPanel from '../../components/ScoringRubric/ScoringRubricPanel'
+import type { RubricCover } from '../../api/scoring'
 import { outlineApi, OutlineChapter } from '../../api/outline'
 
 const OutlineConfirm: React.FC = () => {
@@ -15,6 +17,7 @@ const OutlineConfirm: React.FC = () => {
   const [extracting, setExtracting] = useState(false)
   const [convId, setConvId] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
+  const [rubricCover, setRubricCover] = useState<RubricCover | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -24,6 +27,7 @@ const OutlineConfirm: React.FC = () => {
       .get(id)
       .then((res) => {
         setChapters(res.chapters)
+        setRubricCover(res.rubric_cover ?? null)
       })
       .catch((err: any) => {
         const detail = err?.response?.data?.detail || err?.message || '加载章节失败'
@@ -50,6 +54,7 @@ const OutlineConfirm: React.FC = () => {
       await outlineApi.extract(id)
       const res = await outlineApi.get(id)
       setChapters(res.chapters)
+      setRubricCover(res.rubric_cover ?? null)
       setError(null)
       antMessage.success(`已提取 ${res.chapters.length} 个章节`)
     } catch (err: any) {
@@ -65,7 +70,12 @@ const OutlineConfirm: React.FC = () => {
     setConfirming(true)
     try {
       const res = await outlineApi.confirm(id)
-      antMessage.success(`已确认 ${res.chapters_count} 个章节，进入信息搜集阶段`)
+      const msg = `已确认 ${res.chapters_count} 个章节，进入信息搜集阶段`
+      antMessage.success(
+        res.added_from_rubric?.length
+          ? `${msg}；已按评标办法自动补充：${res.added_from_rubric.join('、')}`
+          : msg,
+      )
       if (id) sessionStorage.removeItem(`outline_conv_${id}`)
       navigate(`/projects/${id}`)
     } catch (err: any) {
@@ -112,6 +122,19 @@ const OutlineConfirm: React.FC = () => {
           </Space>
         </Space>
       </Card>
+
+      <ScoringRubricPanel projectId={id!} />
+      {rubricCover && rubricCover.missing.length > 0 && (
+        <Card size="small" style={{ marginBottom: 12, borderColor: '#faad14' }}>
+          <Tag color="gold">评标办法覆盖</Tag>
+          确认目录时将自动补充以下缺失内容项（可改可删）：
+          <Space wrap style={{ marginTop: 4 }}>
+            {rubricCover.missing.map((m, i) => (
+              <Tag key={i} color="gold">{m.name}</Tag>
+            ))}
+          </Space>
+        </Card>
+      )}
 
       <div
         style={{

@@ -1,4 +1,5 @@
 import client from './client'
+import type { RubricCover } from './scoring'
 
 export type ChapterType = 'fixed_form' | 'table' | 'ai_generated' | 'attachment' | 'mixed'
 
@@ -14,6 +15,8 @@ export interface OutlineChapter {
   format_notes?: string
   scoring_context?: string
   table_columns?: string[]
+  /** 评分指标自动补入的节点标记（「来自评标办法」徽标） */
+  source?: string
   children?: OutlineChapter[]
 }
 
@@ -31,6 +34,7 @@ function normalize(ch: any): OutlineChapter {
 
 export interface OutlineGetResponse {
   chapters: OutlineChapter[]
+  rubric_cover?: RubricCover | null
 }
 
 export interface OutlineChatResponse {
@@ -43,6 +47,8 @@ export interface OutlineConfirmResponse {
   success: boolean
   chapters_count: number
   status: string
+  /** 本次确认按评标办法自动补充的章节/小节标题 */
+  added_from_rubric: string[]
 }
 
 export const outlineApi = {
@@ -52,7 +58,7 @@ export const outlineApi = {
     const data = res.data as any
     const raw: any[] = Array.isArray(data) ? data : (data?.chapters ?? [])
     // 统一 type/title/number 字段，递归处理 children
-    return { chapters: raw.map(normalize) }
+    return { chapters: raw.map(normalize), rubric_cover: data?.rubric_cover ?? null }
   },
 
   /** 触发 AI 提取章节结构：上传解析后必须调用，status -> structure_ready */

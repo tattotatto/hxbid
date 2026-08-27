@@ -167,6 +167,9 @@ function buildTreeData(chapters: OutlineChapter[]): DataNode[] {
             {TYPE_LABELS[type] ?? type}
           </Tag>
           <span style={{ fontWeight: 500 }}>{ch.title || '(未命名)'}</span>
+          {ch.source === 'scoring_rubric' && (
+            <Tag color="gold" style={{ marginRight: 0, marginLeft: 6 }}>来自评标办法</Tag>
+          )}
         </Space>
       ),
       children: ch.children ? buildTreeData(ch.children) : undefined,
