@@ -10,6 +10,7 @@ import {
   CheckCircleOutlined,
 } from '@ant-design/icons';
 import BidEditor from '../BidEditor';
+import SectionChat from './SectionChat';
 
 const { Text } = Typography;
 
@@ -18,6 +19,7 @@ const { Text } = Typography;
 // ---------------------------------------------------------------------------
 
 interface EditPanelProps {
+  projectId: string;
   chapterId: string | null;
   chapterTitle: string;
   sectionPath: string[];
@@ -37,6 +39,7 @@ interface EditPanelProps {
 // ---------------------------------------------------------------------------
 
 const EditPanel: React.FC<EditPanelProps> = ({
+  projectId,
   chapterId,
   chapterTitle,
   sectionPath,
@@ -223,6 +226,20 @@ const EditPanel: React.FC<EditPanelProps> = ({
           />
         )}
       </div>
+
+      {/* Section Chat */}
+      {!isFileType && sectionPath.length > 0 && (
+        <SectionChat
+          projectId={projectId}
+          chapterId={chapterId}
+          sectionPath={sectionPath}
+          currentContent={content}
+          onApplyContent={(revised) => {
+            setAiResult({ modified_content: revised, diff_summary: 'AI 对话修改（预览确认）' })
+            setDiffModalOpen(true)
+          }}
+        />
+      )}
 
       {/* Diff Modal */}
       <Modal

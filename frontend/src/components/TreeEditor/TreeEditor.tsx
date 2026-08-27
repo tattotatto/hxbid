@@ -237,6 +237,7 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
         onSelect={handleSelect}
       />
       <EditPanel
+        projectId={projectId}
         chapterId={selectedChapterId}
         chapterTitle={selectedChapter?.title || ''}
         sectionPath={selectedSectionPath}
