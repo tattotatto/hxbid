@@ -125,15 +125,22 @@ const OutlineConfirm: React.FC = () => {
 
       <ScoringRubricPanel projectId={id!} />
       {rubricCover && rubricCover.missing.length > 0 && (
-        <Card size="small" style={{ marginBottom: 12, borderColor: '#faad14' }}>
-          <Tag color="gold">评标办法覆盖</Tag>
-          确认目录时将自动补充以下缺失内容项（可改可删）：
-          <Space wrap style={{ marginTop: 4 }}>
-            {rubricCover.missing.map((m, i) => (
-              <Tag key={i} color="gold">{m.name}</Tag>
-            ))}
-          </Space>
-        </Card>
+        rubricCover.applied ? (
+          <Card size="small" style={{ marginBottom: 12 }}>
+            <Tag color="default">评标办法</Tag>
+            已按评标办法补充过目录节点；修改评标办法后可重新确认
+          </Card>
+        ) : (
+          <Card size="small" style={{ marginBottom: 12, borderColor: '#faad14' }}>
+            <Tag color="gold">评标办法覆盖</Tag>
+            确认目录时将自动补充以下缺失内容项（可改可删）：
+            <Space wrap style={{ marginTop: 4 }}>
+              {rubricCover.missing.map((m, i) => (
+                <Tag key={i} color="gold">{m.name}</Tag>
+              ))}
+            </Space>
+          </Card>
+        )
       )}
 
       <div
