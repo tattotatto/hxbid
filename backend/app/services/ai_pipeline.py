@@ -1564,8 +1564,8 @@ async def generate_from_chapter_structure(
                             "error": None,
                         }
 
-                # Emit section_start for pending tasks
-                for i, ti in enumerate(pending_tasks):
+                # Emit section_start for pending tasks（index 用全局单调计数，跨章不重置）
+                for i, ti in enumerate(pending_tasks, start=completed + 1):
                     task_path = ti["task"]["path"]
                     yield {
                         "event": "section_start",
@@ -1574,7 +1574,7 @@ async def generate_from_chapter_structure(
                             "path": " > ".join(task_path),
                             "section_path": task_path,  # for frontend tree navigation
                             "title": ti["task"]["title"],
-                            "index": i + 1,
+                            "index": i,
                             "total": total_leaves,
                             "depth": ti["task"].get("depth", 0),
                         }, ensure_ascii=False),
@@ -1610,10 +1610,17 @@ async def generate_from_chapter_structure(
                         }
                     else:
                         leaf_failed += 1
-                        mark_path = result["section_path"]
-                        if not (children_tree and isinstance(children_tree[0], dict) and "path" in children_tree[0]):
-                            mark_path = mark_path[1:] if len(mark_path) > 1 else mark_path
-                        _mark_leaf_failure(children_tree, mark_path, result.get("error") or "unknown")
+                        node = _locate_leaf(children_tree, result["section_path"])
+                        if node is None:
+                            logger.warning(
+                                "Leaf not located for failure-marking (section '%s', path %s)",
+                                result["title"], " > ".join(result["section_path"]),
+                            )
+                        else:
+                            mark_path = result["section_path"]
+                            if not (children_tree and isinstance(children_tree[0], dict) and "path" in children_tree[0]):
+                                mark_path = mark_path[1:] if len(mark_path) > 1 else mark_path
+                            _mark_leaf_failure(children_tree, mark_path, result.get("error") or "unknown")
                         yield {
                             "event": "section_error",
                             "data": json.dumps({
@@ -1719,19 +1726,28 @@ async def generate_from_chapter_structure(
             logger.exception("Chapter '%s' generation failed: %s", chapter.title, exc)
             chapter_errors.append(chapter.title)
             chapter_error_msg = str(exc)
-            # 标红本章所有叶子
+            # 标红本章「尚未生成完成」的叶子；已生成（status=generated）或已标红的叶子保持原样
             is_flat = bool(children_tree and isinstance(children_tree[0], dict) and "path" in children_tree[0])
             for task_info in chapter_tasks:
+                node = _locate_leaf(children_tree, task_info["task"]["path"])
+                if node is None:
+                    logger.warning(
+                        "Chapter '%s' leaf not located for failure-marking: %s",
+                        chapter.title, " > ".join(task_info["task"]["path"]),
+                    )
+                    continue
+                if _is_leaf_done(node) or node.get("status") == "failed":
+                    continue
                 mark_path = task_info["task"]["path"]
                 if not is_flat:
                     mark_path = mark_path[1:] if len(mark_path) > 1 else mark_path
                 _mark_leaf_failure(children_tree, mark_path, str(exc))
+                leaf_failed += 1
             try:
                 chapter.children_json = json.dumps(children_tree, ensure_ascii=False)
                 await db.commit()
             except Exception:
                 pass
-            leaf_failed = len(chapter_tasks)
 
         yield {
             "event": "chapter_error" if chapter_error_msg else "chapter_done",
