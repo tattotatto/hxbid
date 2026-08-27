@@ -11,11 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models.project import BidProject
 from app.models.user import User
 from app.services.ai_adapter import ai_adapter
+from app.services.score_engine import run_scoring
 from app.services.scoring_rubric import extract_rubric, normalize_rubric, validate_rubric
 from app.utils.security import get_current_user
 
@@ -96,3 +98,68 @@ async def update_scoring_rubric(
     project.scoring_rubric_json = json.dumps(rubric, ensure_ascii=False)
     await db.commit()
     return {"rubric": rubric, "problems": problems}
+
+
+@router.post("/{project_id}/score")
+async def rescore_project(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """手动重评：读已落库内容（final_content||ai_generated_content + children 小节标题）
+    重跑判卷，覆盖报告。与导出同一份数据（spec §7.2）。"""
+    result = await db.execute(
+        select(BidProject)
+        .where(BidProject.id == project_id)
+        .options(selectinload(BidProject.chapters))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        rubric = json.loads(project.scoring_rubric_json or "{}")
+    except json.JSONDecodeError:
+        rubric = {}
+    if rubric.get("status") not in ("found", "manual") or not rubric.get("items"):
+        raise HTTPException(
+            status_code=400,
+            detail="该项目未检测到可用评分指标（状态 none），请先粘贴/编辑评分办法",
+        )
+
+    def _load_chapters() -> list[dict]:
+        out = []
+        for ch in sorted(project.chapters, key=lambda c: c.order_index):
+            content = ch.final_content or ch.ai_generated_content or ""
+            try:
+                children = json.loads(ch.children_json or "[]")
+            except json.JSONDecodeError:
+                children = []
+            titles: list[str] = []
+            def _walk(nodes):
+                for n in nodes or []:
+                    titles.append(str(n.get("title") or ""))
+                    _walk(n.get("children"))
+            _walk(children)
+            if titles:
+                content = f"{content}\n\n小节：\n" + "\n".join(titles)
+            out.append({"title": ch.title, "content": content})
+        return out
+
+    report = await run_scoring(rubric, _load_chapters(), ai_adapter)
+    project.scoring_report_json = json.dumps(report, ensure_ascii=False)
+    await db.commit()
+    return report
+
+
+@router.get("/{project_id}/scoring-report")
+async def get_scoring_report(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """取最新评分报告（重进项目展示）。"""
+    project = await _get_bid_project(project_id, db)
+    try:
+        return json.loads(project.scoring_report_json or "{}")
+    except json.JSONDecodeError:
+        return {}

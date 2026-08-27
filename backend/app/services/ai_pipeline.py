@@ -1799,6 +1799,27 @@ async def generate_from_chapter_structure(
         "data": json.dumps(verification, ensure_ascii=False),
     }
 
+    # ── Phase: 自我评分（评标办法驱动，不阻塞 done）──
+    try:
+        rubric = json.loads(getattr(project, "scoring_rubric_json", "{}") or "{}")
+    except json.JSONDecodeError:
+        rubric = {}
+    if rubric.get("status") in ("found", "manual") and rubric.get("items"):
+        try:
+            from app.services.score_engine import run_scoring
+            report = await run_scoring(rubric, chapters_payload, ai_adapter)
+            try:
+                project.scoring_report_json = json.dumps(report, ensure_ascii=False)
+                await db.commit()
+            except Exception:
+                pass
+            yield {
+                "event": "scoring_report",
+                "data": json.dumps(report, ensure_ascii=False),
+            }
+        except Exception as exc:
+            logger.warning("自我评分失败（不阻塞 done）: %s", exc)
+
     # ── Phase: Done ──
     yield {
         "event": "done",

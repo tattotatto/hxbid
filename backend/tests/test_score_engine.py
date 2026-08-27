@@ -5,6 +5,8 @@
 - 最终分数 = total / scored_total（unscored 项按其满分剔除折算）
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
+import json
+
 import pytest
 
 from app.services.score_engine import compute_report, _match_dimensions
@@ -111,3 +113,53 @@ class TestMatchDimensions:
         dims = {"业绩": [{"id": "p2"}]}
         matched = _match_dimensions(dims, [{"title": "投标函", "content": "x"}])
         assert matched == {}
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_orchestrates_per_dimension_and_degrades_failure():
+    from app.services.score_engine import run_scoring
+
+    rubric = _rubric()  # 3 项：技术部分×2 + 报价×1
+    chapters = [{"title": "技术部分", "content": "服务方案正文……"}]
+
+    calls = []
+
+    class FakeAI:
+        async def chat_completion(self, messages, **kwargs):
+            calls.append(messages[1]["content"])
+            # 判定用维度头（_grade_dimension 提示词模板自带"报价项…未含报价"要求行，
+            # 裸判 "报价" in content 对每个维度都命中；改用维度头精确区分）
+            if "【评分维度】报价" in messages[1]["content"]:
+                return '{"items": [{"id": "p1", "points_obtained": 30, "status_source": "含报价", "gap": "", "suggestion": ""}]}'
+            return json.dumps({"items": [
+                {"id": "t1", "points_obtained": 13, "status_source": "技术部分（一）", "gap": "", "suggestion": ""},
+                {"id": "t2", "points_obtained": 2, "status_source": "技术部分（二）", "gap": "缺针对性", "suggestion": "补充针对分析"},
+            ]})
+
+    report = await run_scoring(rubric, chapters, FakeAI())
+    # 报价维度无匹配章节 → 用全部内容尽力评分（仍产出 unscored 仅当判卷标 unscored）
+    assert report["total"] == 45
+    assert report["items"][0]["evidence"] == "技术部分（一）"
+    by_id = {i["id"]: i for i in report["items"]}
+    assert by_id["t1"]["status"] == "partial"      # 13/15 = 86.7% < 90% → partial（brief 标注已纠正 pass⇒partial）
+    assert by_id["p1"]["status"] == "pass"      # 30/30
+    # 技术部分只调了一次 AI（按维度分组，串行）
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_single_dimension_failure_marks_unscored():
+    from app.services.score_engine import run_scoring
+
+    rubric = _rubric()
+    chapters = [{"title": "技术部分", "content": "x"}]
+
+    class BrokenAI:
+        async def chat_completion(self, **kwargs):
+            raise RuntimeError("判卷失败")
+
+    report = await run_scoring(rubric, chapters, BrokenAI())
+    assert report["total"] == 0
+    assert report["scored_total"] == 0
+    assert all(i["status"] == "unscored" for i in report["items"])
+    assert any("判卷失败" in i["suggestion"] for i in report["items"])
