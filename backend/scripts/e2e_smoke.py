@@ -362,7 +362,8 @@ async def confirm_gap_smoke(headers: dict) -> list[tuple[str, bool]]:
     checks: list[tuple[str, bool]] = []
     pid = None
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10),
+                                     follow_redirects=True) as client:
             r = await client.post(f"{API_BASE}/projects", headers=headers,
                                   json={"name": TEST_NAME + "-confirm"})
             r.raise_for_status()
@@ -395,7 +396,8 @@ async def confirm_gap_smoke(headers: dict) -> list[tuple[str, bool]]:
     finally:
         if pid:
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10),
+                                             follow_redirects=True) as client:
                     await client.delete(f"{API_BASE}/projects/{pid}", headers=headers)
             except Exception:
                 pass
