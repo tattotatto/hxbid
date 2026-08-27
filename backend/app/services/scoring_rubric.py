@@ -141,10 +141,10 @@ async def extract_rubric(text: str, ai_adapter) -> dict:
             response_format={"type": "json_object"},
         )
         raw = json.loads(response)
-    except Exception as exc:  # JSONDecodeError / RuntimeError(空 content) / API 错误
+        rubric = normalize_rubric(raw, force_status="found")
+    except Exception as exc:  # JSONDecodeError / RuntimeError(空 content) / API 错误 / 畸形分值
         logger.warning("评分指标提取失败，降级 none: %s", exc)
         return normalize_rubric({"raw_text": text[:20000]}, force_status="none")
-    rubric = normalize_rubric(raw, force_status="found")
     rubric["raw_text"] = text[:20000]
     if not rubric["items"]:
         logger.info("评标办法文本中未检测到评分表（最低价法？），状态 none")

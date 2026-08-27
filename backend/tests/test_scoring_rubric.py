@@ -92,3 +92,19 @@ async def test_extract_rubric_failure_degrades_none():
     assert rubric["status"] == "none"
     assert rubric["items"] == []
     assert "评标办法正文" in rubric["raw_text"]
+
+
+@pytest.mark.asyncio
+async def test_extract_rubric_malformed_points_degrades_none():
+    """AI 输出多为 ``points: "15 分"`` 这类带单位分值 —— normalize 见畸形数据也不得外抛."""
+    from app.services.scoring_rubric import extract_rubric
+
+    class SloppyAdapter:
+        async def chat_completion(self, **kwargs):
+            return '{"method_name": "综合评分法", "max_total": 100, "items": [' \
+                   '{"name": "服务方案", "points": "15 分", "kind": "content"}]}'
+
+    rubric = await extract_rubric("评标办法正文……", SloppyAdapter())
+    assert rubric["status"] == "none"
+    assert rubric["items"] == []
+    assert "评标办法正文" in rubric["raw_text"]
