@@ -539,6 +539,18 @@ async def _materialise_chapters(
                     children.extend(payload)
                     ch.children_json = json.dumps(children, ensure_ascii=False)
                     writeback_children[ch.title] = payload
+            # 未消费的 attach 键（两个缺失项的维度键同时命中同一章节标题时 attach_key_for
+            # 只消费首命中 → 剩余叶子既不挂章节也不进 new_top = 静默丢失）。
+            # 按 R9「永不静默丢失」语义降级为新建顶层：added_from_rubric 保持真实
+            # （降级节点确实会被补入），applied=True 仍成立。
+            if attach:
+                leftover = list(attach)
+                for _k in leftover:
+                    new_top.extend(attach.pop(_k))
+                logger.warning(
+                    "评标办法 attach 键未全部消费（维度键冲突命中同一章节），降级为新建顶层: %s",
+                    leftover,
+                )
             # 无 dimension 章节 -> 新建顶层（走同一 _make_chapter，正常 token 预算分配）
             for node in new_top:
                 chapter = _make_chapter(

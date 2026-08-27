@@ -89,3 +89,31 @@ class TestAttachKeyFor:
 
     def test_empty_attach_returns_none(self):
         assert attach_key_for("技术部分", {}) is None
+
+
+class TestAttachConsumption:
+    def test_two_dimension_keys_matching_one_title_consumes_first_only(self):
+        # 回归：双维度键「技术部分」「商务部分」都命中同一标题（双向包含，连续子串）
+        # 时 attach_key_for 只返回首键（R8 first-hit），端点循环 pop 后剩余键就是
+        # 「未消费键」——final review Issue 1 的修复将其降级为 new_top，
+        # 绝不静默丢失（R9 铁律）。
+        attach = {
+            "技术部分": [{"title": "服务方案", "type": "ai_generated",
+                          "source": "scoring_rubric", "rubric_item_id": "t1", "children": []}],
+            "商务部分": [{"title": "商务应答", "type": "ai_generated",
+                          "source": "scoring_rubric", "rubric_item_id": "b1", "children": []}],
+        }
+        title = "技术部分及商务部分"
+        # R8 first-hit：同一标题只命中首个匹配键（字典插入序）
+        assert attach_key_for(title, attach) == "技术部分"
+        assert attach_key_for(title, attach) == "技术部分"  # 查询本身不消费，重复命中首键
+        # 模拟端点消费：pop 首命中 → 剩余键即「未消费键」，交由降级路径处理
+        attach.pop("技术部分")
+        leftover = list(attach)
+        assert leftover == ["商务部分"]
+        reclaimed = []
+        for k in leftover:
+            reclaimed.extend(attach.pop(k))
+        # 降级路径产物与 new_top 元素同构（source 标记、rubric_item_id 原样携带）
+        assert all(n.get("source") == "scoring_rubric" for n in reclaimed)
+        assert [n["rubric_item_id"] for n in reclaimed] == ["b1"]
