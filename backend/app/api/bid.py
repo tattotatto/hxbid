@@ -38,6 +38,7 @@ from app.services.edit_analyzer import analyze_chapter_edits, edit_analysis_to_d
 from app.services.notification import send_notification
 from app.services.collection import get_collected_resources
 from app.services.rag import assemble_chapter_context
+from app.services.scoring_rubric import normalize_rubric
 from app.services.render_engine import export_to_pdf, render_bid_to_docx
 from app.services.vector_store import vector_store
 from app.utils.permissions import require_editor
@@ -153,6 +154,27 @@ async def upload_and_parse(
         except Exception as e:
             logger.warning("Format extraction failed (non-blocking): %s", e)
 
+    # -- Extract scoring rubric (best-effort, non-blocking) --
+    # 评标办法章节通常在文中部，parse_bid_requirements 的 15k 截断会丢；
+    # 这里直接扫 PDF 页文本定位评标办法章节 → AI 结构化提取。失败不阻塞生成。
+    scoring_rubric = None
+    try:
+        import pdfplumber
+        from app.services.pdf_extractor import locate_evaluation_section
+        from app.services.scoring_rubric import extract_rubric
+        from app.services.ai_adapter import ai_adapter as ai_adapter_svc
+
+        with pdfplumber.open(str(saved_path)) as pdf:
+            located = locate_evaluation_section(pdf)
+        if located:
+            _start, _end, section_text = located
+            scoring_rubric = await extract_rubric(section_text, ai_adapter_svc)
+    except Exception as e:
+        logger.warning("Scoring rubric extraction failed (non-blocking): %s", e)
+
+    if scoring_rubric is None:
+        scoring_rubric = normalize_rubric({})  # status="none"，前端显示粘贴入口
+
     # -- Create project record --
     project = BidProject(
         name=project_name or requirements.get("project_name") or file.filename or "未命名项目",
@@ -160,6 +182,7 @@ async def upload_and_parse(
         parsed_requirements_json=json.dumps(requirements, ensure_ascii=False),
         format_template_json=json.dumps(format_template, ensure_ascii=False) if format_template else "{}",
         status="collecting",
+        scoring_rubric_json=json.dumps(scoring_rubric, ensure_ascii=False),
         created_by=current_user.id,
     )
     db.add(project)

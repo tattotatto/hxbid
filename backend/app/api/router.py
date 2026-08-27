@@ -11,6 +11,7 @@ from app.api.personnel import router as personnel_router
 from app.api.projects import router as projects_router
 from app.api.bid import router as bid_router
 from app.api.chapters import router as chapters_router
+from app.api.scoring import router as scoring_router
 from app.api.qualifications import router as qual_router
 from app.api.templates import router as templates_router
 from app.api.admin import router as admin_router
@@ -29,6 +30,7 @@ api_router.include_router(personnel_router, prefix="/personnel", tags=["人员�
 api_router.include_router(projects_router, prefix="/projects", tags=["项目管理"])
 api_router.include_router(bid_router, prefix="/bid", tags=["AI生成"])
 api_router.include_router(chapters_router, prefix="/bid", tags=["章节管理"])
+api_router.include_router(scoring_router, prefix="/bid", tags=["评分"])
 api_router.include_router(collection_router, prefix="/collection", tags=["信息搜集"])
 api_router.include_router(templates_router, prefix="/templates", tags=["排版模板"])
 api_router.include_router(admin_router, prefix="/admin", tags=["系统管理"])

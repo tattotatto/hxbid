@@ -108,3 +108,19 @@ async def test_extract_rubric_malformed_points_degrades_none():
     assert rubric["status"] == "none"
     assert rubric["items"] == []
     assert "评标办法正文" in rubric["raw_text"]
+
+
+@pytest.mark.asyncio
+async def test_upload_wiring_never_raises_even_when_extraction_fails():
+    """upload_and_parse 的 rubric 提取槽位：任何异常都要吞掉并落 none 状态."""
+    from app.services.scoring_rubric import normalize_rubric
+
+    class ExplodingAdapter:
+        async def chat_completion(self, **kwargs):
+            raise RuntimeError("boom")
+
+    from app.services.scoring_rubric import extract_rubric
+    rubric = await extract_rubric("正文", ExplodingAdapter())
+    rubric = normalize_rubric(rubric)  # 落库前最后一次归一，永不抛
+    assert rubric["status"] == "none"
+    assert rubric["items"] == []
