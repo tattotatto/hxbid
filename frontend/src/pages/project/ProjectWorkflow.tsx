@@ -30,6 +30,8 @@ import GenerationProgress from '../../components/GenerationProgress'
 import BidEditor from '../../components/BidEditor'
 import TreeEditor from '../../components/TreeEditor/TreeEditor'
 import CollectionStep from './CollectionStep'
+import ScoringReportCard from '../../components/ScoringReportCard'
+import { scoringApi, ScoringReport } from '../../api/scoring'
 
 interface Chapter {
   id: string
@@ -234,6 +236,9 @@ export default function ProjectWorkflow() {
     overall_status: string
     message?: string
   } | null>(null)
+  // Self-scoring report (evaluated by the scoring rubric, SSE `scoring_report` / GET /scoring-report)
+  const [scoringReport, setScoringReport] = useState<ScoringReport | null>(null)
+  const [rescoring, setRescoring] = useState(false)
 
   // Local chapter content edits
   const [chapterContent, setChapterContent] = useState<Record<string, string>>({})
@@ -251,6 +256,11 @@ export default function ProjectWorkflow() {
       setProject(res.data)
       setTargetPages(res.data.target_pages || 2000)
       setFormatVerification(null)
+
+      // Load persisted scoring report (if the project has been scored before)
+      scoringApi.getReport(id).then((r) => {
+        if (r.items?.length) setScoringReport(r as ScoringReport)
+      }).catch(() => {})
 
       // Initialize chapter content map
       const contentMap: Record<string, string> = {}
@@ -578,6 +588,16 @@ export default function ProjectWorkflow() {
                   }
                   break
                 }
+                case 'scoring_report': {
+                  // Full scoring report JSON (ai_pipeline sends json.dumps(report)).
+                  // `data` is already parsed at the top of the reader — do not JSON.parse
+                  // again. Shape guard: only accept objects bearing an `items` array so
+                  // a malformed event cannot overwrite the report with garbage.
+                  if (data && Array.isArray(data.items)) {
+                    setScoringReport(data as ScoringReport)
+                  }
+                  break
+                }
                 case 'done':
                   break
                 case 'error':
@@ -672,6 +692,20 @@ export default function ProjectWorkflow() {
 
     await readGenerateStream(response, () => setRetrying(false))
     await fetchProject()
+  }
+
+  const handleRescore = async () => {
+    if (!id || rescoring) return
+    setRescoring(true)
+    try {
+      const report = await scoringApi.rescore(id)
+      setScoringReport(report)
+      message.success('重新评分完成')
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '重新评分失败')
+    } finally {
+      setRescoring(false)
+    }
   }
 
   const handleSave = async () => {
@@ -979,6 +1013,13 @@ export default function ProjectWorkflow() {
           </Space>
         </Card>
       )}
+
+      {/* Self-scoring report card (renders nothing until a report is present) */}
+      <ScoringReportCard
+        report={scoringReport}
+        onRescore={handleRescore}
+        rescoring={rescoring}
+      />
 
       {/* Failed sections warning with retry button */}
       {!generating && !retrying && failedSections.length > 0 && (
