@@ -17,6 +17,12 @@ def _rubric():
     ]}
 
 
+def _item(name):
+    """构造单条 §4.1 形态的内容型指标（gap_detect/build_rubric_nodes 直接消费 missing 项）."""
+    return {"id": "x", "dimension": "技术部分", "name": name, "kind": "content",
+            "points": 10, "criteria": "…", "key_terms": [name]}
+
+
 class TestGapDetect:
     def test_quality_and_price_kinds_not_in_missing(self):
         missing = gap_detect(_rubric(), ["技术部分", "报价", "投标函"])
@@ -55,6 +61,22 @@ class TestBuildRubricNodes:
         assert len(new_top[0]["children"]) == 1
         assert added == ["类似项目业绩"]
         assert attach == {}
+
+    def test_child_only_dimension_is_top_level_when_only_child_matches(self):
+        # 维度名只出现在子标题时（调用方只传顶层标题），应新建顶层而非 attach
+        missing = [{"dimension": "技术部分", "item": _item("服务方案")}]
+        new_top, attach, added = build_rubric_nodes(missing, ["商务标"])
+        assert attach == {}
+        assert len(new_top) == 1 and new_top[0]["title"] == "技术部分"
+        assert added == ["服务方案"]
+
+    def test_dimension_in_top_title_attaches(self):
+        # 维度名出现在顶层标题时正常挂接（顶层标题带序号前缀也能匹配）
+        missing = [{"dimension": "技术部分", "item": _item("服务方案")}]
+        new_top, attach, added = build_rubric_nodes(missing, ["三、技术部分"])
+        assert new_top == []
+        assert attach.get("技术部分") is not None
+        assert added == ["服务方案"]
 
 
 class TestAttachKeyFor:

@@ -497,6 +497,8 @@ async def _materialise_chapters(
 
     # ── 评标办法补全：内容型缺失指标自动补章，标记「来自评标办法」，幂等防重 ----------
     added_from_rubric: list[str] = []
+    writeback_children: dict[str, list] = {}   # 顶层章节 title -> 追加的补入叶子（回写 chapter_structure_json）
+    writeback_new_top: list[dict] = []         # 无 dimension 章节时新建的顶层节点（回写 chapter_structure_json）
     fresh_rubric_items = rubric.get("items")
     if fresh_rubric_items and not rubric.get("applied"):
         from app.services.rubric_gap import gap_detect, build_rubric_nodes
@@ -508,13 +510,21 @@ async def _materialise_chapters(
                 out.extend(_child_titles(n.get("children")))
             return out
 
+        def _load_children(ch) -> list:
+            try:
+                return json.loads(ch.children_json or "[]")
+            except json.JSONDecodeError:
+                return []
+
         all_titles = [c.title for c in created] + [
-            t for c in created for t in _child_titles(json.loads(c.children_json or "[]"))
+            t for c in created for t in _child_titles(_load_children(c))
         ]
         missing = gap_detect(rubric, all_titles)
         if missing:
             from app.services.rubric_gap import attach_key_for
-            new_top, attach, added_from_rubric = build_rubric_nodes(missing, all_titles)
+            # attach/new_top 归属只看顶层章节标题；子标题仅参与缺口检测（key_terms 命中）
+            # —— 否则维度名只出现在子标题时 attach 会指向不存在的顶层章节，补入节点静默丢失
+            new_top, attach, added_from_rubric = build_rubric_nodes(missing, [c.title for c in created])
             # 已存在 dimension 章节 -> 追加小节 + 刷新 children_json
             # （章节标题可能带序号前缀如「三、技术部分」，用双向包含匹配维度 key；
             #  首命中即消费该维度补入节点，后续同维度章节不再重复挂）
@@ -528,6 +538,7 @@ async def _materialise_chapters(
                         children = []
                     children.extend(payload)
                     ch.children_json = json.dumps(children, ensure_ascii=False)
+                    writeback_children[ch.title] = payload
             # 无 dimension 章节 -> 新建顶层（走同一 _make_chapter，正常 token 预算分配）
             for node in new_top:
                 chapter = _make_chapter(
@@ -539,9 +550,21 @@ async def _materialise_chapters(
                 )
                 db.add(chapter)
                 created.append(chapter)
+                writeback_new_top.append(node)
             # 幂等：补入成功后置 applied，rubric 内容再变动时才清除
             rubric["applied"] = True
             project.scoring_rubric_json = json.dumps(rubric, ensure_ascii=False)
+
+            # ── 回写 chapter_structure_json（spec §6.3：children_json / chapter_structure_json
+            #    节点同样带 source 标记）——已有章节扩子节点、无 dimension 章节追加顶层节点 ──
+            if writeback_children or writeback_new_top:
+                struct = [c for c in chapters if isinstance(c, dict)]
+                for part in struct:
+                    payload = writeback_children.pop(part.get("title", ""), None)
+                    if payload is not None:
+                        part["children"] = list(part.get("children") or []) + payload
+                struct.extend(writeback_new_top)
+                project.chapter_structure_json = json.dumps(struct, ensure_ascii=False)
     # 统一重编号（模板补入 / rubric 补入后 order_index 连续）
     for i, c in enumerate(created):
         c.order_index = i
