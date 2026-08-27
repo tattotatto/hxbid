@@ -92,7 +92,11 @@ async def refine_chapter_titles(
         req_lines.append(f"项目名称：{requirements['project_name']}")
     if requirements.get("service_requirements"):
         req_lines.append(f"服务内容：{'；'.join(requirements['service_requirements'])}")
-    if requirements.get("evaluation_criteria"):
+    rubric = requirements.get("scoring_rubric")
+    if rubric and rubric.get("items"):
+        from app.services.scoring_rubric import rubric_context_lines
+        req_lines.extend(rubric_context_lines(rubric, scoring_context))
+    elif requirements.get("evaluation_criteria"):
         req_lines.append(f"评标标准：{requirements['evaluation_criteria']}")
     if requirements.get("personnel_requirements"):
         req_lines.append(f"人员要求：{requirements['personnel_requirements']}")

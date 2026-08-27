@@ -744,6 +744,14 @@ async def refine_chapter_titles(
         chapter_meta = json.loads(chapter.chapter_meta_json) if chapter.chapter_meta_json else {}
         requirements = json.loads(project.parsed_requirements_json) if project.parsed_requirements_json else {}
 
+        # 生成期感知（spec §6.1）：结构化评分指标喂标题细化提示
+        try:
+            rubric = json.loads(project.scoring_rubric_json or "{}")
+        except json.JSONDecodeError:
+            rubric = {}
+        if rubric.get("items"):
+            requirements = {**requirements, "scoring_rubric": rubric}
+
         children = await do_refine(
             chapter_title=chapter.title,
             chapter_meta=chapter_meta,
