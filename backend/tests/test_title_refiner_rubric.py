@@ -87,3 +87,24 @@ async def test_title_refiner_falls_back_to_evaluation_criteria_without_rubric():
     prompt2 = _user_prompt(adapter2.calls)
     assert "评标标准：方案完整；针对性" in prompt2
     assert "评标要求·内容项需在正文中逐项覆盖" not in prompt2
+
+
+@pytest.mark.asyncio
+async def test_title_refiner_price_only_rubric_injects_nothing():
+    """rubric 有 items 但全为 price/quality 时既不注入评分行、也不回落自由文本（刻意背离，防被无意改回）."""
+    adapter = _FakeAdapter()
+    await refine_chapter_titles(
+        chapter_title="服务方案",
+        chapter_meta={},
+        requirements={
+            "evaluation_criteria": "自由文本旧分支",
+            "scoring_rubric": {"status": "found", "items": [
+                {"name": "报价合理", "points": 30, "kind": "price", "criteria": "低于成本价除外", "dimension": "价格部分"},
+            ]},
+        },
+        ai_adapter=adapter,
+    )
+    prompt = _user_prompt(adapter.calls)
+    assert "评标要求·内容项需在正文中逐项覆盖" not in prompt
+    assert "评标标准：自由文本旧分支" not in prompt
+    assert "报价合理" not in prompt
