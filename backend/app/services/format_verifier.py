@@ -1,5 +1,6 @@
 """宏曦标书 - 格式校验器.
 """
+import json
 import logging
 import re
 from typing import Any, Dict, List
@@ -428,12 +429,16 @@ def validate_chapter_structure(
     chapters: list,
     format_template: dict | None,
     requirements: dict | None,
+    rubric: dict | None = None,
 ) -> dict:
     """对账：锁定章节 vs 招标文件格式模板的必需章节 + 评分项覆盖.
 
     与 verify_format 不同，本函数在生成前（锁定章节阶段）调用，输入是
     已锁定的章节列表（ProjectChapter 对象或 {"title": ...} 字典），用于
     提前补齐/校验必需章节，而不是等生成完才发现缺失。
+
+    rubric：结构化评分指标（§4.1）；非空时用 gap_detect 做全层级标题覆盖
+    检查，否则回退历史 naive evaluation_criteria 拆分。
 
     Returns:
         {
@@ -450,6 +455,24 @@ def validate_chapter_structure(
         return getattr(ch, "title", "")
 
     titles = [_title_of(c) for c in chapters]
+
+    def _walk_titles(ch) -> list[str]:
+        out = [_title_of(ch)]
+        children = []
+        if isinstance(ch, dict):
+            children = ch.get("children") or []
+        elif hasattr(ch, "children_json"):
+            try:
+                children = json.loads(ch.children_json or "[]")
+            except json.JSONDecodeError:
+                children = []
+        for c in children:
+            out.extend(_walk_titles(c))
+        return out
+
+    # 全部层级标题（顶层 + 子小节），供评分项覆盖匹配
+    all_titles = [t for c in chapters for t in _walk_titles(c)]
+
     structure = (format_template or {}).get("document_structure", []) or []
 
     checks: list[dict] = []
@@ -517,21 +540,32 @@ def validate_chapter_structure(
         })
 
     # 3. 评分项覆盖提示（供标题细化阶段参考）
-    criteria = (requirements or {}).get("evaluation_criteria")
-    keywords: list[str] = []
-    if isinstance(criteria, str):
-        keywords = [k.strip() for k in re.split(r'[;；、,，\n]', criteria) if k.strip()]
-    elif isinstance(criteria, list):
-        keywords = [str(k).strip() for k in criteria if str(k).strip()]
-    for kw in keywords:
-        if not kw:
-            continue
-        covered = any(kw in t or t in kw for t in titles if t)
-        if not covered:
+    #    优先用结构化评分指标（gap_detect，全层级标题匹配）；无指标时回退历史 naive 拆分。
+    if rubric and rubric.get("items"):
+        from app.services.rubric_gap import gap_detect
+        missing = gap_detect(rubric, all_titles)
+        for m in missing:
+            name = m["item"].get("name", "")
             coverage_notes.append({
-                "keyword": kw,
-                "detail": f"评分项「{kw}」未在锁定章节标题中体现，建议标题细化时覆盖",
+                "keyword": name,
+                "detail": f"评分项「{name}」未在章节标题中体现，确认目录时将自动补充",
             })
+    else:
+        criteria = (requirements or {}).get("evaluation_criteria")
+        keywords: list[str] = []
+        if isinstance(criteria, str):
+            keywords = [k.strip() for k in re.split(r'[;；、,，\n]', criteria) if k.strip()]
+        elif isinstance(criteria, list):
+            keywords = [str(k).strip() for k in criteria if str(k).strip()]
+        for kw in keywords:
+            if not kw:
+                continue
+            covered = any(kw in t or t in kw for t in titles if t)
+            if not covered:
+                coverage_notes.append({
+                    "keyword": kw,
+                    "detail": f"评分项「{kw}」未在锁定章节标题中体现，建议标题细化时覆盖",
+                })
 
     overall = "fail" if missing_required else (
         "pass_with_warnings" if order_issues or coverage_notes else "pass"

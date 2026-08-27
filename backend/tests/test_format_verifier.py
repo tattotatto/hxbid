@@ -168,3 +168,29 @@ def test_apply_auto_fixes_no_trigger():
     # can_auto_fix is False, so no fix should be applied
     assert count == 0
     assert fixed[0]["content"] == "普通内容"
+
+
+def test_validate_chapter_structure_rubric_driven_coverage():
+    from app.services.format_verifier import validate_chapter_structure
+
+    template = {"document_structure": [{"title": "技术部分", "required": True}]}
+    chapters = [{"title": "技术部分", "type": "ai_generated"}]
+    rubric = {"items": [
+        {"id": "x", "dimension": "技术部分", "name": "售后服务方案", "kind": "content",
+         "points": 10, "criteria": "…", "key_terms": ["售后服务"]},
+    ]}
+    validation = validate_chapter_structure(chapters, template, {}, rubric=rubric)
+    assert any("售后服务方案" in n["detail"] for n in validation["coverage_notes"])
+    assert validation["overall_status"] == "pass_with_warnings"
+
+
+def test_validate_chapter_structure_falls_back_without_rubric():
+    from app.services.format_verifier import validate_chapter_structure
+
+    template = {"document_structure": [{"title": "技术部分", "required": True}]}
+    chapters = [{"title": "技术部分", "type": "ai_generated"}]
+    validation = validate_chapter_structure(
+        chapters, template, {"evaluation_criteria": "售后服务；针对性"},
+    )
+    # 无 rubric 时回退历史 naive 拆分
+    assert any("售后服务" in n["keyword"] for n in validation["coverage_notes"])

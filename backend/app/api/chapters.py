@@ -265,17 +265,19 @@ async def lock_chapters(
             detail="请先提取章节（POST /extract-chapters）再进行锁定",
         )
 
-    created, auto_added, validation = await _materialise_chapters(project, db)
+    created, auto_added, validation, added_from_rubric = await _materialise_chapters(project, db)
     await db.commit()
 
     logger.info(
-        "Locked %d chapters for project %s (auto-added: %s)",
-        len(created), project_id, auto_added,
+        "Locked %d chapters for project %s (auto-added: %s, rubric-added: %s)",
+        len(created), project_id, auto_added, added_from_rubric,
     )
 
     message = f"已锁定 {len(created)} 个章节。文件/表格类型章节可直接生成，AI撰写章节请先细化标题。"
     if auto_added:
         message += f" 已按招标文件格式自动补充必需章节：{'、'.join(auto_added)}。"
+    if added_from_rubric:
+        message += f" 已按评标办法自动补充：{'、'.join(added_from_rubric)}。"
     if validation.get("coverage_notes"):
         message += f" 有 {len(validation['coverage_notes'])} 个评分项未在章节标题中体现，建议细化标题时覆盖。"
 
@@ -298,6 +300,7 @@ class OutlineConfirmResponse(BaseModel):
     success: bool = False
     chapters_count: int = 0
     status: str = ""
+    added_from_rubric: list[str] = []
 
 
 @router.post("/{project_id}/outline/confirm", response_model=OutlineConfirmResponse)
@@ -336,19 +339,20 @@ async def confirm_outline(
             detail="章节数据为空，请先 POST /extract-chapters",
         )
 
-    created, auto_added, _validation = await _materialise_chapters(project, db)
+    created, auto_added, _validation, added_from_rubric = await _materialise_chapters(project, db)
     project.status = "collecting"
     await db.commit()
 
     logger.info(
-        "Outline confirmed for project %s: %d chapters (auto-added: %s)",
-        project_id, len(created), auto_added,
+        "Outline confirmed for project %s: %d chapters (auto-added: %s, rubric-added: %s)",
+        project_id, len(created), auto_added, added_from_rubric,
     )
 
     return OutlineConfirmResponse(
         success=True,
         chapters_count=len(created),
         status="collecting",
+        added_from_rubric=added_from_rubric,
     )
 
 
@@ -359,13 +363,14 @@ async def confirm_outline(
 async def _materialise_chapters(
     project: BidProject,
     db: AsyncSession,
-) -> tuple[list[ProjectChapter], list[str], dict]:
-    """根据 project.chapter_structure_json + format_template 物化 ProjectChapter 行.
+) -> tuple[list[ProjectChapter], list[str], dict, list[str]]:
+    """根据 project.chapter_structure_json + format_template + 评标办法 物化 ProjectChapter 行.
 
     Returns:
-        (created_chapters, auto_added_titles, validation_report)
+        (created_chapters, auto_added_titles, validation_report, added_from_rubric)
 
-    行为与历史 /chapters/lock 完全一致；调用方负责 db.commit() 与 project.status 推进。
+    第 4 个返回值 added_from_rubric：由评标办法内容型指标自动补充的标题列表（空 = 未补）。
+    行为与历史 /chapters/lock 一致；调用方负责 db.commit() 与 project.status 推进。
     """
     try:
         chapters = json.loads(project.chapter_structure_json or "[]")
@@ -380,6 +385,12 @@ async def _materialise_chapters(
         format_template = json.loads(project.format_template_json) if project.format_template_json else {}
     except json.JSONDecodeError:
         format_template = {}
+
+    # ── 评标办法指标：先加载，供覆盖校验（validate_chapter_structure）与补全共用 ──
+    try:
+        rubric = json.loads(project.scoring_rubric_json or "{}")
+    except json.JSONDecodeError:
+        rubric = {}
 
     # Delete existing chapters
     for ch in list(project.chapters):
@@ -446,7 +457,7 @@ async def _materialise_chapters(
     # ── 章节对账：校验必需章节齐全 + 按模板顺序自动补充缺失项 ──
     requirements = json.loads(project.parsed_requirements_json) if project.parsed_requirements_json else {}
     from app.services.format_verifier import validate_chapter_structure
-    validation = validate_chapter_structure(chapters, format_template, requirements)
+    validation = validate_chapter_structure(chapters, format_template, requirements, rubric=rubric)
     auto_added: list[str] = []
 
     if structure and validation.get("missing_required"):
@@ -484,7 +495,53 @@ async def _materialise_chapters(
             c.order_index = i
         created = final_order
 
-    return created, auto_added, validation
+    # ── 评标办法补全：内容型缺失指标自动补章，标记「来自评标办法」，幂等防重 ----------
+    added_from_rubric: list[str] = []
+    fresh_rubric_items = rubric.get("items")
+    if fresh_rubric_items and not rubric.get("applied"):
+        from app.services.rubric_gap import gap_detect, build_rubric_nodes
+
+        def _child_titles(nodes) -> list[str]:
+            out = []
+            for n in nodes or []:
+                out.append(str(n.get("title") or ""))
+                out.extend(_child_titles(n.get("children")))
+            return out
+
+        all_titles = [c.title for c in created] + [
+            t for c in created for t in _child_titles(json.loads(c.children_json or "[]"))
+        ]
+        missing = gap_detect(rubric, all_titles)
+        if missing:
+            new_top, attach, added_from_rubric = build_rubric_nodes(missing, all_titles)
+            # 已存在 dimension 章节 -> 追加小节 + 刷新 children_json
+            for ch in created:
+                if ch.title in attach:
+                    try:
+                        children = json.loads(ch.children_json or "[]")
+                    except json.JSONDecodeError:
+                        children = []
+                    children.extend(attach[ch.title])
+                    ch.children_json = json.dumps(children, ensure_ascii=False)
+            # 无 dimension 章节 -> 新建顶层（走同一 _make_chapter，正常 token 预算分配）
+            for node in new_top:
+                chapter = _make_chapter(
+                    title=node.get("title", ""),
+                    order_index=0,
+                    ch_type="ai_generated",
+                    meta=_build_meta(node, None),
+                    children=node.get("children", []),
+                )
+                db.add(chapter)
+                created.append(chapter)
+            # 幂等：补入成功后置 applied，rubric 内容再变动时才清除
+            rubric["applied"] = True
+            project.scoring_rubric_json = json.dumps(rubric, ensure_ascii=False)
+    # 统一重编号（模板补入 / rubric 补入后 order_index 连续）
+    for i, c in enumerate(created):
+        c.order_index = i
+
+    return created, auto_added, validation, added_from_rubric
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +564,49 @@ async def get_chapters(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Check if chapters have been locked (ProjectChapter records exist)
+    # 解析 chapter_structure_json（unlocked 形态；locked 分支用 ProjectChapter 行）
+    try:
+        chapters = json.loads(project.chapter_structure_json) if project.chapter_structure_json else []
+    except json.JSONDecodeError:
+        chapters = []
+
+    # ── 评标办法覆盖预览（未落库，仅供确认页「评标办法覆盖」提示条）──
+    def _collect_titles(items) -> list[str]:
+        out = []
+        for n in items or []:
+            if isinstance(n, dict):
+                out.append(str(n.get("title") or ""))
+                out.extend(_collect_titles(n.get("children")))
+        return out
+
+    try:
+        preview_rubric = json.loads(project.scoring_rubric_json or "{}") if project.scoring_rubric_json else {}
+    except json.JSONDecodeError:
+        preview_rubric = {}
+    rubric_cover = None
+    if preview_rubric.get("items"):
+        if project.chapters:
+            all_titles = []
+            for ch in sorted(project.chapters, key=lambda c: c.order_index):
+                all_titles.append(ch.title)
+                try:
+                    all_titles.extend(_collect_titles(json.loads(ch.children_json or "[]")))
+                except json.JSONDecodeError:
+                    pass
+        else:
+            all_titles = _collect_titles(chapters)
+        from app.services.rubric_gap import gap_detect
+        missing = gap_detect(preview_rubric, all_titles)
+        rubric_cover = {
+            "status": preview_rubric.get("status"),
+            "applied": bool(preview_rubric.get("applied")),
+            "missing": [
+                {"dimension": m["dimension"], "name": m["item"].get("name", "")}
+                for m in missing
+            ],
+        }
+
+    # locked 分支（提前 return，rubric_cover 已算好）
     if project.chapters:
         return {
             "locked": True,
@@ -527,19 +626,15 @@ async def get_chapters(
                 }
                 for ch in sorted(project.chapters, key=lambda c: c.order_index)
             ],
+            "rubric_cover": rubric_cover,
         }
-
-    # Return structure_json if not yet locked
-    try:
-        chapters = json.loads(project.chapter_structure_json) if project.chapter_structure_json else []
-    except json.JSONDecodeError:
-        chapters = []
 
     # chapter_structure_json 已经包含 type 字段（来自 extract-chapters / chat 输出），
     # 这里不需要改键名。
     return {
         "locked": False,
         "chapters": chapters,
+        "rubric_cover": rubric_cover,
     }
 
 
