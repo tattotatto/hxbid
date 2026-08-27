@@ -265,30 +265,67 @@ export default function ProjectWorkflow() {
         setActiveChapter(chapters[0].id)
       }
 
-      // Parse generation_state_json for failed sections
+      // Reconcile failed sections from two sources, unioned by `path`:
+      // (1) generation_state_json; (2) each chapter's children_json — the new
+      //     pipeline writes back status === 'failed' onto leaf nodes.
+      const failedByPath = new Map<
+        string,
+        { path: string; title: string; error: string | null }
+      >()
+      const addFailed = (path: string, title: string, error: string | null) => {
+        if (!failedByPath.has(path)) {
+          failedByPath.set(path, { path, title, error })
+        }
+      }
+
+      // Source 1: generation_state_json
       try {
         const genStateStr = res.data.generation_state_json
         if (genStateStr && genStateStr !== '{}') {
           const genState = JSON.parse(genStateStr)
           const sections = genState.sections || {}
-          const failed: Array<{ path: string; title: string; error: string | null }> = []
           for (const [path, sec] of Object.entries(sections)) {
             const s = sec as any
             if (s.status === 'failed') {
-              failed.push({
-                path,
-                title: path.split(' > ').pop() || path,
-                error: s.error || null,
-              })
+              addFailed(path, path.split(' > ').pop() || path, s.error || null)
             }
           }
-          setFailedSections(failed)
-        } else {
-          setFailedSections([])
         }
       } catch {
-        setFailedSections([])
+        // generation_state parse failure is non-fatal; children_json scan still runs
       }
+
+      // Source 2: children_json — path semantics match backend _collect_leaf_tasks:
+      // a node with a `path` array is a flat task (its path is the FULL path,
+      // already includes the chapter title); otherwise it is nested and we build
+      // [...ancestor, n.title] starting from [ch.title].
+      const collectFailed = (nodes: any[], ancestor: string[]) => {
+        for (const n of nodes ?? []) {
+          if (!n || typeof n !== 'object') continue
+          const fullPath: string[] = Array.isArray(n.path)
+            ? n.path
+            : [...ancestor, n.title]
+          if (n.status === 'failed') {
+            addFailed(fullPath.join(' > '), n.title, n.error || null)
+          }
+          if (Array.isArray(n.children) && n.children.length > 0) {
+            collectFailed(n.children, fullPath)
+          }
+        }
+      }
+      for (const ch of chapters) {
+        if (!ch.children_json) continue
+        try {
+          const parsed = JSON.parse(ch.children_json)
+          if (Array.isArray(parsed)) {
+            collectFailed(parsed, [ch.title])
+          }
+        } catch {
+          // skip unparseable children_json
+        }
+      }
+
+      setFailedSections(Array.from(failedByPath.values()))
     } catch {
       message.error('获取项目信息失败')
       navigate('/projects')
@@ -312,44 +349,11 @@ export default function ProjectWorkflow() {
     }
   }
 
-  const handleGenerate = async () => {
-    if (!id) return
-    setGenerating(true)
-    setCompleted(0)
-    setTotal(0)
-    setSseChapters([])
-    setCurrentChapter('')
-    setRagSources({})
-    setAiTraces({})
-
-    const token = localStorage.getItem('token')
-    let response: Response
-
-    try {
-      response = await fetch('/api/v1/bid/generate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ project_id: id, target_pages: targetPages }),
-      })
-    } catch {
-      message.error('生成请求失败')
-      setGenerating(false)
-      return
-    }
-
-    if (!response.ok) {
-      message.error('生成请求失败')
-      setGenerating(false)
-      return
-    }
-
+  const readGenerateStream = async (response: Response, done: () => void) => {
     const reader = response.body?.getReader()
     if (!reader) {
       message.error('无法读取生成流')
-      setGenerating(false)
+      done()
       return
     }
 
@@ -472,7 +476,13 @@ export default function ProjectWorkflow() {
                   }))
                   break
                 }
+                case 'chapter_start': {
+                  // New pipeline: per-chapter serial submission
+                  setCurrentChapter(`正在生成第 ${data.index}/${data.total} 章：${data.title}...`)
+                  break
+                }
                 case 'chapter_done': {
+                  setCurrentChapter(`第 ${data.title} 章完成（成功 ${data.leaf_success}，失败 ${data.leaf_failed}）`)
                   setCompleted((prev) => prev + 1)
                   // Mark chapter as generated in SSE list
                   setSseChapters((prev) =>
@@ -482,6 +492,11 @@ export default function ProjectWorkflow() {
                         : c,
                     ),
                   )
+                  break
+                }
+                case 'chapter_error': {
+                  // New pipeline: whole chapter failed to submit
+                  setCurrentChapter(`第 ${data.title} 章生成失败${data.error ? '：' + data.error : ''}`)
                   break
                 }
                 case 'section_start': {
@@ -500,7 +515,11 @@ export default function ProjectWorkflow() {
                   break
                 }
                 case 'section_done': {
-                  // New pipeline: a leaf section finished (index = completed count)
+                  // New pipeline: a leaf section finished (index = completed count).
+                  // Resumed (already-generated) leaves emit an "orphan done" with no
+                  // preceding section_start — the subId map lookup is a harmless no-op
+                  // and setCompleted(data.index) still advances progress. Never align
+                  // on index; alignment is by path.
                   setCompleted(data.index || 0)
                   const subId = `sec_${data.index}_${data.title || data.path || ''}`
                   setSseChapters((prev) =>
@@ -576,23 +595,24 @@ export default function ProjectWorkflow() {
       message.error('生成流读取失败')
     }
 
-    setGenerating(false)
-    // Refresh project data from server
-    await fetchProject()
+    done()
   }
 
-  const handleRetry = async () => {
+  const handleGenerate = async () => {
     if (!id) return
-    setRetrying(true)
+    setGenerating(true)
     setCompleted(0)
-    setCurrentChapter('正在重试失败章节...')
+    setTotal(0)
     setSseChapters([])
+    setCurrentChapter('')
+    setRagSources({})
+    setAiTraces({})
 
     const token = localStorage.getItem('token')
     let response: Response
 
     try {
-      response = await fetch('/api/v1/bid/generate/retry-failed', {
+      response = await fetch('/api/v1/bid/generate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -601,124 +621,54 @@ export default function ProjectWorkflow() {
         body: JSON.stringify({ project_id: id, target_pages: targetPages }),
       })
     } catch {
-      message.error('重试请求失败')
+      message.error('生成请求失败')
+      setGenerating(false)
+      return
+    }
+
+    if (!response.ok) {
+      message.error('生成请求失败')
+      setGenerating(false)
+      return
+    }
+
+    await readGenerateStream(response, () => setGenerating(false))
+    // Refresh project data from server
+    await fetchProject()
+  }
+
+  const handleRetry = async () => {
+    if (!id) return
+    setRetrying(true)
+    setCompleted(0)
+    setSseChapters([])
+    setCurrentChapter('重新生成（跳过已完成章节，补齐未生成的）')
+
+    const token = localStorage.getItem('token')
+    let response: Response
+
+    try {
+      response = await fetch('/api/v1/bid/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ project_id: id, target_pages: targetPages }),
+      })
+    } catch {
+      message.error('生成请求失败')
       setRetrying(false)
       return
     }
 
     if (!response.ok) {
-      try {
-        const errData = await response.json()
-        message.error(errData.detail || '重试请求失败')
-      } catch {
-        message.error('重试请求失败')
-      }
+      message.error('生成请求失败')
       setRetrying(false)
       return
     }
 
-    const reader = response.body?.getReader()
-    if (!reader) {
-      message.error('无法读取重试流')
-      setRetrying(false)
-      return
-    }
-
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        let currentEvent = ''
-        for (const line of lines) {
-          const trimmed = line.trim()
-
-          if (trimmed.startsWith('event: ')) {
-            currentEvent = trimmed.slice(7).trim()
-          } else if (trimmed.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(trimmed.slice(6))
-
-              switch (currentEvent) {
-                case 'status': {
-                  if (data.phase === 'retry') {
-                    setCurrentChapter(data.message || `正在重试 ${data.retry_count} 个失败章节...`)
-                  } else if (data.phase === 'generating') {
-                    if (data.total_leaf_sections) setTotal(data.total_leaf_sections)
-                    if (data.completed_leaf_sections) setCompleted(data.completed_leaf_sections)
-                    if (data.message) setCurrentChapter(data.message)
-                  } else if (data.message) {
-                    setCurrentChapter(data.message)
-                  }
-                  break
-                }
-                case 'outline_generated': {
-                  setTotal(data.total_leaf_sections || data.total_parts || 0)
-                  setCurrentChapter(`大纲已加载：${data.total_leaf_sections} 个子章节，已完成 ${data.completed_from_previous || 0} 个`)
-                  break
-                }
-                case 'subsection_status': {
-                  setCompleted(data.completed || 0)
-                  if (data.total) setTotal(data.total)
-                  if (data.current_title) {
-                    setCurrentChapter(data.current_title)
-                  }
-                  const subId = `retry_${data.completed}_${data.current_title || ''}`
-                  setSseChapters((prev) => {
-                    const next = [...prev, { id: subId, title: data.current_title || '', status: 'pending' }]
-                    return next.slice(-20)
-                  })
-                  break
-                }
-                case 'subsection_chunk': {
-                  if (data.chapter_id) {
-                    setChapterContent((prev) => ({
-                      ...prev,
-                      [data.chapter_id]:
-                        (prev[data.chapter_id] || '') + (data.text || ''),
-                    }))
-                  }
-                  break
-                }
-                case 'section_done': {
-                  setCompleted((prev) => prev + 1)
-                  setSseChapters((prev) =>
-                    prev.map((c) =>
-                      c.id === `retry_${data.index}_${data.title}`
-                        ? { ...c, status: 'generated' }
-                        : c,
-                    ),
-                  )
-                  break
-                }
-                case 'section_error': {
-                  message.warning(`${data.title || data.path}: ${data.error || '生成失败'}`)
-                  break
-                }
-                case 'done':
-                  break
-                case 'error':
-                  message.error(data.message || '重试过程中出现错误')
-                  break
-              }
-            } catch {
-              // Skip unparseable lines
-            }
-          }
-        }
-      }
-    } catch {
-      message.error('重试流读取失败')
-    }
-
-    setRetrying(false)
+    await readGenerateStream(response, () => setRetrying(false))
     await fetchProject()
   }
 

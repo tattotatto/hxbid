@@ -113,16 +113,17 @@ function buildSectionNode(
     selectedPath.length === currentPath.length &&
     selectedPath.every((p, i) => p === currentPath[i]);
 
-  // Status icon
+  // Status icon: `failed` must win over `content` so a failed leaf carrying
+  // writeback content still renders red instead of green.
   let statusIcon: React.ReactNode = null;
   if (section.human_edited) {
     statusIcon = <EditOutlined style={{ color: '#faad14', fontSize: 11 }} />;
+  } else if (section.status === 'failed') {
+    statusIcon = <ExclamationCircleOutlined style={{ color: '#ff4d4f', fontSize: 11 }} />;
   } else if (section.content) {
     statusIcon = <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 11 }} />;
   } else if (section.status === 'generating') {
     statusIcon = <ClockCircleOutlined style={{ color: '#1677ff', fontSize: 11 }} />;
-  } else if (section.status === 'failed') {
-    statusIcon = <ExclamationCircleOutlined style={{ color: '#ff4d4f', fontSize: 11 }} />;
   }
 
   const node: DataNode = {
@@ -136,7 +137,11 @@ function buildSectionNode(
         <span style={{
           fontSize: 12,
           fontWeight: isSelected ? 600 : 400,
-          color: isSelected ? '#1677ff' : undefined,
+          color: isSelected
+            ? '#1677ff'
+            : section.status === 'failed'
+              ? '#ff4d4f'
+              : undefined,
         }}>
           {section.title}
         </span>
