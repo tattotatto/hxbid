@@ -1,7 +1,7 @@
 """评分指标驱动目录补全（Feature A 纯函数）单元测试.
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
-from app.services.rubric_gap import gap_detect, build_rubric_nodes
+from app.services.rubric_gap import gap_detect, build_rubric_nodes, attach_key_for
 
 
 def _rubric():
@@ -55,3 +55,15 @@ class TestBuildRubricNodes:
         assert len(new_top[0]["children"]) == 1
         assert added == ["类似项目业绩"]
         assert attach == {}
+
+
+class TestAttachKeyFor:
+    def test_matches_dimension_in_prefixed_title(self):
+        # 章节标题带序号前缀（「三、技术部分」）→ 命中维度 key
+        assert attach_key_for("三、技术部分", {"技术部分": []}) == "技术部分"
+
+    def test_no_match_returns_none(self):
+        assert attach_key_for("投标函", {"技术部分": []}) is None
+
+    def test_empty_attach_returns_none(self):
+        assert attach_key_for("技术部分", {}) is None

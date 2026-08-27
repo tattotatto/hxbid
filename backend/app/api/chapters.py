@@ -513,15 +513,20 @@ async def _materialise_chapters(
         ]
         missing = gap_detect(rubric, all_titles)
         if missing:
+            from app.services.rubric_gap import attach_key_for
             new_top, attach, added_from_rubric = build_rubric_nodes(missing, all_titles)
             # 已存在 dimension 章节 -> 追加小节 + 刷新 children_json
+            # （章节标题可能带序号前缀如「三、技术部分」，用双向包含匹配维度 key；
+            #  首命中即消费该维度补入节点，后续同维度章节不再重复挂）
             for ch in created:
-                if ch.title in attach:
+                key = attach_key_for(ch.title, attach)
+                if key is not None:
+                    payload = attach.pop(key)
                     try:
                         children = json.loads(ch.children_json or "[]")
                     except json.JSONDecodeError:
                         children = []
-                    children.extend(attach[ch.title])
+                    children.extend(payload)
                     ch.children_json = json.dumps(children, ensure_ascii=False)
             # 无 dimension 章节 -> 新建顶层（走同一 _make_chapter，正常 token 预算分配）
             for node in new_top:

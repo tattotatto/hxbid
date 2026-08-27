@@ -38,6 +38,14 @@ def _dimension_parent_exists(titles: list[str], dimension: str) -> bool:
     return bool(dimension) and any(dimension in t or t in dimension for t in titles)
 
 
+def attach_key_for(title: str, attach: dict) -> str | None:
+    """返回该章节应接收的补入节点维度 key（与 _dimension_parent_exists 同语义：双向包含，首个命中）."""
+    for k in attach:
+        if k and (k in title or title in k):
+            return k
+    return None
+
+
 def build_rubric_nodes(missing: list[dict], titles: list[str]):
     """为缺失指标构建补入节点。
 
