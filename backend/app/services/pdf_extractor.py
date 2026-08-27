@@ -21,6 +21,16 @@ FORMAT_KEYWORDS = [
     "第四章 投标文件格式",
 ]
 
+# 评标办法定位关键词（用户已确认清单，运行时仍可能扩展）
+EVALUATION_KEYWORDS = [
+    "评标办法",
+    "评分办法",
+    "综合评分法",
+    "评分标准",
+    "评审办法",
+    "评审标准",
+]
+
 
 def locate_format_pages(pdf) -> Tuple[int, int] | None:
     """定位招标文件中"投标文件格式"章节的起止页码.
@@ -59,6 +69,45 @@ def locate_format_pages(pdf) -> Tuple[int, int] | None:
                 )
                 return start_page, end_page
     return None
+
+
+def locate_evaluation_section(pdf):
+    """定位招标文件中"评标办法/评分标准"章节的起止页码并提取全文.
+
+    评标办法通常在文中部，parse_bid_requirements 只解析前 15,000 字符经常截断，
+    这里直接按页扫描 PDF 全文，绕开截断（克隆 locate_format_pages 模式）。
+
+    Returns:
+        (start_page, end_page, text)，0-indexed；未定位返回 None。
+        end_page 止于「投标文件格式」/「投标函」章节之前（评标办法通常在其后截止）。
+    """
+    num_pages = len(pdf.pages)
+    start_page = None
+    for i in range(num_pages):
+        text = pdf.pages[i].extract_text() or ""
+        if any(kw in text for kw in EVALUATION_KEYWORDS):
+            start_page = i
+            break
+    if start_page is None:
+        logger.info("No evaluation section found in %d pages", num_pages)
+        return None
+
+    end_page = num_pages - 1
+    for i in range(start_page + 1, num_pages):
+        text = pdf.pages[i].extract_text() or ""
+        if any(kw in text for kw in FORMAT_KEYWORDS) or "投标函" in text:
+            end_page = i - 1
+            break
+
+    section_text = extract_text_from_pages(pdf, start_page, end_page)
+    if not section_text.strip():
+        logger.info("Evaluation section located but empty (pages %d-%d)", start_page, end_page)
+        return None
+    logger.info(
+        "Evaluation section: pages %d-%d (%d chars)",
+        start_page, end_page, len(section_text),
+    )
+    return start_page, end_page, section_text
 
 
 def extract_text_from_pages(pdf, start: int, end: int) -> str:

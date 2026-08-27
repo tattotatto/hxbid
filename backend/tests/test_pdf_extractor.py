@@ -254,3 +254,48 @@ class TestErrorHandling:
         """全文档提取 - 不存在的文件抛出 FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             extract_full_document("/nonexistent/file.pdf")
+
+
+class TestLocateEvaluationSection:
+    """评标办法章节定位（fake pdf 冒烟）."""
+
+    def test_returns_none_when_missing(self):
+        from app.services.pdf_extractor import locate_evaluation_section
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([FakePage("第一章 招标公告"), FakePage("第二章 投标人须知")])
+        assert locate_evaluation_section(pdf) is None
+
+    def test_finds_section_and_stops_at_format(self):
+        from app.services.pdf_extractor import (
+            locate_evaluation_section,
+            extract_text_from_pages,
+        )
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([
+            FakePage("第一章 招标公告"),
+            FakePage("第三章 评标办法 综合评分法 评分标准……技术部分 15 分"),
+            FakePage("详细评分细则：服务方案 5 分、业绩 10 分"),
+            FakePage("第六章 投标文件格式 投标函"),
+            FakePage("（格式模板页）"),
+        ])
+        located = locate_evaluation_section(pdf)
+        assert located is not None
+        start, end, text = located
+        assert start == 1 and end == 2
+        assert "综合评分法" in text and "投标文件格式" not in text
+        # 与 extract_text_from_pages 一致（0-indexed 含 end）
+        assert text == extract_text_from_pages(pdf, 1, 2)
