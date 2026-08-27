@@ -1,7 +1,11 @@
 """宏曦标书 - 逐章生成流程辅助函数 单元测试.
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
-from app.services.ai_pipeline import _is_leaf_done, _mark_leaf_failure
+from app.services.ai_pipeline import (
+    _filter_requirements_for_chapter,
+    _is_leaf_done,
+    _mark_leaf_failure,
+)
 
 
 class TestMarkLeafFailure:
@@ -27,3 +31,29 @@ class TestIsLeafDone:
 
     def test_no_status_is_not_done(self):
         assert _is_leaf_done({"content": "旧内容"}) is False
+
+
+class TestFilterRequirementsForChapter:
+    def test_personnel_keyed_on_role_retained_when_matching(self):
+        reqs = {
+            "project_name": "某保安项目",
+            "required_personnel": [
+                {"role": "项目负责人", "certifications": ["保安师证"], "count": 1},
+                {"role": "消防员", "certifications": [], "count": 2},
+            ],
+        }
+        filtered = _filter_requirements_for_chapter(reqs, "项目负责人配置方案")
+        roles = [p["role"] for p in filtered["required_personnel"]]
+        assert roles == ["项目负责人"]
+
+    def test_personnel_top_level_keys_preserved(self):
+        reqs = {
+            "project_name": "某保安项目",
+            "required_personnel": [
+                {"role": "项目负责人", "count": 1},
+            ],
+        }
+        filtered = _filter_requirements_for_chapter(reqs, "服务方案")
+        # 无关岗位被移除，但顶层键 project_name 保留
+        assert filtered["project_name"] == "某保安项目"
+        assert filtered["required_personnel"] == []

@@ -482,8 +482,7 @@ export default function ProjectWorkflow() {
                   break
                 }
                 case 'chapter_done': {
-                  setCurrentChapter(`第 ${data.title} 章完成（成功 ${data.leaf_success}，失败 ${data.leaf_failed}）`)
-                  setCompleted((prev) => prev + 1)
+                  setCurrentChapter(`第 ${data.title} 章完成（成功 ${data.leaf_success ?? 0}，失败 ${data.leaf_failed ?? 0}）`)
                   // Mark chapter as generated in SSE list
                   setSseChapters((prev) =>
                     prev.map((c) =>
@@ -641,8 +640,11 @@ export default function ProjectWorkflow() {
     if (!id) return
     setRetrying(true)
     setCompleted(0)
+    setTotal(0)
     setSseChapters([])
     setCurrentChapter('重新生成（跳过已完成章节，补齐未生成的）')
+    setRagSources({})
+    setAiTraces({})
 
     const token = localStorage.getItem('token')
     let response: Response

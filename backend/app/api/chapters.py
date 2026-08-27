@@ -985,20 +985,11 @@ async def chat_section(
         raise HTTPException(status_code=404, detail="Chapter not found")
 
     try:
-        from app.services.collection import get_collected_resources
-        from app.services.materials_context import assemble_section_materials
         from app.services.section_editor import chat_section as do_chat
         from app.services.ai_adapter import ai_adapter as ai
 
-        collected = await get_collected_resources(project_id, db)
         section_title = data.section_path[-1] if data.section_path else chapter.title
-        materials_guidance = assemble_section_materials(
-            section_title,
-            qualifications=collected.get("qualifications", []) if collected else None,
-            personnel=collected.get("personnel", []) if collected else None,
-            contracts=collected.get("contracts", []) if collected else None,
-            company=collected.get("company") if collected else None,
-        )
+        materials_guidance = await _materials_guidance_for_section(section_title, project_id, db)
 
         result = await do_chat(
             chapter_title=chapter.title,

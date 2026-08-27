@@ -154,6 +154,13 @@ def collect_sibling_summaries(children_json: str, section_path: list[str]) -> li
 # AI 修改
 # ---------------------------------------------------------------------------
 
+def _materials_block(guidance: str) -> str:
+    """组装可用素材提示块；无素材时返回空串（modify/chat 共用）."""
+    if not guidance:
+        return ""
+    return f"\n【可用的真实素材（标书中必须使用，严禁编造）】\n{guidance}\n"
+
+
 async def modify_section(
     chapter_title: str,
     section_path: list[str],
@@ -178,10 +185,7 @@ async def modify_section(
     siblings = collect_sibling_summaries(children_json, section_path)
     sibling_text = "\n".join(f"  - {s}" for s in siblings) if siblings else "（无同级节）"
 
-    materials_block = (
-        f"\n【可用的真实素材（标书中必须使用，严禁编造）】\n{materials_guidance}\n"
-        if materials_guidance else ""
-    )
+    materials_block = _materials_block(materials_guidance)
 
     user_prompt = f"""【文档位置】{ancestry}
 【当前节标题】{section_title}
@@ -316,10 +320,7 @@ async def chat_section(
     # 历史对话（前端已持有，防上下文膨胀由前端限制条数）
     history = messages[-12:] if messages else []
 
-    materials_block = (
-        f"\n【可用的真实素材（标书中必须使用，严禁编造）】\n{materials_guidance}\n"
-        if materials_guidance else ""
-    )
+    materials_block = _materials_block(materials_guidance)
 
     user_prompt = f"""【文档位置】{ancestry}
 【当前节标题】{section_title}

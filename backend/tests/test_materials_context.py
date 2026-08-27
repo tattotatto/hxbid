@@ -5,6 +5,7 @@ from app.services.materials_context import (
     build_qualifications_context,
     build_contract_context,
     build_personnel_context,
+    build_company_context,
     assemble_section_materials,
 )
 
@@ -41,6 +42,22 @@ class TestBuildPersonnelContext:
 
     def test_empty_returns_empty(self):
         assert build_personnel_context([]) == ""
+
+
+class TestBuildCompanyContext:
+    def test_renders_notes_and_unfilled_placeholder(self):
+        company = {
+            "company_name": "云南宏曦科技有限公司",
+            "address": "",
+            "notes": "连续三年获评诚信企业",
+        }
+        text = build_company_context(company)
+        assert "云南宏曦科技有限公司" in text
+        assert "备注：连续三年获评诚信企业" in text
+        assert "[未填写]" in text
+
+    def test_none_returns_empty(self):
+        assert build_company_context(None) == ""
 
 
 class TestAssembleSectionMaterials:

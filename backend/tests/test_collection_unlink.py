@@ -51,6 +51,15 @@ class TestUnlinkQualification:
         assert deleted is True
         assert db.delete.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_zero_match_is_graceful_noop(self):
+        # select 返回零行（deleted is False）：不删除任何记录，返回 False
+        db = _make_db([])
+        with patch("app.services.collection.select"):
+            deleted = await unlink_qualification("proj1", "保安服务许可证", "q1", db)
+        assert deleted is False
+        db.delete.assert_not_called()
+
 
 class TestUnlinkContract:
     @pytest.mark.asyncio

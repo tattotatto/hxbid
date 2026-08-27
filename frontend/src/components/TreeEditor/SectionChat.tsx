@@ -22,6 +22,7 @@ export default function SectionChat({ projectId, chapterId, sectionPath, current
   useEffect(() => {
     setMessages([])
     setRevisedContent(null)
+    setInput('')
   }, [chapterId, JSON.stringify(sectionPath)])
 
   useEffect(() => {

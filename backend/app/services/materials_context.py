@@ -94,32 +94,41 @@ def build_company_context(company: dict | None) -> str:
 
     字段来自 get_collected_resources 的 company 块（company_name /
     business_license_number / legal_rep_name / legal_rep_id_number /
-    address / contact_phone / website / notes）。字段缺失自动跳过。
+    address / contact_phone / website / notes）。字段缺失以 [未填写] 占位，
+    备注（notes）字段一并注入；渲染与 ai_pipeline.build_company_info_block 对齐。
     """
     if not company:
         return ""
-    parts: list[str] = []
-    if company.get("company_name"):
-        parts.append(f"公司名称：{company['company_name']}")
-    if company.get("business_license_number"):
-        parts.append(f"统一社会信用代码：{company['business_license_number']}")
-    if company.get("legal_rep_name"):
-        parts.append(f"法定代表人：{company['legal_rep_name']}")
-    if company.get("legal_rep_id_number"):
-        parts.append(f"法定代表人身份证号：{company['legal_rep_id_number']}")
-    if company.get("address"):
-        parts.append(f"注册地址：{company['address']}")
-    if company.get("contact_phone"):
-        parts.append(f"联系电话：{company['contact_phone']}")
-    if company.get("website"):
-        parts.append(f"公司网址：{company['website']}")
-    if not parts:
-        return ""
-    return "\n".join([
-        "【公司基本信息 — 以下为真实公司数据，标书中涉及公司信息时必须原样使用，严禁编造】",
-        *parts,
-        "重要提醒：标书中公司名称、统一社会信用代码等必须以真实数据为准，不得编造。",
-    ])
+
+    fields = [
+        ("公司名称", "company_name"),
+        ("统一社会信用代码", "business_license_number"),
+        ("法定代表人", "legal_rep_name"),
+        ("法定代表人身份证号", "legal_rep_id_number"),
+        ("公司地址", "address"),
+        ("联系电话", "contact_phone"),
+        ("公司网站", "website"),
+    ]
+
+    lines = ["【公司基本信息 — 以下为真实公司数据，标书中涉及公司信息时必须原样使用，严禁编造】"]
+    for label, key in fields:
+        value = (company.get(key) or "").strip()
+        if value:
+            lines.append(f"  {label}：{value}")
+        else:
+            lines.append(f"  {label}：[未填写]")
+
+    # 备注字段一并注入，避免公司备注在新管线丢失
+    notes = (company.get("notes") or "").strip()
+    if notes:
+        lines.append(f"  备注：{notes}")
+
+    lines.append("")
+    lines.append(
+        "重要提醒：标书中公司名称、统一社会信用代码等必须以真实数据为准，不得编造。"
+        "如某字段标注为[未填写]，请在标书中留空或写[待补充]，不得编造。"
+    )
+    return "\n".join(lines)
 
 
 def assemble_section_materials(

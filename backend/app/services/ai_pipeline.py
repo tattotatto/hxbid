@@ -1141,7 +1141,11 @@ def _filter_requirements_for_chapter(requirements: dict, chapter_title: str) -> 
             continue
         kept = []
         for it in items:
-            name = it.get("name", "") if isinstance(it, dict) else str(it)
+            if isinstance(it, dict):
+                # required_personnel 条目以 role 标识岗位，required_documents 以 name 标识证件
+                name = it.get("role", "") if key == "required_personnel" else it.get("name", "")
+            else:
+                name = str(it)
             if not name or _chapter_matches_requirement(chapter_title, name):
                 kept.append(it)
         filtered[key] = kept
@@ -1432,15 +1436,16 @@ async def generate_from_chapter_structure(
 
     title_to_order = {c.title: c.order_index for c in chapters}
 
-    for chapter in chapters:
-        if chapter.chapter_type != "ai_generated":
-            continue
+    # 只有 ai_generated 章节会 emit chapter_start，index/total 应只统计 AI 章节，
+    # 否则会把文件/表格章节也计入 total（且 index 出现跳号）。
+    ai_chapters = [c for c in chapters if c.chapter_type == "ai_generated"]
 
+    for ai_index, chapter in enumerate(ai_chapters, start=1):
         yield {
             "event": "chapter_start",
             "data": json.dumps({
                 "chapter_id": chapter.id, "title": chapter.title,
-                "index": chapter.order_index, "total": len(chapters),
+                "index": ai_index, "total": len(ai_chapters),
             }, ensure_ascii=False),
         }
 
