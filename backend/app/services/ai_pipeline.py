@@ -1093,6 +1093,66 @@ async def _generate_single_section_with_retry(
 # 5b. generate_from_chapter_structure — 基于锁定章节结构生成
 # ---------------------------------------------------------------------------
 
+def _is_leaf_done(node: dict) -> bool:
+    """叶子是否已生成完毕（续传时跳过）."""
+    return bool(node.get("content")) and node.get("status") == "generated"
+
+
+def _mark_leaf_failure(tree: list, path: list[str], error: str) -> None:
+    """把叶子节点标记为失败（兼容嵌套树与扁平任务列表）."""
+    def _find(nodes, remaining):
+        for node in nodes:
+            if node.get("title") == remaining[0]:
+                if len(remaining) == 1:
+                    node["status"] = "failed"
+                    node["error"] = error
+                    return True
+                kids = node.get("children") or []
+                if _find(kids, remaining[1:]):
+                    return True
+        return False
+
+    def _find_flat(nodes, remaining):
+        for node in nodes:
+            if node.get("path") == remaining:
+                node["status"] = "failed"
+                node["error"] = error
+                return True
+        return False
+
+    if tree and isinstance(tree[0], dict) and "path" in tree[0]:
+        _find_flat(tree, path)
+    else:
+        _find(tree, path)
+
+
+def _filter_requirements_for_chapter(requirements: dict, chapter_title: str) -> dict:
+    """按章节标题过滤招标要求，保留顶层结构.
+
+    命中章节标题/章节关键词的要求条目保留，否则移除数组元素；
+    顶层键（required_documents/required_personnel/project_name 等）必须保留。
+    """
+    if not requirements:
+        return {}
+    filtered = dict(requirements)
+    for key in ("required_documents", "required_personnel"):
+        items = filtered.get(key) or []
+        if not isinstance(items, list):
+            continue
+        kept = []
+        for it in items:
+            name = it.get("name", "") if isinstance(it, dict) else str(it)
+            if not name or _chapter_matches_requirement(chapter_title, name):
+                kept.append(it)
+        filtered[key] = kept
+    return filtered
+
+
+def _chapter_matches_requirement(chapter_title: str, req_name: str) -> bool:
+    """粗略相关性：章节标题与要求名有共现词即认为相关。"""
+    return chapter_title in req_name or req_name in chapter_title
+
+
 async def generate_from_chapter_structure(
     project_id: str,
     requirements: dict,
@@ -1301,151 +1361,31 @@ async def generate_from_chapter_structure(
         }, ensure_ascii=False),
     }
 
-    # ── Phase: Generate AI sections in parallel ──
+    # ── Phase: 逐章节串行生成（每章上下文只装本章需要的，章内叶子并行）──
     parallel_workers = max(1, settings.GENERATION_PARALLEL_SECTIONS)
 
     yield {
         "event": "status",
         "data": json.dumps({
             "phase": "generating",
-            "message": f"开始并行生成 {total_leaves} 个小节（{parallel_workers} 路并发），"
+            "message": f"开始逐章生成（每章内部 {parallel_workers} 路并发），"
                        f"目标 {target_pages} 页，预计约 {estimated_pages} 页...",
             "total_leaf_sections": total_leaves,
             "completed_leaf_sections": 0,
         }, ensure_ascii=False),
     }
 
-    # Build context
-    contract_context = ""
-    if matched_contracts:
-        contract_context = _format_contract_context(matched_contracts)
-
     generated_sections: Dict[str, str] = {}
     completed = 0
+    chapter_errors: list[str] = []
+    chapters_payload: list[dict] = []
+    lead_ins: Dict[str, str] = {}
 
-    if total_leaves > 0:
-        semaphore = asyncio.Semaphore(parallel_workers)
-
-        async def _gen_one(task_info: dict) -> dict:
-            async with semaphore:
-                task = task_info["task"]
-                path_key = " > ".join(task["path"])
-                title = task["title"]
-                depth = task.get("depth", 0)
-                max_tokens = task.get("max_tokens") or _budget_hint_to_tokens(task.get("token_budget_hint", "medium"))
-
-                # Build section guidance + 招标文件格式约束
-                from app.services.ai_pipeline import _get_section_guidance, _build_section_format_guidance
-                guidance = _get_section_guidance(title, format_template)
-                guidance += _build_section_format_guidance(title, task["path"], format_template)
-
-                full_content = ""
-                try:
-                    async for chunk in generate_section(
-                        section_title=title,
-                        section_path=task["path"],
-                        depth=depth,
-                        requirements=requirements,
-                        max_tokens=max_tokens,
-                        sibling_summaries=[],
-                        reference_sections=[],
-                        company_profile=company_profile,
-                        extra_guidance=guidance,
-                        format_template=format_template,
-                    ):
-                        full_content += chunk
-                except Exception as exc:
-                    logger.error("Section '%s' generation failed: %s", title, exc)
-                    full_content = f"\n\n[本节生成失败：{exc}]\n\n"
-
-                # 预算耗尽时 AI 可能以孤立标题行收尾，裁掉避免"空标题"
-                full_content = _strip_trailing_headings(full_content)
-
-                return {
-                    "chapter_id": task_info["chapter_id"],
-                    "path_key": path_key,
-                    "section_path": task["path"],
-                    "title": title,
-                    "content": full_content,
-                    "error": None if full_content and "[本节生成失败" not in full_content else "generation_failed",
-                }
-
-        # Emit section_start for all tasks
-        for i, ti in enumerate(all_tasks):
-            task_path = ti["task"]["path"]
-            yield {
-                "event": "section_start",
-                "data": json.dumps({
-                    "chapter_id": ti["chapter_id"],
-                    "path": " > ".join(task_path),
-                    "section_path": task_path,  # for frontend tree navigation
-                    "title": ti["task"]["title"],
-                    "index": i + 1,
-                    "total": total_leaves,
-                    "depth": ti["task"].get("depth", 0),
-                }, ensure_ascii=False),
-            }
-
-        tasks_coros = [asyncio.create_task(_gen_one(ti)) for ti in all_tasks]
-
-        for coro in asyncio.as_completed(tasks_coros):
-            result = await coro
-            path_key = result["path_key"]
-            content = result["content"]
-            completed += 1
-
-            if content:
-                generated_sections[path_key] = content
-                yield {
-                    "event": "section_done",
-                    "data": json.dumps({
-                        "chapter_id": result["chapter_id"],
-                        "path": path_key,
-                        "section_path": result.get("section_path", []),
-                        "title": result["title"],
-                        "content": content,
-                        "content_length": len(content),
-                        "char_count": len(content),
-                        "index": completed,
-                        "total": total_leaves,
-                    }, ensure_ascii=False),
-                }
-            else:
-                yield {
-                    "event": "section_error",
-                    "data": json.dumps({
-                        "chapter_id": result["chapter_id"],
-                        "path": path_key,
-                        "section_path": result.get("section_path", []),
-                        "title": result["title"],
-                        "error": result.get("error", "unknown"),
-                        "index": completed,
-                        "total": total_leaves,
-                    }, ensure_ascii=False),
-                }
-
-            yield {
-                "event": "progress",
-                "data": json.dumps({
-                    "completed": completed,
-                    "total": total_leaves,
-                    "percentage": round(completed / max(total_leaves, 1) * 100, 1),
-                }, ensure_ascii=False),
-            }
-
-    # ── Phase: Assemble chapters（树形组装：章节 → 容器 → 叶子）──
-    yield {
-        "event": "status",
-        "data": json.dumps({
-            "phase": "assembling",
-            "message": "正在生成分组引导段并组装章节内容...",
-        }, ensure_ascii=False),
-    }
-
-    from app.services.content_assembler import build_final_chapters_payload, generate_chapter_summary
+    from app.services.content_assembler import generate_chapter_summary
     from app.services.subsection_generator import generate_container_lead_in
 
-    # 解析/规范化每章 children_json 为树（兼容嵌套树与旧扁平任务）
+    # 解析每章 children_json 为树；原样保留 content/status/error（续传判定依赖），
+    # 兼容嵌套树与旧扁平任务列表（扁平 = 首元素含 "path" 键）。
     def _load_chapter_tree(chapter) -> list:
         try:
             nodes = json.loads(chapter.children_json) if chapter.children_json else []
@@ -1453,27 +1393,27 @@ async def generate_from_chapter_structure(
             nodes = []
         if not isinstance(nodes, list) or not nodes:
             return []
-        if isinstance(nodes[0], dict) and "path" in nodes[0]:
-            # 旧扁平任务列表 → 包装成叶子树（保留 path，供组装按文档顺序展开）
-            return [
-                {
-                    "title": n.get("title", ""),
-                    "depth": n.get("depth", 1),
-                    "path": n.get("path"),
-                    "token_budget_hint": n.get("token_budget_hint", "medium"),
-                }
-                for n in nodes
-            ]
         return nodes
 
-    chapter_trees = {
-        c.title: (_chapter_fallback_trees.get(c.id) or _load_chapter_tree(c))
-        for c in chapters
-        if c.chapter_type == "ai_generated"
-    }
-
-    # ── 容器引导段：遍历所有非叶节点（含章节根），用子内容摘要并行生成 ──
-    lead_ins: Dict[str, str] = {}
+    def _locate_leaf(nodes: list, full_path: list) -> dict | None:
+        """在章节树中按完整路径（含章节标题）定位叶子节点."""
+        if not nodes or not full_path:
+            return None
+        if isinstance(nodes[0], dict) and "path" in nodes[0]:
+            for node in nodes:
+                if node.get("path") == full_path:
+                    return node
+            return None
+        remaining = full_path[1:]  # 嵌套树根不含章节标题
+        cur = nodes
+        for i, title in enumerate(remaining):
+            match = next((n for n in cur if n.get("title") == title), None)
+            if match is None:
+                return None
+            if i == len(remaining) - 1:
+                return match
+            cur = match.get("children") or []
+        return None
 
     def _build_child_summaries(container_path: list, children: list) -> list[str]:
         summaries = []
@@ -1490,52 +1430,329 @@ async def generate_from_chapter_structure(
                     summaries.append(child_title)
         return summaries
 
-    leadin_items: list[tuple] = []
+    title_to_order = {c.title: c.order_index for c in chapters}
+
     for chapter in chapters:
         if chapter.chapter_type != "ai_generated":
             continue
-        tree = chapter_trees.get(chapter.title, [])
-        if not tree:
-            continue
-        # 章节根节点也是一个容器 → 章节引导段
-        leadin_items.append((chapter.title, {"title": chapter.title, "children": tree}, [chapter.title]))
 
-        def _walk(nodes, path):
-            for node in nodes:
-                node_path = path + [node["title"]]
-                if node.get("children"):
-                    leadin_items.append((chapter.title, node, node_path))
-                    _walk(node["children"], node_path)
+        yield {
+            "event": "chapter_start",
+            "data": json.dumps({
+                "chapter_id": chapter.id, "title": chapter.title,
+                "index": chapter.order_index, "total": len(chapters),
+            }, ensure_ascii=False),
+        }
 
-        _walk(tree, [chapter.title])
+        # 本章素材上下文（四类，按标题关键词）
+        materials_guidance = assemble_section_materials(
+            chapter.title,
+            qualifications=matched_qualifications,
+            personnel=matched_personnel,
+            contracts=matched_contracts,
+            company=company_profile,
+        )
+        # 本章招标要求过滤：保留顶层键，缩小数组
+        chapter_requirements = _filter_requirements_for_chapter(
+            requirements, chapter.title
+        )
 
-    if leadin_items:
-        leadin_sem = asyncio.Semaphore(parallel_workers)
+        # 本章叶子任务 + 本章树
+        chapter_tasks = [t for t in all_tasks if t["chapter_id"] == chapter.id]
+        children_tree = _chapter_fallback_trees.get(chapter.id) or _load_chapter_tree(chapter)
 
-        async def _gen_leadin(item) -> tuple | None:
-            chapter_title, node, node_path = item
-            key = " > ".join(node_path)
-            if key in generated_sections:  # 防御：容器不可能是叶子
-                return None
-            summaries = _build_child_summaries(node_path, node.get("children", []))
-            async with leadin_sem:
-                text = await generate_container_lead_in(
-                    container_title=node["title"],
-                    section_path=node_path,
-                    requirements=requirements,
-                    company_profile=company_profile,
-                    child_summaries=summaries,
-                )
-            return (key, text) if text else None
+        leaf_failed = 0
+        leaf_done = 0
+        chapter_error_msg = None
+        try:
+            # 续传：已生成叶子（status=generated 且有 content）跳过，复用已有 content
+            pending_tasks = []
+            for task_info in chapter_tasks:
+                node = _locate_leaf(children_tree, task_info["task"]["path"])
+                if node is not None and _is_leaf_done(node):
+                    path_key = " > ".join(task_info["task"]["path"])
+                    generated_sections[path_key] = node["content"]
+                    leaf_done += 1
+                    completed += 1
+                    yield {
+                        "event": "section_done",
+                        "data": json.dumps({
+                            "chapter_id": task_info["chapter_id"],
+                            "path": path_key,
+                            "section_path": task_info["task"]["path"],
+                            "title": task_info["task"]["title"],
+                            "content": node["content"],
+                            "content_length": len(node["content"]),
+                            "char_count": len(node["content"]),
+                            "index": completed,
+                            "total": total_leaves,
+                        }, ensure_ascii=False),
+                    }
+                    yield {
+                        "event": "progress",
+                        "data": json.dumps({
+                            "completed": completed,
+                            "total": total_leaves,
+                            "percentage": round(completed / max(total_leaves, 1) * 100, 1),
+                        }, ensure_ascii=False),
+                    }
+                else:
+                    pending_tasks.append(task_info)
 
-        leadin_results = await asyncio.gather(*(_gen_leadin(it) for it in leadin_items))
-        for res in leadin_results:
-            if res:
-                lead_ins[res[0]] = res[1]
+            if pending_tasks:
+                # 本章叶子并行生成（semaphore）
+                semaphore = asyncio.Semaphore(parallel_workers)
 
-    # ── 树形组装（文档顺序 = 树深度优先顺序，顺带修复乱序 bug）──
-    title_to_order = {c.title: c.order_index for c in chapters}
-    chapters_payload: list[dict] = []
+                async def _gen_one(task_info: dict) -> dict:
+                    async with semaphore:
+                        task = task_info["task"]
+                        path_key = " > ".join(task["path"])
+                        title = task["title"]
+                        depth = task.get("depth", 0)
+                        max_tokens = task.get("max_tokens") or _budget_hint_to_tokens(task.get("token_budget_hint", "medium"))
+
+                        # Build section guidance + 招标文件格式约束 + 本章素材
+                        from app.services.ai_pipeline import _get_section_guidance, _build_section_format_guidance
+                        guidance = _get_section_guidance(title, format_template)
+                        guidance += _build_section_format_guidance(title, task["path"], format_template)
+                        if materials_guidance:
+                            guidance += "\n\n【可用的真实素材（标书中必须使用，严禁编造）】\n" + materials_guidance
+
+                        full_content = ""
+                        try:
+                            async for chunk in generate_section(
+                                section_title=title,
+                                section_path=task["path"],
+                                depth=depth,
+                                requirements=chapter_requirements,
+                                max_tokens=max_tokens,
+                                sibling_summaries=[],
+                                reference_sections=[],
+                                company_profile=company_profile,
+                                extra_guidance=guidance,
+                                format_template=format_template,
+                            ):
+                                full_content += chunk
+                        except Exception as exc:
+                            logger.error("Section '%s' generation failed: %s", title, exc)
+                            return {
+                                "chapter_id": task_info["chapter_id"],
+                                "path_key": path_key,
+                                "section_path": task["path"],
+                                "title": title,
+                                "content": None,
+                                "error": str(exc),
+                            }
+
+                        # 预算耗尽时 AI 可能以孤立标题行收尾，裁掉避免"空标题"
+                        full_content = _strip_trailing_headings(full_content)
+                        if not full_content or not full_content.strip():
+                            return {
+                                "chapter_id": task_info["chapter_id"],
+                                "path_key": path_key,
+                                "section_path": task["path"],
+                                "title": title,
+                                "content": None,
+                                "error": "empty_content",
+                            }
+                        return {
+                            "chapter_id": task_info["chapter_id"],
+                            "path_key": path_key,
+                            "section_path": task["path"],
+                            "title": title,
+                            "content": full_content,
+                            "error": None,
+                        }
+
+                # Emit section_start for pending tasks
+                for i, ti in enumerate(pending_tasks):
+                    task_path = ti["task"]["path"]
+                    yield {
+                        "event": "section_start",
+                        "data": json.dumps({
+                            "chapter_id": ti["chapter_id"],
+                            "path": " > ".join(task_path),
+                            "section_path": task_path,  # for frontend tree navigation
+                            "title": ti["task"]["title"],
+                            "index": i + 1,
+                            "total": total_leaves,
+                            "depth": ti["task"].get("depth", 0),
+                        }, ensure_ascii=False),
+                    }
+
+                tasks_coros = [asyncio.create_task(_gen_one(ti)) for ti in pending_tasks]
+                for coro in asyncio.as_completed(tasks_coros):
+                    result = await coro
+                    path_key = result["path_key"]
+                    content = result["content"]
+                    completed += 1
+
+                    if content:
+                        generated_sections[path_key] = content
+                        leaf_done += 1
+                        node = _locate_leaf(children_tree, result["section_path"])
+                        if node is not None:
+                            node["content"] = content
+                            node["status"] = "generated"
+                        yield {
+                            "event": "section_done",
+                            "data": json.dumps({
+                                "chapter_id": result["chapter_id"],
+                                "path": path_key,
+                                "section_path": result.get("section_path", []),
+                                "title": result["title"],
+                                "content": content,
+                                "content_length": len(content),
+                                "char_count": len(content),
+                                "index": completed,
+                                "total": total_leaves,
+                            }, ensure_ascii=False),
+                        }
+                    else:
+                        leaf_failed += 1
+                        mark_path = result["section_path"]
+                        if not (children_tree and isinstance(children_tree[0], dict) and "path" in children_tree[0]):
+                            mark_path = mark_path[1:] if len(mark_path) > 1 else mark_path
+                        _mark_leaf_failure(children_tree, mark_path, result.get("error") or "unknown")
+                        yield {
+                            "event": "section_error",
+                            "data": json.dumps({
+                                "chapter_id": result["chapter_id"],
+                                "path": path_key,
+                                "section_path": result.get("section_path", []),
+                                "title": result["title"],
+                                "error": result.get("error", "unknown"),
+                                "index": completed,
+                                "total": total_leaves,
+                            }, ensure_ascii=False),
+                        }
+
+                    yield {
+                        "event": "progress",
+                        "data": json.dumps({
+                            "completed": completed,
+                            "total": total_leaves,
+                            "percentage": round(completed / max(total_leaves, 1) * 100, 1),
+                        }, ensure_ascii=False),
+                    }
+
+            # 本章容器引导段（含章节根）：用子内容摘要并行生成
+            if children_tree:
+                chapter_leadin_items: list[tuple] = []
+                chapter_leadin_items.append((chapter.title, {"title": chapter.title, "children": children_tree}, [chapter.title]))
+
+                def _walk(nodes, path):
+                    for node in nodes:
+                        node_path = path + [node["title"]]
+                        if node.get("children"):
+                            chapter_leadin_items.append((chapter.title, node, node_path))
+                            _walk(node["children"], node_path)
+
+                _walk(children_tree, [chapter.title])
+
+                leadin_sem = asyncio.Semaphore(parallel_workers)
+
+                async def _gen_leadin(item) -> tuple | None:
+                    _chapter_title, node, node_path = item
+                    key = " > ".join(node_path)
+                    if key in generated_sections:  # 防御：容器不可能是叶子
+                        return None
+                    summaries = _build_child_summaries(node_path, node.get("children", []))
+                    async with leadin_sem:
+                        text = await generate_container_lead_in(
+                            container_title=node["title"],
+                            section_path=node_path,
+                            requirements=chapter_requirements,
+                            company_profile=company_profile,
+                            child_summaries=summaries,
+                        )
+                    return (key, text) if text else None
+
+                leadin_results = await asyncio.gather(*(_gen_leadin(it) for it in chapter_leadin_items))
+                for res in leadin_results:
+                    if res:
+                        lead_ins[res[0]] = res[1]
+
+            # 本章组装（build_final_chapters_payload 按章产出后 append 到全局）
+            if not children_tree:
+                content = generated_sections.get(chapter.title, "")
+                chapters_payload.append({
+                    "title": chapter.title,
+                    "content": content,
+                    "order_index": title_to_order.get(chapter.title, 999),
+                })
+            else:
+                wrapper = {
+                    "title": chapter.title,
+                    "depth": 0,
+                    "children": children_tree,
+                    "lead_in": lead_ins.get(chapter.title, ""),
+                }
+                payload = build_final_chapters_payload([wrapper], generated_sections)
+                if payload:
+                    payload[0]["order_index"] = title_to_order.get(chapter.title, 999)
+                    chapters_payload.append(payload[0])
+
+            # 回写 children_json：叶子 content + status，容器 lead_in（供 TreeEditor / 续传）
+            def _writeback(nodes, path):
+                for node in nodes:
+                    node_path = path + [node["title"]]
+                    if node.get("children"):
+                        lead = lead_ins.get(" > ".join(node_path))
+                        if lead:
+                            node["lead_in"] = lead
+                        _writeback(node["children"], node_path)
+                    else:
+                        leaf_path = node.get("path") or node_path
+                        content = generated_sections.get(" > ".join(leaf_path), "")
+                        if content:
+                            node["content"] = content
+                            node["status"] = "generated"
+
+            _writeback(children_tree, [chapter.title])
+            try:
+                chapter.children_json = json.dumps(children_tree, ensure_ascii=False)
+            except Exception:
+                pass
+            await db.commit()
+        except Exception as exc:
+            logger.exception("Chapter '%s' generation failed: %s", chapter.title, exc)
+            chapter_errors.append(chapter.title)
+            chapter_error_msg = str(exc)
+            # 标红本章所有叶子
+            is_flat = bool(children_tree and isinstance(children_tree[0], dict) and "path" in children_tree[0])
+            for task_info in chapter_tasks:
+                mark_path = task_info["task"]["path"]
+                if not is_flat:
+                    mark_path = mark_path[1:] if len(mark_path) > 1 else mark_path
+                _mark_leaf_failure(children_tree, mark_path, str(exc))
+            try:
+                chapter.children_json = json.dumps(children_tree, ensure_ascii=False)
+                await db.commit()
+            except Exception:
+                pass
+            leaf_failed = len(chapter_tasks)
+
+        yield {
+            "event": "chapter_error" if chapter_error_msg else "chapter_done",
+            "data": json.dumps({
+                "chapter_id": chapter.id, "title": chapter.title,
+                "leaf_success": leaf_done, "leaf_failed": leaf_failed,
+                "error": chapter_error_msg,
+            }, ensure_ascii=False),
+        }
+
+    if chapter_errors:
+        logger.warning("Some chapters failed generation: %s", ", ".join(chapter_errors))
+
+    # ── Phase: 合并章节（树形组装已在逐章循环内完成）──
+    yield {
+        "event": "status",
+        "data": json.dumps({
+            "phase": "assembling",
+            "message": "正在生成分组引导段并组装章节内容...",
+        }, ensure_ascii=False),
+    }
 
     # 文件/表格章节（保持在前，按 order_index 排序）
     for fc in file_chapters_output:
@@ -1546,63 +1763,7 @@ async def generate_from_chapter_structure(
             "order_index": title_to_order.get(fc["title"], 999),
         })
 
-    # AI 撰写章节：包装成 {title, depth:0, children: tree}，走 build_final_chapters_payload
-    for chapter in chapters:
-        if chapter.chapter_type != "ai_generated":
-            continue
-        tree = chapter_trees.get(chapter.title, [])
-        if not tree:
-            content = generated_sections.get(chapter.title, "")
-            chapters_payload.append({
-                "title": chapter.title,
-                "content": content,
-                "order_index": title_to_order.get(chapter.title, 999),
-            })
-            continue
-        wrapper = {
-            "title": chapter.title,
-            "depth": 0,
-            "children": tree,
-            "lead_in": lead_ins.get(chapter.title, ""),
-        }
-        payload = build_final_chapters_payload([wrapper], generated_sections)
-        if payload:
-            payload[0]["order_index"] = title_to_order.get(chapter.title, 999)
-            chapters_payload.append(payload[0])
-
     chapters_payload.sort(key=lambda c: c.get("order_index", 999))
-
-    # ── 回写 children_json：叶子 content + 容器 lead_in（供 TreeEditor 显示）──
-    for chapter in chapters:
-        if chapter.chapter_type != "ai_generated":
-            continue
-        tree = chapter_trees.get(chapter.title, [])
-        if not tree:
-            continue
-
-        def _writeback(nodes, path):
-            for node in nodes:
-                node_path = path + [node["title"]]
-                if node.get("children"):
-                    lead = lead_ins.get(" > ".join(node_path))
-                    if lead:
-                        node["lead_in"] = lead
-                    _writeback(node["children"], node_path)
-                else:
-                    leaf_path = node.get("path") or node_path
-                    content = generated_sections.get(" > ".join(leaf_path), "")
-                    if content:
-                        node["content"] = content
-
-        _writeback(tree, [chapter.title])
-        try:
-            chapter.children_json = json.dumps(tree, ensure_ascii=False)
-        except Exception:
-            pass
-    try:
-        await db.commit()
-    except Exception:
-        pass
 
     # ── Phase: 格式校验（与招标文件格式模板对账）──
     from app.services.format_verifier import verify_format
