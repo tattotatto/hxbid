@@ -26,6 +26,9 @@ class ExportRequest(BaseModel):
     format: str = "docx"  # "docx" | "pdf" | "both"
     chapter_ids: Optional[List[str]] = None
     template_id: Optional[str] = None
+    include_checklist: bool = True  # 新增：默认导出检查清单
+    checklist_items: Optional[List[dict]] = None  # 新增：自定义行 [{key,label}...]
+    checklist_removed: Optional[List[str]] = None  # 新增：被删除的预置行 key
 
 
 class RetryFailedRequest(BaseModel):
@@ -36,6 +39,8 @@ class RetryFailedRequest(BaseModel):
 class ExportResponse(BaseModel):
     docx_url: str = ""
     pdf_url: str = ""
+    checklist_docx_url: str = ""  # 新增：清单失败/未启用时为空串
+    checklist_pdf_url: str = ""  # 新增
 
 
 class FormatVerificationCheck(BaseModel):

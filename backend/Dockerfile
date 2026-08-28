@@ -20,6 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# LibreOffice: export_to_pdf 容器内 PDF 转换 + 检查清单页码定位（spec §4.0）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer \
+    fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 COPY requirements.txt .
 RUN if [ -n "${PIP_INDEX}" ]; then \

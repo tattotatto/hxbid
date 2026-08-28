@@ -1369,9 +1369,45 @@ async def export_bid(
     # Absolute URLs built from request.base_url can break behind reverse proxies
     # (e.g. nginx stripping the port from the Host header).
     base = "/api/v1/bid/download/"
+
+    # ──────────────────── 同步生成检查清单（独立可打印核对文档） ────────────────────
+    # 任何失败不阻塞主标书导出：仅清空 checklist url + logger.warning（spec §5）。
+    checklist_docx_url = ""
+    checklist_pdf_url = ""
+    if data.include_checklist:
+        try:
+            from app.services.checklist_engine import (
+                merge_items, derive_statuses, fill_pages, build_checklist_docx,
+            )
+            rows = merge_items(data.checklist_items, data.checklist_removed)
+            source_ctx = {
+                "chapter_titles": [ch.get("title", "") for ch in chapters_payload],
+                "bid_opening_ok": bool(bid_opening_content),
+                "qual_count": len(all_quals),
+                "contract_count": len(contracts),
+                "personnel_count": len(personnel_cert_images),
+            }
+            rows = derive_statuses(rows, source_ctx=source_ctx)
+            # 页码定位源：优先主标书 pdf；format=docx 时补渲一次仅用于定位（spec §4.3）
+            pdf_for_locate = pdf_path
+            if not pdf_for_locate:
+                pdf_for_locate = export_to_pdf(docx_path)
+            if pdf_for_locate:
+                fill_pages(pdf_for_locate, rows)
+            checklist_docx = Path(docx_path).with_name(Path(docx_path).stem + "-检查清单.docx")
+            build_checklist_docx(project.name, rows, str(checklist_docx))
+            checklist_docx_url = f"{base}{checklist_docx.name}"
+            checklist_pdf = export_to_pdf(str(checklist_docx))
+            if checklist_pdf:
+                checklist_pdf_url = f"{base}{Path(checklist_pdf).name}"
+        except Exception as exc:
+            logger.warning("检查清单生成失败（不阻塞主标书导出）: %s", exc)
+
     return ExportResponse(
         docx_url=f"{base}{docx_filename}",
         pdf_url=f"{base}{Path(pdf_path).name}" if pdf_path else "",
+        checklist_docx_url=checklist_docx_url,
+        checklist_pdf_url=checklist_pdf_url,
     )
 
 
