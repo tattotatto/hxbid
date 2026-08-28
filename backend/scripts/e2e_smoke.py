@@ -551,11 +551,21 @@ async def main() -> int:
             exp_resp = await client.post(
                 f"{API_BASE}/bid/export",
                 headers=headers,
-                json={"project_id": project_id, "format": "docx"},
+                json={"project_id": project_id, "format": "both",
+                      "include_checklist": True},
             )
             exp_resp.raise_for_status()
             exp_data = exp_resp.json()
             docx_url = exp_data.get("docx_url", "")
+            pdf_url = exp_data.get("pdf_url", "")
+            ck_docx_url = exp_data.get("checklist_docx_url", "")
+            ck_pdf_url = exp_data.get("checklist_pdf_url", "")
+
+            checks.append(("导出响应含 docx_url", bool(docx_url)))
+            checks.append(("导出响应含 pdf_url（容器内 LibreOffice 生效）", bool(pdf_url)))
+            checks.append(("导出响应含 checklist_docx_url", bool(ck_docx_url)))
+            checks.append(("导出响应含 checklist_pdf_url", bool(ck_pdf_url)))
+
             if not docx_url:
                 checks.append(("docx 导出返回 URL", False))
             else:
@@ -621,6 +631,43 @@ async def main() -> int:
                 if md_leaks:
                     print(f"  ⚠️  docx 发现 markdown 残留标记 {len(md_leaks)} 处"
                           f"（warning，不阻塞通过）: {md_leaks[:3]}")
+
+            # ---- pdf + 检查清单下载校验（与 docx 同一套相对路径归一化） ----
+            from docx import Document
+            from io import BytesIO
+
+            def _norm(url: str) -> str:
+                if url.startswith("http://") or url.startswith("https://"):
+                    return url
+                origin = API_BASE[: -len("/api/v1")] if API_BASE.endswith("/api/v1") else API_BASE.rstrip("/")
+                return f"{origin}{url if url.startswith('/') else '/' + url}"
+
+            if pdf_url:
+                pdf_resp = await client.get(_norm(pdf_url), headers=headers)
+                checks.append(("主标书 PDF 可下载", pdf_resp.status_code == 200
+                               and len(pdf_resp.content) > 10000))
+
+            if ck_docx_url:
+                ck_resp = await client.get(_norm(ck_docx_url), headers=headers)
+                ck_ok = ck_resp.status_code == 200 and len(ck_resp.content) > 1000
+                checks.append(("检查清单 docx 可下载", ck_ok))
+                if ck_ok:
+                    ck_doc = Document(BytesIO(ck_resp.content))
+                    ck_table = ck_doc.tables[0]
+                    ck_headers = [c.text for c in ck_table.rows[0].cells]
+                    checks.append(("检查清单表头含 说明/页码/状态/确认/备注",
+                                   all(h in ck_headers for h in
+                                       ("说明", "页码", "状态", "确认", "备注"))))
+                    checks.append(("检查清单数据行 ≥9", len(ck_table.rows) - 1 >= 9))
+                    ck_body = "\n".join(p.text for p in ck_doc.paragraphs)
+                    checks.append(("检查清单含标题+项目名",
+                                   "投标文件检查清单" in ck_body
+                                   and TEST_NAME in ck_body))
+
+            if ck_pdf_url:
+                ck_pdf_resp = await client.get(_norm(ck_pdf_url), headers=headers)
+                checks.append(("检查清单 PDF 可下载", ck_pdf_resp.status_code == 200
+                               and len(ck_pdf_resp.content) > 1000))
     except Exception as exc:
         print(f"  ⚠️  docx 校验异常: {exc}")
         import traceback
