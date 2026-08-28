@@ -6,14 +6,17 @@ import {
   Button,
   Space,
   Tabs,
+  Typography,
   Spin,
   message,
   Modal,
   Tag,
   Descriptions,
+  Checkbox,
   List,
   Divider,
   Select,
+  Input,
   InputNumber,
   Alert,
 } from 'antd'
@@ -93,6 +96,19 @@ const statusStepMap: Record<string, number> = {
   review: 5,
   exported: 6,
 }
+
+// 导出检查清单预置项（与服务端 CHECKLIST_ITEM_TEMPLATES 对应，仅用于导出面板编辑展示）
+const PRESET_CHECKLIST_ITEMS: Array<{ key: string; label: string }> = [
+  { key: 'quotation', label: '报价（开标一览表 / 报价表）' },
+  { key: 'bid_letter', label: '投标函（致招标人）' },
+  { key: 'legal_rep_cert', label: '法定代表人身份证明' },
+  { key: 'authorization', label: '授权委托书（授权代理人签署）' },
+  { key: 'signature_seal', label: '签字盖章页（法定代表人/委托人签字、公章）' },
+  { key: 'commitment', label: '承诺书（廉洁承诺 / 不串标等）' },
+  { key: 'qualification', label: '资格证明（资质证书）' },
+  { key: 'performance', label: '业绩证明（类似项目合同 / 中标通知书）' },
+  { key: 'personnel', label: '人员配置及证书' },
+]
 
 // Parse markdown headings from AI-generated content into a tree structure
 function parseMarkdownHeadings(content: string): any[] {
@@ -735,6 +751,12 @@ export default function ProjectWorkflow() {
     }
   }
 
+  // Export checklist state
+  const [includeChecklist, setIncludeChecklist] = useState<boolean>(true)
+  const [removedKeys, setRemovedKeys] = useState<string[]>([])
+  const [customRows, setCustomRows] = useState<Array<{ key: string; label: string }>>([])
+  const [labelOverrides, setLabelOverrides] = useState<Record<string, string>>({})
+
   const handleExport = async () => {
     if (!id) return
     setExporting(true)
@@ -743,8 +765,12 @@ export default function ProjectWorkflow() {
         project_id: id,
         format: 'both',
         template_id: selectedTemplateId,
+        include_checklist: includeChecklist,
+        checklist_items: customRows.map((r) => ({ key: r.key, label: r.label }))
+          .concat(Object.entries(labelOverrides).map(([key, label]) => ({ key, label }))),
+        checklist_removed: removedKeys,
       })
-      const { docx_url, pdf_url } = res.data
+      const { docx_url, pdf_url, checklist_docx_url, checklist_pdf_url } = res.data ?? {}
 
       // Use anchor-click pattern to avoid popup blocker after async await
       const triggerDownload = (url: string) => {
@@ -761,6 +787,12 @@ export default function ProjectWorkflow() {
       }
       if (pdf_url) {
         triggerDownload(pdf_url)
+      }
+      if (checklist_docx_url) {
+        triggerDownload(checklist_docx_url)
+      }
+      if (checklist_pdf_url) {
+        triggerDownload(checklist_pdf_url)
       }
 
       message.success('导出成功')
@@ -927,6 +959,74 @@ export default function ProjectWorkflow() {
             }))}
             prefix={<FileTextOutlined />}
           />
+          <Space direction="vertical" style={{ width: '100%' }} size={8}>
+            <Checkbox
+              checked={includeChecklist}
+              onChange={(e) => setIncludeChecklist(e.target.checked)}
+            >
+              导出检查清单（默认开启，打印核对用）
+            </Checkbox>
+            {includeChecklist && (
+              <div>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  勾选要保留的核对项，可改写说明；「+ 自定义行」追加清单行。
+                </Typography.Text>
+                {PRESET_CHECKLIST_ITEMS.filter((it) => !removedKeys.includes(it.key)).map((it) => (
+                  <div key={it.key} style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
+                    <Input
+                      size="small"
+                      defaultValue={it.label}
+                      style={{ flex: 1 }}
+                      onChange={(e) =>
+                        setLabelOverrides((prev) =>
+                          e.target.value === PRESET_CHECKLIST_ITEMS.find(x => x.key === it.key)!.label
+                            ? (() => { const n = { ...prev }; delete n[it.key]; return n; })()
+                            : { ...prev, [it.key]: e.target.value }
+                        )
+                      }
+                    />
+                    <Button size="small" danger onClick={() => setRemovedKeys((p) => [...p, it.key])}>
+                      删除
+                    </Button>
+                  </div>
+                ))}
+                {customRows.map((row, idx) => (
+                  <div key={row.key} style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
+                    <Input size="small" value={row.label} style={{ flex: 1 }} disabled />
+                    <Button size="small" danger onClick={() => setCustomRows((p) => p.filter((_, i) => i !== idx))}>
+                      删除
+                    </Button>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <Input
+                    size="small"
+                    placeholder="自定义项说明，如：项目实施方案"
+                    id="checklist-custom-label"
+                    style={{ flex: 1 }}
+                    onPressEnter={(e) => {
+                      const v = (e.target as HTMLInputElement).value.trim()
+                      if (!v) return
+                      setCustomRows((p) => [
+                        ...p,
+                        { key: `custom-${Date.now()}`, label: v },
+                      ])
+                      ;(e.target as HTMLInputElement).value = ''
+                    }}
+                  />
+                  <Button size="small" onClick={() => {
+                    const input = document.getElementById('checklist-custom-label') as HTMLInputElement
+                    const v = input?.value.trim()
+                    if (!v) return
+                    setCustomRows((p) => [...p, { key: `custom-${Date.now()}`, label: v }])
+                    if (input) input.value = ''
+                  }}>
+                    + 自定义行
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Space>
           <Button
             icon={<DownloadOutlined />}
             loading={exporting}
