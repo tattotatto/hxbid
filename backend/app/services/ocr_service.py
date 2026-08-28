@@ -193,16 +193,26 @@ async def analyze_document_image(
     doc_type: str = "qualification",
 ) -> Dict[str, Any]:
     image_path = save_ocr_image(file_bytes, filename)
+    # save_ocr_image 返回「相对 UPLOAD_DIR」的路径（`ocr/xxx.png`，供 /uploads/ 静态端
+    # os.path.join(UPLOAD_DIR, ...) 使用），但 OCR 读取必须按绝对路径打开——容器
+    # cwd=/app 而 UPLOAD_DIR=/app/uploads，直接 open(image_path) 会 FileNotFoundError，
+    # vision/tesseract 双双静默失败 → 前端只见「未提取到文字」。
+    # 回归：2026-08-28 生产（docker 部署后 OCR 首次实战暴露，此前本地相对路径恰好可用）。
+    read_path = (
+        image_path
+        if Path(image_path).is_absolute()
+        else str(Path(UPLOAD_DIR) / image_path)
+    )
 
     # --- Strategy 1: Vision model ---
-    vision_result = await _extract_with_vision(image_path, doc_type)
+    vision_result = await _extract_with_vision(read_path, doc_type)
     if vision_result:
-        vision_result["image_path"] = image_path
+        vision_result["image_path"] = image_path  # 返回前端仍为相对 UPLOAD_DIR 路径
         vision_result["method"] = "vision"
         return vision_result
 
     # --- Strategy 2: Tesseract + AI ---
-    ocr_text = extract_text_from_image(image_path)
+    ocr_text = extract_text_from_image(read_path)
     result: Dict[str, Any] = {
         "image_path": image_path,
         "ocr_text": ocr_text or "",
