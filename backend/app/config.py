@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
     DEEPSEEK_MODEL: str = "deepseek-v4-pro"
+    # 视觉识别模型（证件/证书图片字段提取）：走同一 DeepSeek key，与文本模型分开指定
+    DEEPSEEK_VISION_MODEL: str = "deepseek-v4-flash-vision-exp"
 
     # OpenAI (GPT-4o, GPT-4, etc.)
     OPENAI_API_KEY: str = ""

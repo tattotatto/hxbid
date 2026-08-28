@@ -20,8 +20,12 @@ logger = logging.getLogger(__name__)
 PROVIDERS = {
     "deepseek": {
         "label": "DeepSeek",
-        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
-        "vision": False,
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"],
+        "vision": True,
+        # 视觉识别走 DeepSeek 自己的 vision 模型（同一 API key），不与文本模型混用。
+        # getattr 兜底：服务器上 config.py 是 tar 排除的旧副本，缺字段时用内置默认值，
+        # 避免模块导入时 AttributeError 拖垮整个 backend。
+        "vision_model": getattr(settings, "DEEPSEEK_VISION_MODEL", "deepseek-v4-flash-vision-exp"),
     },
     "openai": {
         "label": "OpenAI",
