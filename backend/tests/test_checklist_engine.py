@@ -103,12 +103,18 @@ class TestDeriveStatuses:
     def test_empty_source_marks_warn(self):
         rows = derive_statuses(
             [{"key": k, "label": v, "keywords": []} for k, v in [
-                ("quotation", "报价"), ("signature_seal", "签字盖章"),
-                ("performance", "业绩")]],
+                ("quotation", "报价"), ("performance", "业绩")]],
             source_ctx={"chapter_titles": [], "bid_opening_ok": False,
                         "qual_count": 0, "contract_count": 0, "personnel_count": 0},
         )
         assert all(r["status"] == STATUS_WARN for r in rows)
+        # signature_seal 恒 OK：签名页由渲染引擎无条件输出（render_engine.py:1694）
+        seal = derive_statuses(
+            [{"key": "signature_seal", "label": "签字盖章", "keywords": []}],
+            source_ctx={"chapter_titles": [], "bid_opening_ok": False,
+                        "qual_count": 0, "contract_count": 0, "personnel_count": 0},
+        )
+        assert seal[0]["status"] == STATUS_OK
 
     def test_count_based_sources(self):
         rows = derive_statuses(

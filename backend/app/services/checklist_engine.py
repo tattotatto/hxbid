@@ -95,8 +95,9 @@ def _source_ok(row: dict, ctx: dict) -> bool:
     if key == "authorization":
         return _has("授权委托")
     if key == "signature_seal":
-        # 签名页是渲染引擎固定输出块（投标人：（盖章）行），以商务部分存在为代理
-        return _has("商务")
+        # 签名页由 render_engine._append_signature_block 每次渲染无条件输出
+        # （render_engine.py:1694），checklist 段仅在主标书渲染成功后执行 → 恒成立
+        return True
     if key == "commitment":
         return _has("承诺")
     if key == "qualification":

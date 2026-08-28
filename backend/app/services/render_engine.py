@@ -11,7 +11,6 @@ them to proper Word formatting (headings, bold, italic, bullets, tables).
 """
 
 import logging
-import os
 import re
 import time
 import uuid
@@ -1933,12 +1932,15 @@ def export_to_pdf(docx_path):
         (e.g. LibreOffice is not installed or times out).
     """
     output_dir = str(Path(docx_path).parent)
+    # 每个调用独立 profile，避免并发转换 profile 锁（容器内并发导出真实存在的锁）
+    profile = f"-env:UserInstallation=file:///tmp/loffice_{uuid.uuid4().hex}"
 
     try:
         subprocess.run(
             [
                 "libreoffice",
                 "--headless",
+                profile,
                 "--convert-to",
                 "pdf",
                 "--outdir",
@@ -1953,15 +1955,13 @@ def export_to_pdf(docx_path):
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return None
 
-    # Locate the generated PDF (name matches the docx stem)
+    # Verify the conversion actually produced a PDF with the expected name
+    # (LibreOffice can exit 0 yet write nothing; never fall back to an
+    # unrelated PDF in the shared OUTPUT_DIR — it would mislabel another
+    # document as this one's conversion).
     pdf_path = Path(output_dir) / (Path(docx_path).stem + ".pdf")
     if pdf_path.exists():
         return str(pdf_path.absolute())
-
-    # Fallback: grab any fresh PDF in the output directory
-    for f in sorted(Path(output_dir).glob("*.pdf"), key=os.path.getmtime, reverse=True):
-        return str(f.absolute())
-
     return None
 
 

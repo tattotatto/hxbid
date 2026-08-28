@@ -1358,7 +1358,7 @@ async def export_bid(
     # -- Optionally render .pdf --
     pdf_path: str | None = None
     if data.format in ("pdf", "both"):
-        pdf_path = export_to_pdf(docx_path)
+        pdf_path = await asyncio.to_thread(export_to_pdf, docx_path)
 
     # -- Mark project as exported --
     project.status = "exported"
@@ -1391,13 +1391,13 @@ async def export_bid(
             # 页码定位源：优先主标书 pdf；format=docx 时补渲一次仅用于定位（spec §4.3）
             pdf_for_locate = pdf_path
             if not pdf_for_locate:
-                pdf_for_locate = export_to_pdf(docx_path)
+                pdf_for_locate = await asyncio.to_thread(export_to_pdf, docx_path)
             if pdf_for_locate:
-                fill_pages(pdf_for_locate, rows)
+                await asyncio.to_thread(fill_pages, pdf_for_locate, rows)
             checklist_docx = Path(docx_path).with_name(Path(docx_path).stem + "-检查清单.docx")
             build_checklist_docx(project.name, rows, str(checklist_docx))
             checklist_docx_url = f"{base}{checklist_docx.name}"
-            checklist_pdf = export_to_pdf(str(checklist_docx))
+            checklist_pdf = await asyncio.to_thread(export_to_pdf, str(checklist_docx))
             if checklist_pdf:
                 checklist_pdf_url = f"{base}{Path(checklist_pdf).name}"
         except Exception as exc:
