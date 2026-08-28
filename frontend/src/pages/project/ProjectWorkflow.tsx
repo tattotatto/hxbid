@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Card,
@@ -20,6 +20,7 @@ import {
   InputNumber,
   Alert,
 } from 'antd'
+import type { InputRef } from 'antd'
 import {
   ThunderboltOutlined,
   DownloadOutlined,
@@ -109,6 +110,9 @@ const PRESET_CHECKLIST_ITEMS: Array<{ key: string; label: string }> = [
   { key: 'performance', label: '业绩证明（类似项目合同 / 中标通知书）' },
   { key: 'personnel', label: '人员配置及证书' },
 ]
+
+// 自定义清单行 key 序号（模块级递增，避免同毫秒重复 key）
+let checklistCustomRowSeq = 0
 
 // Parse markdown headings from AI-generated content into a tree structure
 function parseMarkdownHeadings(content: string): any[] {
@@ -756,6 +760,13 @@ export default function ProjectWorkflow() {
   const [removedKeys, setRemovedKeys] = useState<string[]>([])
   const [customRows, setCustomRows] = useState<Array<{ key: string; label: string }>>([])
   const [labelOverrides, setLabelOverrides] = useState<Record<string, string>>({})
+  const customInputRef = useRef<InputRef>(null)
+
+  const addCustomRow = (label: string) => {
+    const v = label.trim()
+    if (!v) return
+    setCustomRows((p) => [...p, { key: `custom-${++checklistCustomRowSeq}`, label: v }])
+  }
 
   const handleExport = async () => {
     if (!id) return
@@ -975,7 +986,7 @@ export default function ProjectWorkflow() {
                   <div key={it.key} style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
                     <Input
                       size="small"
-                      defaultValue={it.label}
+                      value={labelOverrides[it.key] ?? it.label}
                       style={{ flex: 1 }}
                       onChange={(e) =>
                         setLabelOverrides((prev) =>
@@ -985,7 +996,10 @@ export default function ProjectWorkflow() {
                         )
                       }
                     />
-                    <Button size="small" danger onClick={() => setRemovedKeys((p) => [...p, it.key])}>
+                    <Button size="small" danger onClick={() => {
+                      setRemovedKeys((p) => [...p, it.key])
+                      setLabelOverrides((prev) => { const n = { ...prev }; delete n[it.key]; return n })
+                    }}>
                       删除
                     </Button>
                   </div>
@@ -1002,24 +1016,17 @@ export default function ProjectWorkflow() {
                   <Input
                     size="small"
                     placeholder="自定义项说明，如：项目实施方案"
-                    id="checklist-custom-label"
+                    ref={customInputRef}
                     style={{ flex: 1 }}
                     onPressEnter={(e) => {
-                      const v = (e.target as HTMLInputElement).value.trim()
-                      if (!v) return
-                      setCustomRows((p) => [
-                        ...p,
-                        { key: `custom-${Date.now()}`, label: v },
-                      ])
+                      const v = (e.target as HTMLInputElement).value
+                      addCustomRow(v)
                       ;(e.target as HTMLInputElement).value = ''
                     }}
                   />
                   <Button size="small" onClick={() => {
-                    const input = document.getElementById('checklist-custom-label') as HTMLInputElement
-                    const v = input?.value.trim()
-                    if (!v) return
-                    setCustomRows((p) => [...p, { key: `custom-${Date.now()}`, label: v }])
-                    if (input) input.value = ''
+                    addCustomRow(customInputRef.current?.input?.value ?? '')
+                    if (customInputRef.current?.input) customInputRef.current.input.value = ''
                   }}>
                     + 自定义行
                   </Button>
