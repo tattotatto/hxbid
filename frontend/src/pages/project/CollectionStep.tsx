@@ -240,7 +240,14 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                           icon={<LinkOutlined />}
                           onClick={() => {
                             setPickerReq(item.requirement.name)
-                            setPickerDefaultMode(item.requirement.category === 'contract_performance' ? 'contract' : 'qualification')
+                            // parse 侧业绩类需求实际落 category=other（合同/业绩关键词识别），
+                            // 与后端 _is_performance_requirement 同口径，否则默认打开资质选择器
+                            setPickerDefaultMode(
+                              item.requirement.category === 'contract_performance' ||
+                              /业绩|合同|类似项目|中标|履约/.test(item.requirement.name)
+                                ? 'contract'
+                                : 'qualification'
+                            )
                             setPickerOpen(true)
                           }}
                         >

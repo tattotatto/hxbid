@@ -27,6 +27,22 @@ logger = logging.getLogger(__name__)
 # ── Auto-match against resource library ────────────────────────────────
 
 
+_PERFORMANCE_KEYWORDS = ("业绩", "合同", "类似项目", "中标", "履约")
+
+
+def _is_performance_requirement(name: str, category: str) -> bool:
+    """业绩/合同类需求判定（统一口径，三处消费）.
+
+    注意：parse 侧（AI 提取 required_documents）从未产出 contract_performance
+    分类——业绩需求实际落 category=other。若只认 category==contract_performance，
+    用户手动链接的合同（ProjectContract）在资料汇总/占用时全部查不到。因此
+    按需求名关键词兜底：含业绩/合同/类似项目/中标/履约即按合同资源处理。
+    """
+    if category == "contract_performance":
+        return True
+    return any(k in name for k in _PERFORMANCE_KEYWORDS)
+
+
 async def analyze_collection_needs(
     project_id: str,
     db: AsyncSession,
@@ -89,7 +105,7 @@ async def analyze_collection_needs(
         name = doc["name"] if isinstance(doc, dict) else str(doc)
         category = doc.get("category", "other") if isinstance(doc, dict) else "other"
 
-        if category == "contract_performance":
+        if _is_performance_requirement(name, category):
             auto = _match_contracts(name, contracts)
             persisted = [
                 {
@@ -402,7 +418,7 @@ def _pick_auto_occupy(document_items: list, personnel_items: list) -> list[dict]
         for m in item.get("matches", []):
             if not m.get("id") or m.get("confidence") != "high":
                 continue
-            model = "contract" if category == "contract_performance" else "qualification"
+            model = "contract" if _is_performance_requirement(req_name, category) else "qualification"
             rows.append({"model": model, "requirement_name": req_name, "resource_id": m["id"], "count": 1})
             break  # 文档类需求容量恒为 1
     for item in personnel_items:

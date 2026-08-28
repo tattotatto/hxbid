@@ -7,9 +7,49 @@ import pytest
 from app.services.collection import (
     _auto_occupy_confident_matches,
     _is_confident_auto,
+    _is_performance_requirement,
     _merge_matches,
     _pick_auto_occupy,
 )
+
+
+class TestIsPerformanceRequirement:
+    """业绩/合同类需求判定统一口径.
+
+    回归：parse 侧（AI 提取）从未产出 contract_performance 分类，业绩需求实际
+    category=other；若只认 category，用户手动关联的合同在汇总/自动占用时全部
+    查不到（2026-08-28 生产「安保业务服务业绩证明材料（合同）」8 份合同落库
+    却不显示）。
+    """
+
+    def test_contract_performance_category(self):
+        assert _is_performance_requirement("任意名称", "contract_performance") is True
+
+    def test_performance_keywords_in_name(self):
+        for name in (
+            "安保业务服务业绩证明材料（合同）",
+            "类似项目业绩证明材料",
+            "履约能力证明",
+            "中标通知书",
+        ):
+            assert _is_performance_requirement(name, "other") is True, name
+            # 无 category 信息也应命中（部分路径 requirement 外层不带 category）
+            assert _is_performance_requirement(name, "") is True, name
+
+    def test_plain_documents_not_misjudged(self):
+        """普通资质/文件类需求不得被误判为合同需求.「投标函」「授权委托书」等
+        名称无业绩/合同关键词，必须保持资质路径。"""
+        for name in (
+            "营业执照",
+            "保安服务许可证",
+            "质量管理体系认证证书",
+            "投标函",
+            "法定代表人身份证明",
+            "授权委托书",
+            "开标一览表",
+        ):
+            assert _is_performance_requirement(name, "other") is False, name
+        assert _is_performance_requirement("营业执照", "qualification") is False
 
 
 class TestMergeMatches:
@@ -95,6 +135,19 @@ class TestPickAutoOccupy:
         assert rows == [
             {"model": "contract", "requirement_name": "业绩合同", "resource_id": "c1", "count": 1},
             {"model": "personnel", "requirement_name": "项目经理", "resource_id": "p1", "count": 1},
+        ]
+
+    def test_contract_branch_by_name_keyword_when_category_other(self):
+        """parse 侧业绩需求 category=other 时，自动占用仍应走 contract 模型
+        （回归：aws 2026-08-28，否则业绩 auto 占用按 qualification 入错表）。"""
+        doc = [{
+            "requirement": {"name": "安保业务服务业绩证明材料（合同）", "category": "other"},
+            "match_status": "auto",
+            "matches": [{"id": "c1", "confidence": "high"}],
+        }]
+        rows = _pick_auto_occupy(doc, [])
+        assert rows == [
+            {"model": "contract", "requirement_name": "安保业务服务业绩证明材料（合同）", "resource_id": "c1", "count": 1},
         ]
 
     def test_contract_caps_at_one_high_match(self):
