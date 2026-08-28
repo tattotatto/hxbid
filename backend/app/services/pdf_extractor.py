@@ -4,6 +4,7 @@
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -30,6 +31,19 @@ EVALUATION_KEYWORDS = [
     "评审办法",
     "评审标准",
 ]
+
+# 评标办法章节标题行（独占一行才算锚点）：
+# - `$` 锚定制把目录行（「第四章 评标办法….41」带页码）排除在锚之外；
+# - `^` 锚定制把正文交叉引用（「评标委员会按照第四章“评标办法”规定…」）排除。
+# 2026-08-28 修复：真实招标文件目录页误锚导致「未检测到评标办法」（抓回须知全文）。
+EVALUATION_HEADING_RE = re.compile(
+    r"^(?:第[一二三四五六七八九十\d]+[章部]\s*)?"
+    r"(评标办法|评分办法|评审办法|评分标准|评审标准|综合评分法)"
+    r"(?:\s*[（(][^（()）]{0,30}[)）])?\s*$"
+)
+
+# 兄弟章题（定位「招标文件由下列部分组成」章节名称清单的后随行）
+_CHAPTER_SIBLING_RE = re.compile(r"^第[一二三四五六七八九十\d]+[章部]\s*\S")
 
 
 def locate_format_pages(pdf) -> Tuple[int, int] | None:
@@ -83,11 +97,37 @@ def locate_evaluation_section(pdf):
     """
     num_pages = len(pdf.pages)
     start_page = None
+    # 章节标题行锚定优先。三重判别：
+    #  1) `$`/`^` 锚剔掉目录行（带页码）与正文交叉引用（句中引用）；
+    #  2) 章节起始页标题必然位于页首 → 仅认前 ~3 个非空行；
+    #  3) 章节名称罗列清单（「招标文件由下列部分组成：第一章…」）的标题后
+    #     紧跟兄弟章题 → 排除（真实章节起始页标题后跟章节内容）。
     for i in range(num_pages):
         text = pdf.pages[i].extract_text() or ""
-        if any(kw in text for kw in EVALUATION_KEYWORDS):
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        for idx, line in enumerate(lines):
+            if not EVALUATION_HEADING_RE.match(line):
+                continue
+            if idx > 2:
+                break  # 页首无标题行的页面不是章节起始页
+            if any(_CHAPTER_SIBLING_RE.match(s) for s in lines[idx + 1:idx + 3]):
+                break  # 后随兄弟章题 → 章节名称罗列清单
             start_page = i
             break
+        if start_page is not None:
+            break
+    if start_page is None:
+        # 兜底：无章节标题行的罕见文档 → 原关键词扫描，跳过前 10% 封面/目录区
+        skip = max(0, num_pages // 10)
+        logger.info(
+            "No evaluation heading line found; falling back to keyword scan "
+            "from page %d of %d", skip, num_pages,
+        )
+        for i in range(skip, num_pages):
+            text = pdf.pages[i].extract_text() or ""
+            if any(kw in text for kw in EVALUATION_KEYWORDS):
+                start_page = i
+                break
     if start_page is None:
         logger.info("No evaluation section found in %d pages", num_pages)
         return None

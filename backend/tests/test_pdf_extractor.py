@@ -299,3 +299,89 @@ class TestLocateEvaluationSection:
         assert "综合评分法" in text and "投标文件格式" not in text
         # 与 extract_text_from_pages 一致（0-indexed 含 end）
         assert text == extract_text_from_pages(pdf, 1, 2)
+
+    def test_skips_toc_and_cross_references(self):
+        """目录行与正文交叉引用不得误锚——只认独立的章节标题行.
+
+        回归：真实招标文件第 1 页目录含「第四章 评标办法….41」，正文大量
+        「按照第四章“评标办法”规定…」交叉引用；旧实现按关键词首次命中
+        锚到目录页，抓回参保人须知全文。标题行 `$` 锚定制天然排除目录
+        （目录行带页码）与交叉引用（句中「办法」后有后续文字）。
+        """
+        from app.services.pdf_extractor import locate_evaluation_section
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([
+            FakePage("目录\n第一章 招标公告........2\n第四章 评标办法..........41"),
+            FakePage("第一章 招标公告\n（招标公告正文…）"),
+            FakePage("第二章 投标人须知\n25.评标\n"
+                     "评标委员会按照第四章“评标办法”规定的方法进行评审。"),
+            FakePage("第四章 评标办法"),
+            FakePage("详细评分标准\n技术部分 15 分\n商务部分 10 分"),
+            FakePage("第五章 投标文件格式\n（模板页）"),
+        ])
+        located = locate_evaluation_section(pdf)
+        assert located is not None
+        start, end, text = located
+        assert start == 3, f"应锚定真实章节页, got start={start}"
+        assert end == 4
+        assert "评标办法" in text
+
+    def test_bare_heading_without_chapter_number(self):
+        """无「第X章」前缀的裸章节标题同样能锚定."""
+        from app.services.pdf_extractor import locate_evaluation_section
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([
+            FakePage("目录\n一、评标办法.....3"),
+            FakePage("第一部分\n招标公告正文"),
+            FakePage("评标办法（综合评分法）"),
+            FakePage("评分细则：价格 30 分、方案 20 分"),
+        ])
+        located = locate_evaluation_section(pdf)
+        assert located is not None
+        start, end, text = located
+        assert start == 2 and end == 3
+        assert "综合评分法" in text
+
+    def test_skips_chapter_enumeration_list(self):
+        """「招标文件由下列部分组成」章节名称清单不是章节起始页.
+
+        真实文档页面中部常有「8.1 本项目的招标文件由下列部分组成：第一章…第四章
+        评标办法…第六章」的章节罗列，每章题独占一行且无页码——若只按标题行锚定
+        会误锚。章节起始页的标题必然位于页首，且其后不跟兄弟章题。
+        """
+        from app.services.pdf_extractor import locate_evaluation_section
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([
+            FakePage("第一章 招标公告\n（招标公告正文…）"),
+            FakePage("二．招标文件\n8.1 本项目的招标文件由下列部分组成：\n"
+                     "第一章 招标公告\n第二章 投标须知\n第三章 需求任务书\n"
+                     "第四章 评标办法\n第五章 合同条款\n第六章 投标文件格式"),
+            FakePage("第四章 评标办法"),
+            FakePage("评分标准：技术 15 分\n商务 10 分"),
+        ])
+        located = locate_evaluation_section(pdf)
+        assert located is not None
+        start, end, text = located
+        assert start == 2 and end == 3
+        assert "评分标准" in text
