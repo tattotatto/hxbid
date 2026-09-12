@@ -19,6 +19,7 @@ from app.services.ai_pipeline import (
     _extract_tenderer_name_defensive,
     parse_bid_requirements,
 )
+from app.services.template_filler import build_variable_values
 
 
 SAMPLE_TENDER_TEXT = """\
@@ -130,6 +131,36 @@ class TestParseBidRequirementsTenderer:
         assert result["tenderer_agency_name"] == ""
 
     @pytest.mark.asyncio
+    async def test_failure_path_includes_tender_number_and_location(self):
+        """解析失败路径的默认结构必须含招标编号/服务地点/保证金.
+
+        缺 key 会让 build_variable_values 取到 None，落成 [待补充]；
+        更糟的是若下游改用 _pick 以外的写法会漏成裸 [var]。
+        """
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.side_effect = Exception("boom")
+        with patch("app.services.ai_pipeline.ai_adapter", mock_ai):
+            result = await parse_bid_requirements("garbage text")
+        assert result["tender_number"] == ""
+        assert result["service_location"] == ""
+        assert result["bid_deposit_amount"] == ""
+
+    @pytest.mark.asyncio
+    async def test_prompt_requests_tender_number_location_deposit(self):
+        """提示词必须显式索要这三个字段.
+
+        parse_bid_requirements 对 AI 返回的 key 是透传的，所以只要 AI 返回就
+        能用；缺口在于提示词从没要求过 —— AI 不会主动给出没被索要的 key，
+        槽位于是永远落 [待补充：招标编号]。
+        """
+        mock_ai = _stub_ai_returning(dict(_BASE_PAYLOAD))
+        with patch("app.services.ai_pipeline.ai_adapter", mock_ai):
+            await parse_bid_requirements(SAMPLE_TENDER_TEXT)
+        user_prompt = mock_ai.chat_completion.call_args.kwargs["messages"][1]["content"]
+        for field in ["tender_number", "service_location", "bid_deposit_amount"]:
+            assert field in user_prompt, f"提示词未索要 {field}"
+
+    @pytest.mark.asyncio
     async def test_ai_tenderer_not_overwritten_by_regex(self):
         """If AI already populated tenderer_name, regex should not clobber it."""
         payload = {**_BASE_PAYLOAD,
@@ -140,3 +171,39 @@ class TestParseBidRequirementsTenderer:
             result = await parse_bid_requirements(SAMPLE_TENDER_TEXT)
         # Regex would find 玉溪大红山矿业有限公司, but AI value must win.
         assert result["tenderer_name"] == "AI-Extracted Co.有限公司"
+
+
+# ---------------------------------------------------------------------------
+# 端到端：解析字段 → 固定格式槽位取值
+# ---------------------------------------------------------------------------
+
+class TestParseToTemplateVariables:
+    """招标编号/服务地点/保证金此前无上游生产者，槽位只能落 [待补充]。
+
+    本类钉住整条链：parse_bid_requirements 提取 → requirements →
+    build_variable_values 取数（经 extract_bid_opening_data 的取数约定）。
+    任一环断掉，投标函里就是 [待补充：招标编号]。
+    """
+
+    @pytest.mark.asyncio
+    async def test_parsed_fields_reach_variable_map(self):
+        payload = {
+            **_BASE_PAYLOAD,
+            "tenderer_name": "玉溪大红山矿业有限公司",
+            "tenderer_agency_name": "云南中招招标有限公司",
+            "tender_number": "YXDHS-2026-001",
+            "service_location": "玉溪大红山矿区",
+            "bid_deposit_amount": "50000",
+        }
+        with patch("app.services.ai_pipeline.ai_adapter", _stub_ai_returning(payload)):
+            reqs = await parse_bid_requirements(SAMPLE_TENDER_TEXT)
+
+        variables = build_variable_values({}, reqs)
+        assert variables["tenderer_name"] == "玉溪大红山矿业有限公司"
+        assert variables["tenderer_agency_name"] == "云南中招招标有限公司"
+        assert variables["tender_number"] == "YXDHS-2026-001"
+        assert variables["service_location"] == "玉溪大红山矿区"
+        assert variables["bid_deposit_amount"] == "50000"
+        # 关键：不能再落占位
+        for var in ["tender_number", "service_location", "bid_deposit_amount"]:
+            assert not variables[var].startswith("[待补充"), var

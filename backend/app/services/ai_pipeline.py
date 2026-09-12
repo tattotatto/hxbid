@@ -350,6 +350,11 @@ async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] =
   区分：招标人/采购人/发包人/业主/甲方 → tenderer_name；招标代理机构 → tenderer_agency_name；项目名称 → project_name
   如果招标文件中"招标人"一词仅出现项目名语境而无明确公司主体，则留空字符串
 - tenderer_agency_name: 招标代理机构名称（字符串，未提及留空）
+- tender_number: 招标编号/项目编号（字符串，未提及留空）
+  例如："YXDHS-2026-001"
+  只填编号本身，不要把项目名称或招标人名称混进来
+- service_location: 服务地点/项目地点/服务实施地点（字符串，未提及留空）
+- bid_deposit_amount: 投标保证金金额（字符串，只填金额数字，如 "50000"；未提及留空）
 
 注意：
 - 所有字段都必须存在，未提及的字段使用空字符串或空数组
@@ -394,6 +399,9 @@ async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] =
             "required_personnel": [],
             "tenderer_name": "",
             "tenderer_agency_name": "",
+            "tender_number": "",
+            "service_location": "",
+            "bid_deposit_amount": "",
         }
 
     # Ensure all expected keys are present with sane defaults
@@ -411,6 +419,9 @@ async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] =
         "required_personnel": [],
         "tenderer_name": "",
         "tenderer_agency_name": "",
+        "tender_number": "",
+        "service_location": "",
+        "bid_deposit_amount": "",
     }
     for key, default in defaults.items():
         if key not in result:
