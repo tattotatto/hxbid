@@ -1262,35 +1262,18 @@ async def export_bid(
     all_qual_section_images = remaining_images
 
     # ── Inject company info + qualification text into the 资格审查部分 chapter ──
-    QUAL_CHAPTER_KEYWORDS = ["资格审查", "资格", "资质审查", "公司资质", "资质与业绩"]
-    PERSONNEL_KEYWORDS = ["人员", "配置", "团队", "组织", "人力", "管理架构", "岗位"]
-
-    for idx, ch in enumerate(chapters_payload):
-        title = ch.get("title", "")
-
-        # Inject structured company info, qualification text and inline images
-        # PREPEND so images appear at the top of the chapter, before AI-generated text
-        if any(kw in title for kw in QUAL_CHAPTER_KEYWORDS):
-            if company_text_block or qual_text_block:
-                injected = (company_text_block or "") + (qual_text_block or "")
-                ch["content"] = injected + "\n\n" + (ch.get("content") or "")
-            if all_qual_section_images:
-                chapter_images[idx].extend(all_qual_section_images)
-
-        # Personnel cert images → personnel-related chapters
-        for kw in PERSONNEL_KEYWORDS:
-            if kw in title:
-                chapter_images[idx].extend(personnel_cert_images)
-                break
-
-        # Contract text + images → 业绩/其他内容 chapters
-        CONTRACT_CHAPTER_KEYWORDS = ["业绩", "类似项目", "项目经验", "成功案例",
-                                      "投标人认为需要提供的其他", "其他内容", "其他材料"]
-        if any(kw in title for kw in CONTRACT_CHAPTER_KEYWORDS):
-            if contract_text_block:
-                ch["content"] = (ch.get("content") or "") + "\n" + contract_text_block
-            if contract_images:
-                chapter_images[idx].extend(contract_images)
+    # 使用抽出的辅助函数（含 fallback 兜底），避免关键词缺口导致材料丢失
+    from app.services.materials_injection import inject_materials_into_chapters
+    inject_materials_into_chapters(
+        chapters=chapters_payload,
+        chapter_images=chapter_images,
+        company_text_block=company_text_block,
+        qual_text_block=qual_text_block,
+        all_qual_section_images=all_qual_section_images,
+        personnel_cert_images=personnel_cert_images,
+        contract_text_block=contract_text_block,
+        contract_images=contract_images,
+    )
 
     # -- Read format_template from project --
     format_template = {}
