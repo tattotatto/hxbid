@@ -345,6 +345,11 @@ async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] =
 - required_personnel: 招标文件要求配置的项目人员列表（对象数组，每个对象包含 role 岗位名称、certifications 持证要求数组、count 需求人数）
   例如：[{{"role": "项目负责人", "certifications": ["保安师证"], "count": 1}}]
   count 默认为 1
+- tenderer_name: 招标人/采购人/发包人/业主的公司全称（字符串，**只填公司名，不要包含项目名称**）
+  例如："玉溪大红山矿业有限公司"
+  区分：招标人/采购人/发包人/业主/甲方 → tenderer_name；招标代理机构 → tenderer_agency_name；项目名称 → project_name
+  如果招标文件中"招标人"一词仅出现项目名语境而无明确公司主体，则留空字符串
+- tenderer_agency_name: 招标代理机构名称（字符串，未提及留空）
 
 注意：
 - 所有字段都必须存在，未提及的字段使用空字符串或空数组
@@ -355,17 +360,26 @@ async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] =
 
     messages = _build_messages(user_prompt)
 
-    response = await ai_adapter.chat_completion(
-        messages=messages,
-        temperature=0.3,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-    )
+    try:
+        response = await ai_adapter.chat_completion(
+            messages=messages,
+            temperature=0.3,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:
+        logger.error("AI call failed in parse_bid_requirements: %s", exc)
+        response = ""
 
     try:
-        result = json.loads(response)
+        result = json.loads(response) if response else {}
     except json.JSONDecodeError:
-        # Return a safe default structure on parse failure
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+
+    # Return a safe default structure on parse failure (or AI failure above)
+    if not result:
         return {
             "project_name": "",
             "project_budget": "",
@@ -378,6 +392,8 @@ async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] =
             "bid_sections": [],
             "required_documents": [],
             "required_personnel": [],
+            "tenderer_name": "",
+            "tenderer_agency_name": "",
         }
 
     # Ensure all expected keys are present with sane defaults
@@ -393,12 +409,80 @@ async def parse_bid_requirements(document_text: str, max_tokens: Optional[int] =
         "bid_sections": [],
         "required_documents": [],
         "required_personnel": [],
+        "tenderer_name": "",
+        "tenderer_agency_name": "",
     }
     for key, default in defaults.items():
         if key not in result:
             result[key] = default
 
+    # Defensive fallback: AI may return empty tenderer_name even though the
+    # document clearly identifies the 招标人/采购人/发包人/业主. Sweep the
+    # original (non-truncated) document text for the company name and patch
+    # the result if AI missed it. Never overwrites a non-empty AI value.
+    if not result.get("tenderer_name"):
+        fallback = _extract_tenderer_name_defensive(document_text)
+        if fallback:
+            result["tenderer_name"] = fallback
+            logger.info(
+                "tenderer_name filled by regex fallback: %s", fallback,
+            )
+
     return result
+
+
+def _extract_tenderer_name_defensive(document_text: str) -> str:
+    """Regex fallback for tenderer_name when AI returns empty.
+
+    Tenders phrase the buyer in several ways: 招标人 / 采购人 / 发包人 / 业主.
+    We sweep the document text with progressively broader patterns and
+    return the first reasonable company name. Conservative — returns ""
+    when no confident match is found rather than guess.
+
+    Rejects matches that contain "项目" because such matches are almost
+    always the project title being misinterpreted as a company name.
+    """
+    # Order matters: most specific first.
+    # Greedy `{4,60}` (not lazy `{4,60}?`) so the regex extends fully and
+    # then backtracks to the FIRST matching company-suffix alternative.
+    # Lazy quantifiers stop at the shortest match — e.g. for "业主：曲靖某
+    # （集团）有限公司" the lazy form would capture "曲靖某（集团" because
+    # the alternative `集团` matches at position 6 before `有限公司` ever
+    # gets a chance. Greedy forces the engine to look further for the
+    # longest alternative.
+    patterns = [
+        # 招标人（名称）：XX / 招标人：XX / 招标单位：XX
+        re.compile(
+            r'招\s*标\s*人[\s（(]?(?:名\s*称|单\s*位)?[）)\s]*[:：]'
+            r'\s*([一-龥（）()·\s]{4,60}'
+            r'(?:有限公司|有限责任公司|股份公司|集团|公司))'
+        ),
+        # 采购人：XX
+        re.compile(
+            r'采\s*购\s*人[\s（(]?(?:名\s*称|单\s*位)?[）)\s]*[:：]'
+            r'\s*([一-龥（）()·\s]{4,60}'
+            r'(?:有限公司|有限责任公司|股份公司|集团|公司))'
+        ),
+        # 发包人：XX
+        re.compile(
+            r'发\s*包\s*人[\s（(]?(?:名\s*称)?[）)\s]*[:：]'
+            r'\s*([一-龥（）()·\s]{4,60}'
+            r'(?:有限公司|有限责任公司|股份公司|集团|公司))'
+        ),
+        # 业主：XX
+        re.compile(
+            r'业\s*主[\s（(]?(?:名\s*称)?[）)\s]*[:：]'
+            r'\s*([一-龥（）()·\s]{4,60}'
+            r'(?:有限公司|有限责任公司|股份公司|集团|公司))'
+        ),
+    ]
+    for pat in patterns:
+        m = pat.search(document_text)
+        if m:
+            name = m.group(1).strip()
+            if "项目" not in name:
+                return name
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1242,24 +1326,51 @@ async def generate_from_chapter_structure(
 
     # ── Generate file sections first ──
     file_chapters_output = []  # pre-generated file/table chapters
-    from app.services.template_filler import generate_file_section
+    from app.services.template_filler import (
+        fill_fixed_form_section_from_template,
+        generate_file_section,
+    )
 
     for chapter in chapters:
         if chapter.chapter_type in ("fixed_form", "table"):
             chapter_meta = json.loads(chapter.chapter_meta_json) if chapter.chapter_meta_json else {}
 
-            # Generate file section content
+            # Generate file section content.
+            # 优先用招标文件原文模板扫描填充（保留原文措辞），
+            # 当 format_section_text 不可用或扫描失败时回退到 AI 生成。
             file_content = ""
-            try:
-                file_content = await generate_file_section(
-                    section_type=chapter.title,
-                    company_profile=company_profile,
-                    requirements=requirements,
-                    project_name=requirements.get("project_name", "") if requirements else "",
-                    ai_adapter=ai_adapter,
-                )
-            except Exception as exc:
-                logger.warning("File section '%s' generation failed: %s", chapter.title, exc)
+            if chapter.chapter_type == "fixed_form" and requirements.get("format_section_text"):
+                try:
+                    file_content = await fill_fixed_form_section_from_template(
+                        section_title=chapter.title,
+                        format_section_text=requirements["format_section_text"],
+                        format_tables=requirements.get("format_tables", []),
+                        company_profile=company_profile,
+                        requirements=requirements,
+                        ai_adapter=ai_adapter,
+                    )
+                    if file_content:
+                        logger.info(
+                            "Filled '%s' from tender template (preserves wording)",
+                            chapter.title,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Scan-and-fill failed for '%s': %s; falling back to AI generation",
+                        chapter.title, exc,
+                    )
+
+            if not file_content:
+                try:
+                    file_content = await generate_file_section(
+                        section_type=chapter.title,
+                        company_profile=company_profile,
+                        requirements=requirements,
+                        project_name=requirements.get("project_name", "") if requirements else "",
+                        ai_adapter=ai_adapter,
+                    )
+                except Exception as exc:
+                    logger.warning("File section '%s' generation failed: %s", chapter.title, exc)
 
             file_chapters_output.append({
                 "id": chapter.id,

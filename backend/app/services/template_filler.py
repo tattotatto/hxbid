@@ -19,6 +19,7 @@ SCAN_SYSTEM_PROMPT = """你是投标文件分析专家。招标文件的格式�
 变量名只能从以下列表选取：
 - company_name: 投标人公司名称
 - legal_rep_name: 法定代表人姓名
+- legal_rep_id_number: 法定代表人身份证号
 - business_license_number: 统一社会信用代码/营业执照号
 - address: 公司地址
 - contact_phone: 联系电话
@@ -30,9 +31,24 @@ SCAN_SYSTEM_PROMPT = """你是投标文件分析专家。招标文件的格式�
 - account_number: 开户银行账号
 - bank_name: 开户银行
 - project_name: 招标项目名称
-- tenderer_name: 招标人名称
+- tenderer_name: 招标人名称（致函对象）
+- tenderer_agency_name: 招标代理机构
+- tender_number: 招标编号
+- bid_total_amount: 投标总报价（含税/不含税）
+- bid_total_amount_words: 投标报价大写
+- bid_unit_amount: 投标单价
+- bid_deposit_amount: 投标保证金金额
+- service_period: 服务期限
+- service_location: 服务地点
 - date: 日期
 - bid_validity_days: 投标有效期天数
+
+识别填写位置的规则（按出现频次）：
+1. **下划线占位符**：`致：________` 中 `________` → 替换为对应变量值
+2. **标签词占位符**：`致： 招标人名称` 中 `招标人名称` 是占位符词，应替换为 tenderer_name
+   - `日期： 年 月 日` 中三个空白处都应替换为 date
+   - `项目名称：` 后面跟的空白 → project_name
+3. **括号内空白**：`（招标编号为 ）` 括号内的空白 → tender_number
 
 如果你不确定某个位置该对应哪个变量，用 unknown_1, unknown_2 等标记，并在 warnings 中说明。
 
@@ -42,6 +58,7 @@ SCAN_SYSTEM_PROMPT = """你是投标文件分析专家。招标文件的格式�
 {
   "text_replacements": [
     {"original": "________", "var": "company_name", "context_before": "投标人名称："},
+    {"original": "招标人名称", "var": "tenderer_name", "context_before": "致："},
     {"original": "投标人名称：", "var": null, "note": "这是标签，不替换"},
   ],
   "table_fills": [
@@ -95,13 +112,101 @@ async def scan_and_mark_variables(
     return result
 
 
+# ---------------------------------------------------------------------------
+# 人民币金额大写（元角分）
+# ---------------------------------------------------------------------------
+
+_CN_DIGITS = "零壹贰叁肆伍陆柒捌玖"
+_CN_UNITS = ["", "拾", "佰", "仟"]
+_CN_BIG_UNITS = ["", "万", "亿", "万亿"]
+
+_AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _int_to_chinese(num: int) -> str:
+    """整数部分 → 中文大写（不含「元」）."""
+    if num == 0:
+        return "零"
+    groups: list[int] = []
+    while num > 0:
+        groups.append(num % 10000)
+        num //= 10000
+    groups.reverse()  # 高位在前
+    out = ""
+    for idx, group in enumerate(groups):
+        if group == 0:
+            continue  # 整组为零，由下一非零组补「零」
+        seg = ""
+        zero_pending = False
+        for j in range(3, -1, -1):
+            digit = (group // 10 ** j) % 10
+            if digit == 0:
+                zero_pending = True
+                continue
+            if zero_pending and seg:
+                seg += "零"
+            zero_pending = False
+            seg += _CN_DIGITS[digit] + _CN_UNITS[j]
+        # 组内高位为零且前面已有内容 → 补「零」（10001 → 壹万零壹）
+        if out and group < 1000:
+            out += "零"
+        out += seg + _CN_BIG_UNITS[len(groups) - 1 - idx]
+    return out
+
+
+def amount_to_chinese_words(text: str) -> str:
+    """从任意金额文本中提取数字并转成人民币大写（元角分）.
+
+    容忍「￥1,234.00」「120000元」等写法；解析不出数字（空值/「面议」/
+    「[待补充：X]」占位符）时返回空字符串，由调用方决定回退占位。
+    """
+    if not text:
+        return ""
+    cleaned = str(text).replace(",", "").replace("，", "")
+    match = _AMOUNT_RE.search(cleaned)
+    if not match:
+        return ""
+    int_part, _, dec_part = match.group(0).partition(".")
+    int_part = int_part.lstrip("0") or "0"
+    if len(int_part) > 16:  # 超出常规投标金额量级，放弃以免给出错值
+        return ""
+    dec_part = (dec_part + "00")[:2]
+    yuan = _int_to_chinese(int(int_part))
+    jiao, fen = int(dec_part[0]), int(dec_part[1])
+    if jiao == 0 and fen == 0:
+        return f"{yuan}元整"
+    out = f"{yuan}元"
+    if jiao:
+        out += _CN_DIGITS[jiao] + "角"
+    elif fen:
+        out += "零"
+    if fen:
+        out += _CN_DIGITS[fen] + "分"
+    return out
+
+
 def build_variable_values(
     company_profile: dict | None = None,
     requirements: dict | None = None,
 ) -> dict:
-    """构建变量值映射."""
+    """构建变量值映射.
+
+    招标编号/报价/期限/地点/保证金复用 ``extract_bid_opening_data`` 的取数约定
+    （与开标一览表同源），避免同一份数据两处解析出不同结果。
+
+    取不到的值一律落 ``[待补充：X]`` 可见占位，绝不能是裸 ``[var]``：
+    ``fill_fixed_form_section_from_template`` 会把它原样写进投标函正文，而
+    ``post_scan`` 只扫 ``{word}``，扫不到 ``[word]``，没有任何兜底能拦住。
+    """
     company = company_profile or {}
     reqs = requirements or {}
+    opening = extract_bid_opening_data(requirements=reqs, company_profile=company)
+
+    def _pick(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        return text or f"[待补充：{label}]"
+
+    total_amount = _pick(opening.get("total_price"), "投标总报价")
 
     return {
         "company_name": company.get("company_name") or "[待补充]",
@@ -117,7 +222,18 @@ def build_variable_values(
         "account_number": company.get("account_number") or "",
         "bank_name": company.get("bank_name") or "",
         "project_name": reqs.get("project_name") or "[待补充]",
-        "tenderer_name": reqs.get("project_name") or "[待补充]",
+        "tenderer_name": reqs.get("tenderer_name") or "[待补充：招标人名称]",
+        "legal_rep_id_number": _pick(company.get("legal_rep_id_number"), "法定代表人身份证号"),
+        "tenderer_agency_name": _pick(reqs.get("tenderer_agency_name"), "招标代理机构"),
+        "tender_number": _pick(opening.get("tender_number"), "招标编号"),
+        "bid_total_amount": total_amount,
+        "bid_total_amount_words": _pick(
+            amount_to_chinese_words(total_amount), "投标报价大写"
+        ),
+        "bid_unit_amount": _pick(opening.get("unit_price"), "投标单价"),
+        "bid_deposit_amount": _pick(opening.get("bid_deposit_amount"), "投标保证金金额"),
+        "service_period": _pick(opening.get("service_period"), "服务期限"),
+        "service_location": _pick(opening.get("service_location"), "服务地点"),
         "date": date.today().strftime("%Y年%m月%d日"),
         "bid_validity_days": "120",
     }
@@ -182,6 +298,158 @@ def post_scan(text: str) -> list[str]:
     if empty_lines:
         issues.append(f"疑似未填充的空白行: {len(empty_lines)}处")
     return issues
+
+
+# ---------------------------------------------------------------------------
+# 固定格式小节截取（从 format_section_text 中按数字标题定位单个小节）
+# ---------------------------------------------------------------------------
+
+# 数字章节标题，例如「二、投标函」「十一、商务文件其他材料」
+SECTION_HEADER_RE = re.compile(
+    r'^[ \t]*([一二三四五六七八九十]{1,3}[、．\.])([^\n]{1,80})$',
+    re.MULTILINE,
+)
+
+
+def _normalize_title(s: str) -> str:
+    """归一化标题：去空白、转小写，方便等价匹配."""
+    return re.sub(r'\s+', '', s).strip().lower()
+
+
+def extract_fixed_form_section(format_section_text: str, section_title: str) -> str:
+    """从格式章节全文中定位并截取指定固定格式小节.
+
+    匹配「数字+顿号+标题」行（如「二、投标函」）或独立标题行（如「投标承诺书」），
+    截取到下一数字章节标题前。
+
+    Args:
+        format_section_text: 完整的「投标文件格式」章节文本。
+        section_title: 目标小节标题，如「投标函」「法定代表人授权委托书」。
+
+    Returns:
+        该小节的完整文本（含标题行）；找不到返回空字符串。
+    """
+    if not format_section_text or not section_title:
+        return ""
+
+    target_norm = _normalize_title(section_title)
+
+    # 找所有数字章节标题
+    headers = []
+    for m in SECTION_HEADER_RE.finditer(format_section_text):
+        headers.append({
+            "pos": m.start(),
+            "end": m.end(),
+            "body": m.group(2).strip(),
+            "body_norm": _normalize_title(m.group(2)),
+        })
+
+    # 匹配目标标题：完全相等或目标标题是标题行的子串（容忍"投标函" vs "二、投标函"）
+    start_idx = None
+    for i, h in enumerate(headers):
+        if h["body_norm"] == target_norm or target_norm in h["body_norm"]:
+            start_idx = i
+            break
+
+    if start_idx is None:
+        return ""
+
+    section_start = headers[start_idx]["pos"]
+    if start_idx + 1 < len(headers):
+        section_end = headers[start_idx + 1]["pos"]
+    else:
+        section_end = len(format_section_text)
+
+    return format_section_text[section_start:section_end].strip()
+
+
+async def fill_fixed_form_section_from_template(
+    section_title: str,
+    format_section_text: str,
+    format_tables: list[dict] | None = None,
+    company_profile: dict | None = None,
+    requirements: dict | None = None,
+    ai_adapter=None,
+) -> str:
+    """从招标文件的格式章节原文模板中提取并填充指定固定格式小节.
+
+    用户需求：保留输入 PDF 的完整措辞（不修改），只填空下划线/标签词。
+    流程：
+      1. 定位小节（``extract_fixed_form_section``）
+      2. AI 扫描标注变量位置（``scan_and_mark_variables``）
+      3. 批量填充（``batch_fill_text``）
+      4. 返回填充后内容
+
+    Args:
+        section_title: 目标小节标题，如「投标函」「法定代表人授权委托书」。
+        format_section_text: 完整的「投标文件格式」章节文本（来自 bid.py 提取）。
+        format_tables: 格式章节中提取的表格数据。
+        company_profile: 公司信息字典。
+        requirements: 解析后的招标文件要求字典。
+        ai_adapter: AI 适配器实例。
+
+    Returns:
+        填充后的小节文本。找不到该小节、AI 扫描失败、或格式章节为空时返回空字符串，
+        由调用方走 ``generate_file_section`` 兜底。
+    """
+    if not format_section_text or not section_title:
+        return ""
+
+    section_text = extract_fixed_form_section(format_section_text, section_title)
+    if not section_text:
+        logger.info(
+            "Section '%s' not found in format_section_text, caller should fallback",
+            section_title,
+        )
+        return ""
+
+    variables = build_variable_values(company_profile, requirements)
+
+    # 提示 AI 哪些变量已有真实值（避免它凭空猜测）
+    known_values = {
+        k: v for k, v in variables.items() if v and not v.startswith("[待补充")
+    }
+    variables_hint = json.dumps(known_values, ensure_ascii=False, indent=2)
+
+    scan_result = await scan_and_mark_variables(
+        full_text=section_text,
+        tables=format_tables or [],
+        ai_adapter=ai_adapter,
+    )
+
+    if scan_result.get("warnings") and not scan_result.get("text_replacements"):
+        logger.warning(
+            "Scan for section '%s' returned no replacements (%s); caller should fallback",
+            section_title, scan_result["warnings"],
+        )
+        return ""
+
+    # 把 variable 值注入到 replacement（如果 AI 没填）
+    enriched = []
+    for rep in scan_result.get("text_replacements", []):
+        var = rep.get("var")
+        if not var:
+            continue  # 跳过标签行（如 {"original": "投标人名称：", "var": null}）
+        rep_copy = dict(rep)
+        if "value" not in rep_copy or rep_copy["value"] is None:
+            rep_copy["value"] = variables.get(var, f"[{var}]")
+        enriched.append(rep_copy)
+
+    filled_text = batch_fill_text(section_text, enriched)
+
+    # 兜底：若填完后还有残留空白下划线，记录 warning（但仍返回结果）
+    residual = post_scan(filled_text)
+    if residual:
+        logger.warning(
+            "Section '%s' filled with residuals: %s",
+            section_title, residual,
+        )
+
+    logger.info(
+        "Filled fixed-form section '%s': %d chars, %d replacements applied",
+        section_title, len(filled_text), len(enriched),
+    )
+    return filled_text
 
 
 # ---------------------------------------------------------------------------
@@ -347,9 +615,16 @@ async def generate_file_section(
         context_parts.append(f"招标项目名称：{project_name}")
 
     if requirements:
-        if requirements.get("tenderer_name") or requirements.get("project_name"):
-            t_name = requirements.get("tenderer_name") or requirements.get("project_name", "")
+        t_name = (requirements.get("tenderer_name") or "").strip()
+        if t_name:
             context_parts.append(f"招标人（致函对象）：{t_name}")
+        else:
+            # Do NOT fall back to project_name — it would let the AI
+            # hallucinate a company name. Tell the AI explicitly.
+            context_parts.append(
+                "招标人（致函对象）：[待补充：招标人公司全称]"
+                "（严禁使用项目名称替代，严禁编造）"
+            )
         if requirements.get("project_duration"):
             context_parts.append(f"服务期限：{requirements['project_duration']}")
         if requirements.get("project_budget"):
