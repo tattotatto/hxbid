@@ -409,6 +409,141 @@ class TestScanAndMarkVariables:
 # ---------------------------------------------------------------------------
 
 
+class TestScanTokenBudget:
+    """扫描调用的 token 预算（推理模型吃满预算的回归）."""
+
+    @pytest.mark.asyncio
+    async def test_scan_requests_budget_above_measured_reasoning_need(self):
+        """扫描预算必须高于推理自身的开销（实测 12129 token）.
+
+        回归（大红山实测）：同一条扫描请求，prompt 3224 token ——
+        - max_tokens=8192  → completion=8192, reasoning=8192, content_len=0,
+          finish_reason='length'。推理把预算烧得一个 token 不剩，正文空，
+          调用方拿到 0 条替换 → 整章回退 AI 自由生成。
+        - max_tokens=32768 → reasoning=12129, content 4354 字正常收尾。
+        预算必须显著高于 12129，否则空返回必然重现。
+        """
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.return_value = json.dumps(
+            {"text_replacements": [], "table_fills": [], "warnings": []}
+        )
+
+        await scan_and_mark_variables(
+            full_text="致： 招标人名称\n（招标编号为 ）\n",
+            tables=[],
+            ai_adapter=mock_ai,
+        )
+
+        budget = mock_ai.chat_completion.call_args.kwargs["max_tokens"]
+        assert budget >= 16384, (
+            f"扫描预算 {budget} 不高于实测推理需求 12129 token，"
+            f"正文会被推理挤成空字符串"
+        )
+
+
+class TestScanFailureModesAreDistinguishable:
+    """扫描失败的两种性质必须能区分开（预算问题 vs 数据问题）."""
+
+    @pytest.mark.asyncio
+    async def test_budget_exhaustion_differs_from_invalid_json(self):
+        """预算耗尽与 JSON 坏掉不能给出同一句提示.
+
+        回归（大红山）：旧实现 `except (json.JSONDecodeError, Exception)`
+        把两者一锅端成「AI扫描失败: <原文>」。看日志的人无从判断这是
+        「模型没话说」还是「max_tokens 给低了」——固定格式章节因此整章
+        静默回退 AI 自由生成，潜伏至今。
+        """
+        from app.services.ai_adapter import AIEmptyContentError
+
+        budget_ai = AsyncMock()
+        budget_ai.chat_completion.side_effect = AIEmptyContentError(
+            "AI returned empty content (finish_reason=length, max_tokens=8192)."
+        )
+        budget = await scan_and_mark_variables(
+            full_text="致： 招标人名称", tables=[], ai_adapter=budget_ai,
+        )
+
+        json_ai = AsyncMock()
+        json_ai.chat_completion.side_effect = json.JSONDecodeError(
+            "Expecting value", "oops", 0
+        )
+        broken = await scan_and_mark_variables(
+            full_text="致： 招标人名称", tables=[], ai_adapter=json_ai,
+        )
+
+        # 两者都得让调用方回退，但**提示必须不同**
+        assert budget["text_replacements"] == []
+        assert broken["text_replacements"] == []
+        budget_warn = budget["warnings"][0]
+        json_warn = broken["warnings"][0]
+        assert budget_warn != json_warn, "两种失败给出了同一句提示，无法区分"
+        assert "JSON" in json_warn.upper(), json_warn
+        assert "预算" in budget_warn or "token" in budget_warn.lower(), budget_warn
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_keeps_exception_type(self):
+        """其它异常也要带类型名落日志，不再是无信息的一句「扫描失败」."""
+        ai = AsyncMock()
+        ai.chat_completion.side_effect = TimeoutError("read timed out")
+        result = await scan_and_mark_variables(
+            full_text="致： 招标人名称", tables=[], ai_adapter=ai,
+        )
+        assert "TimeoutError" in result["warnings"][0], result["warnings"][0]
+
+
+class TestKnownValuesReachTheScan:
+    """已知变量值必须作为提示送达扫描（否则 AI 只能凭空猜）."""
+
+    @staticmethod
+    def _messages_of(adapter):
+        return "\n".join(
+            m["content"]
+            for m in adapter.chat_completion.call_args.kwargs["messages"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_puts_known_values_into_prompt(self):
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.return_value = json.dumps(
+            {"text_replacements": [], "table_fills": [], "warnings": []}
+        )
+        await scan_and_mark_variables(
+            full_text="致： 招标人名称",
+            tables=[],
+            ai_adapter=mock_ai,
+            known_values={"tenderer_name": "玉溪大红山矿业有限公司"},
+        )
+        assert "玉溪大红山矿业有限公司" in self._messages_of(mock_ai)
+
+    @pytest.mark.asyncio
+    async def test_fill_passes_known_values_through_to_scan(self):
+        """填充入口必须把已知值透传给扫描.
+
+        回归：template_filler 里 `variables_hint` 算出来后就再没被用过，
+        `scan_and_mark_variables` 的签名里根本没有这个参数——注释承诺
+        「提示 AI 哪些变量已有真实值，避免它凭空猜测」，代码没做。
+        """
+        spy = AsyncMock()
+        spy.chat_completion.return_value = json.dumps(
+            {"text_replacements": [], "table_fills": [], "warnings": []}
+        )
+
+        await fill_fixed_form_section_from_template(
+            section_title="投标函",
+            format_section_text=(
+                "二、投标函\n致： 招标人名称\n根据贵方 项目名称 招标文件\n"
+            ),
+            format_tables=[],
+            company_profile={"company_name": "云南领航保安服务有限公司"},
+            requirements={"tenderer_name": "玉溪大红山矿业有限公司"},
+            ai_adapter=spy,
+        )
+
+        sent = self._messages_of(spy)
+        assert "云南领航保安服务有限公司" in sent
+        assert "玉溪大红山矿业有限公司" in sent
+
+
 class TestExtractFixedFormSection:
     """从 format_section_text 截取单个固定格式小节."""
 
@@ -452,6 +587,56 @@ class TestExtractFixedFormSection:
         result = extract_fixed_form_section(text, "投标函")
         assert "招标人名称" in result
         assert "日期" in result
+
+    @staticmethod
+    def _text_with_toc():
+        """复刻大红山第六章的文本形状（目录段 + 正文段）.
+
+        p74 目录里 19 个标题**连续成行、中间没有正文**；p75 起才是真小节，
+        每个标题后面跟着自己的正文。目录条目和真小节共用同一个标题正则，
+        所以「首个匹配即真小节」的旧假设在带目录的文本上必然错。
+        """
+        return (
+            "第六章 投标文件格式\n-72-\n\n目 录\n"
+            "一、封面\n二、投标函\n三、投标承诺书\n"
+            "-73-\n\n"
+            "一、封面\n（项目名称）招标项目\n投 标 文 件\n"
+            "投标人：\n法定代表人或其委托代理人：\n年 月 日\n"
+            "-74-\n\n"
+            "二、投标函\n投标函\n致： 招标人名称\n"
+            "根据贵方 项目名称 招标文件（招标编号为 ），我方针对本项目的\n"
+            "投标总报价为： 万元人民币。\n"
+            "-75-\n\n"
+            "三、投标承诺书\n投标承诺书\n本公司郑重承诺：\n"
+            "1. 承诺遵循公开、公平、公正原则\n"
+        )
+
+    def test_skips_toc_entry_and_finds_real_cover_section(self):
+        """目录里的「一、封面」不得冒充真正的小节.
+
+        回归：页码回溯修好后，p74 目录回到了 format_section_text 里，
+        「一、封面」在目录中先出现一次。旧实现取首个匹配，截出的是
+        目录行到下一个目录行之间的 4 个字（"一、封面"），填充阶段会把这
+        4 个字当成整章内容——比修复前回退 AI 还糟。
+        """
+        result = extract_fixed_form_section(self._text_with_toc(), "封面")
+        assert "（项目名称）招标项目" in result
+        assert "投 标 文 件" in result
+        assert "法定代表人或其委托代理人" in result
+        assert "二、投标函" not in result, "不得越界到下一节"
+        assert len(result) > 20
+
+    def test_toc_entry_does_not_shadow_real_section(self):
+        """目录条目不得遮蔽真正的投标函正文.
+
+        回归：带目录的文本里「二、投标函」在目录中先出现，旧实现退回
+        目录那 5 个字，把原本好好的 573 字正文替换掉。
+        """
+        result = extract_fixed_form_section(self._text_with_toc(), "投标函")
+        assert "根据贵方" in result
+        assert "投标总报价" in result
+        assert "投标承诺书" not in result, "不得越界到下一节"
+        assert len(result) > 40
 
     def test_handles_no_numeric_prefix(self):
         """完全没有数字章节标题时返回空（避免误匹配正文里的"投标函"）."""

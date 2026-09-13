@@ -134,6 +134,80 @@ class TestLocateFormatPages:
             pdf.close()
 
 
+class TestLocateFormatPagesBacktrack:
+    """格式章节回溯到真正章首页（fake pdf，大红山页几何回归）."""
+
+    class FakePage:
+        def __init__(self, text): self._text = text
+        def extract_text(self): return self._text
+
+    class FakePdf:
+        def __init__(self, pages): self.pages = pages
+
+    @staticmethod
+    def _ruidashan_pdf():
+        """大红山招标文件 p73-p77 的页几何（0-indexed）.
+
+        实测：从文档末尾倒扫，第一个命中的是 idx 3（p76 投标函正文里
+        顺口提了「投标文件格式」），而不是 idx 0（p73 真正的章名页）。
+        中间隔着 p74 目录、p75 封面两页无关键词，所以必须回溯满 3 页
+        才够得到章首——这正是回溯窗口 off-by-one 的暴击点。
+        """
+        cls = TestLocateFormatPagesBacktrack
+        return cls.FakePdf([
+            cls.FakePage("第六章 投标文件格式"),                      # 0 = p73 章名页
+            cls.FakePage("目录\n一、封面.........75\n二、投标函.......76"),  # 1 = p74 目录
+            cls.FakePage("一、封面\n（项目名称）招标项目\n"
+                         "投 标 文 件\n投标人：\n法定代表人："),           # 2 = p75 封面
+            cls.FakePage("二、投标函\n投标函\n致： 招标人名称\n"
+                         "根据贵方 项目名称 招标文件（投标文件格式见第六章）"),  # 3 = p76 仅提及
+            cls.FakePage("十九、附件\n（附件正文）"),                    # 4 = p77
+        ])
+
+    def test_backtracks_three_pages_to_chapter_title(self):
+        """关键词页往前第 3 页才是章首时，必须回溯到那里.
+
+        回归：旧实现的窗口是 `range(i - 1, max(i - 3, -1), -1)`，
+        range 的 stop 是开区间 → 实际只回溯 i-1、i-2 两页，够不到 i-3。
+        p73（章名）/p74（目录）/p75（封面）因此整页被排除在
+        format_section_text 之外，封面章节在最终标书里彻底消失。
+        """
+        start, end = locate_format_pages(self._ruidashan_pdf())
+        assert start == 0, f"应回溯到章名页 0, got {start}"
+        assert end == 4
+
+    def test_backtrack_window_includes_cover_page(self):
+        """回溯范围内必须涵盖封面页（p75 → idx 2）.
+
+        这条测的是用户可见症状本身：封面有没有落进抽取范围。
+        """
+        pdf = self._ruidashan_pdf()
+        start, _end = locate_format_pages(pdf)
+        page_texts = [
+            pdf.pages[i].extract_text() for i in range(start, len(pdf.pages))
+        ]
+        joined = "\n".join(page_texts)
+        assert "一、封面" in joined, "封面页未进入格式章节抽取范围"
+        assert "第六章 投标文件格式" in joined, "章名页未进入抽取范围"
+
+    def test_backtrack_still_works_for_adjacent_page(self):
+        """章首页紧邻关键词页（回溯 1 页）时不得回归."""
+        cls = TestLocateFormatPagesBacktrack
+        pdf = cls.FakePdf([
+            cls.FakePage("第六章 投标文件格式"),
+            cls.FakePage("二、投标函\n（格式模板）"),
+        ])
+        assert locate_format_pages(pdf) == (0, 1)
+
+    def test_returns_none_when_no_keyword_anywhere(self):
+        cls = TestLocateFormatPagesBacktrack
+        pdf = cls.FakePdf([
+            cls.FakePage("第一章 招标公告"),
+            cls.FakePage("第二章 投标人须知"),
+        ])
+        assert locate_format_pages(pdf) is None
+
+
 class TestExtractTextFromPages:
     """extract_text_from_pages 测试."""
 

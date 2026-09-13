@@ -89,9 +89,14 @@ def locate_format_pages(pdf) -> Tuple[int, int] | None:
             if kw in text:
                 # 再向前回溯找到章节的真正起始页（关键词可能在标题行之后）
                 start_page = i
-                # 向前最多回溯 3 页，找更靠前的匹配
+                # 向前最多回溯 3 页，找更靠前的匹配。
+                # 注意 range 的 stop 是开区间：要覆盖 i-1/i-2/i-3，stop 必须写
+                # i-4。旧实现写 max(i - 3, -1)，实际只回溯了 2 页——当真正
+                # 的章首页正好在 i-3（如大红山：p76 投标函正文提及关键词，
+                # 章首在 p73，中间隔着 p74 目录、p75 封面两页无关键词）时
+                # 够不到，start_page 停在提及页，章名页/目录/封面整页被排除。
                 if i > 0:
-                    for j in range(i - 1, max(i - 3, -1), -1):
+                    for j in range(i - 1, max(i - 4, -1), -1):
                         prev_text = pdf.pages[j].extract_text() or ""
                         for pk in FORMAT_KEYWORDS:
                             if pk in prev_text:

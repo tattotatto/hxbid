@@ -16,6 +16,22 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+class AIEmptyContentError(RuntimeError):
+    """模型把 token 预算烧在推理上，正文一个 token 都没剩.
+
+    语义是**预算配置问题**，不是数据问题：推理模型（deepseek-flash 系）
+    的 reasoning_tokens 与正文共用同一份 max_tokens，给低了就会
+    ``finish_reason='length'`` 且 content 为空。
+
+    单独立类型是为了让调用方能把它与「AI 没话说」「返回的 JSON 坏掉」
+    区分开——混在一起时，一个配置问题会被渲染成含糊的「扫描失败」，
+    然后静默降级（大红山固定格式章节整章回退 AI 自由生成即是如此）。
+
+    仍继承 ``RuntimeError``，既有 ``except RuntimeError`` 调用方不受影响。
+    """
+
+
 # Provider metadata
 PROVIDERS = {
     "deepseek": {
@@ -161,7 +177,7 @@ class AIAdapter:
         # 这里显式 raise，让调用方知道是 token 预算问题而不是数据问题。
         if not content:
             finish = choice.finish_reason
-            raise RuntimeError(
+            raise AIEmptyContentError(
                 f"AI returned empty content (finish_reason={finish}, "
                 f"max_tokens={kwargs.get('max_tokens')}). "
                 f"Increase max_tokens to leave room after reasoning_tokens."
@@ -211,7 +227,7 @@ class AIAdapter:
         # 注意 content 非空但被 length 截断**不抛**：那是大红山 70% 叶子的常态，
         # 抛了等于把已写好的半篇正文丢掉重跑，代价远大于收益。
         if not produced_any:
-            raise RuntimeError(
+            raise AIEmptyContentError(
                 f"AI returned empty content (finish_reason={finish_reason}, "
                 f"max_tokens={kwargs.get('max_tokens')}). "
                 f"Increase max_tokens to leave room after reasoning_tokens."

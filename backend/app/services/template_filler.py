@@ -11,6 +11,8 @@ import logging
 from datetime import date
 from typing import Any, Dict, List
 
+from app.services.ai_adapter import AIEmptyContentError
+
 logger = logging.getLogger(__name__)
 
 SCAN_SYSTEM_PROMPT = """你是投标文件分析专家。招标文件的格式章节已完整提取。
@@ -73,9 +75,24 @@ async def scan_and_mark_variables(
     full_text: str,
     tables: list[dict],
     ai_adapter,
+    known_values: dict | None = None,
 ) -> dict:
-    """AI 扫描全文，标注所有变量位置."""
+    """AI 扫描全文，标注所有变量位置.
+
+    Args:
+        known_values: 已从公司资料/招标文件解析出的真实值（变量名 → 值）。
+            作为提示注入，避免模型对已知信息（招标人名称、项目名称、
+            招标编号等）凭空猜测或标成 unknown。为空则不注入该段。
+    """
     tables_json = json.dumps(tables[:10], ensure_ascii=False)  # 限制表格数量
+    hint_block = ""
+    if known_values:
+        hint_block = (
+            "\n已知变量值（这些是真实值，直接采用，不要另行编造）：\n"
+            "---\n"
+            f"{json.dumps(known_values, ensure_ascii=False, indent=2)}\n"
+            "---\n"
+        )
     prompt = f"""请扫描以下招标文件格式章节，找出所有需要投标人填写的位置。
 
 全文（含封面、目录、正文）：
@@ -87,7 +104,7 @@ async def scan_and_mark_variables(
 ---
 {tables_json}
 ---
-
+{hint_block}
 请标注每个填写位置对应的变量名。直接返回JSON，不要其他文字。"""
 
     try:
@@ -97,16 +114,47 @@ async def scan_and_mark_variables(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=8192,
+            # 预算必须覆盖「推理 + 正文」。推理模型（deepseek-flash 系）的
+            # reasoning_tokens 与正文共用这一份预算：大红山实测同一请求在
+            # 8192 下 reasoning=8192 吃满、正文 0 字节（finish_reason=length），
+            # 扫描永远拿不到标注，固定格式章节整章回退 AI 自由生成；
+            # 给到 32768 时 reasoning=12129、正文 4354 字正常收尾。
+            max_tokens=32768,
             response_format={"type": "json_object"},
         )
-        result = json.loads(response)
-    except (json.JSONDecodeError, Exception) as exc:
-        logger.error("Variable scanning failed: %s", exc)
+    except AIEmptyContentError as exc:
+        # 预算问题，不是数据问题：推理把 max_tokens 吃光、正文为空。
+        # 必须与「AI 没话说」区分开——旧实现把两者一锅端成一句含糊的
+        # 「AI扫描失败」，于是「调高 max_tokens」这条正解被埋掉，
+        # 固定格式章节整章静默回退 AI 自由生成（大红山潜伏至今的成因）。
+        logger.error(
+            "Variable scanning ABORTED: token budget exhausted by reasoning, "
+            "raise max_tokens. %s", exc,
+        )
         return {
             "text_replacements": [],
             "table_fills": [],
-            "warnings": [f"AI扫描失败: {exc}"],
+            "warnings": [f"AI token 预算被推理吃满（需调高 max_tokens）: {exc}"],
+        }
+    except Exception as exc:
+        logger.error(
+            "Variable scanning failed (%s): %s", type(exc).__name__, exc,
+            exc_info=True,
+        )
+        return {
+            "text_replacements": [],
+            "table_fills": [],
+            "warnings": [f"AI扫描失败({type(exc).__name__}): {exc}"],
+        }
+
+    try:
+        result = json.loads(response)
+    except json.JSONDecodeError as exc:
+        logger.error("Variable scanning returned invalid JSON: %s", exc)
+        return {
+            "text_replacements": [],
+            "table_fills": [],
+            "warnings": [f"AI返回非法JSON: {exc}"],
         }
 
     return result
@@ -310,6 +358,10 @@ SECTION_HEADER_RE = re.compile(
     re.MULTILINE,
 )
 
+# 独占一行的页码，如「-72-」「72」「— 72 —」。
+# 用于判断标题行后面到底有没有正文（目录条目后面只有页码或什么都没有）。
+_PAGE_NUMBER_LINE_RE = re.compile(r'^[\s\-—–]*\d+[\s\-—–]*$', re.MULTILINE)
+
 
 def _normalize_title(s: str) -> str:
     """归一化标题：去空白、转小写，方便等价匹配."""
@@ -344,10 +396,32 @@ def extract_fixed_form_section(format_section_text: str, section_title: str) -> 
             "body_norm": _normalize_title(m.group(2)),
         })
 
-    # 匹配目标标题：完全相等或目标标题是标题行的子串（容忍"投标函" vs "二、投标函"）
+    def _body_of(idx: int) -> str:
+        """标题行与下一个标题之间的正文（末节取到文末）."""
+        start = headers[idx]["end"]
+        stop = (
+            headers[idx + 1]["pos"]
+            if idx + 1 < len(headers)
+            else len(format_section_text)
+        )
+        return format_section_text[start:stop]
+
+    def _has_body(raw: str) -> bool:
+        """剔除独占行的页码后是否还有正文.
+
+        目录里的标题连续成行，标题后要么没有内容，要么只剩一个页码
+        （如「十九、附件」后面是「-73-」）。真小节后面必有正文。
+        """
+        return bool(_PAGE_NUMBER_LINE_RE.sub("", raw).strip())
+
+    # 匹配目标标题：完全相等或目标标题是标题行的子串（容忍"投标函" vs "二、投标函"）。
+    # 必须跳过目录条目——它与真小节共用同一个标题正则，且在文中先出现；
+    # 取首个匹配会截出「一、封面」这 4 个字当成整章内容。
     start_idx = None
     for i, h in enumerate(headers):
         if h["body_norm"] == target_norm or target_norm in h["body_norm"]:
+            if not _has_body(_body_of(i)):
+                continue
             start_idx = i
             break
 
@@ -409,12 +483,12 @@ async def fill_fixed_form_section_from_template(
     known_values = {
         k: v for k, v in variables.items() if v and not v.startswith("[待补充")
     }
-    variables_hint = json.dumps(known_values, ensure_ascii=False, indent=2)
 
     scan_result = await scan_and_mark_variables(
         full_text=section_text,
         tables=format_tables or [],
         ai_adapter=ai_adapter,
+        known_values=known_values,
     )
 
     if scan_result.get("warnings") and not scan_result.get("text_replacements"):
