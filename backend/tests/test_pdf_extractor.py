@@ -385,3 +385,109 @@ class TestLocateEvaluationSection:
         start, end, text = located
         assert start == 2 and end == 3
         assert "评分标准" in text
+
+    def test_does_not_stop_at_inline_tender_letter_mention(self):
+        """正文中零星提及「投标函」不是章节边界（大红山招标文件回归）.
+
+        真实文档（玉溪大红山，101 页）：「初步评审表」第 10 条为
+        「在宝华智慧招标平台上传的投标文件不完整的（投标文件至少包括
+        投标函、投标承诺书、投标报价、服务方案、拟投入人员)」。
+        旧实现按**整页子串**匹配 `"投标函" in text`，一见这两个字就把
+        评标办法章节截断在初步评审表上——只取到 1 页 718 字，第 47-48 页
+        的技术评审表（评分标准 40 分）被切在门外，extract_rubric 拿到空表，
+        评分点驱动的目录补全与自评分整条链路失效。
+
+        正解：「投标函」只认**行首**（格式章节里它是标题行），正文表格里的
+        顺带提及不是边界。
+        """
+        from app.services.pdf_extractor import locate_evaluation_section
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([
+            FakePage("第四章 评标办法"),                                  # 0 起始
+            FakePage("一、初步评审：\n初步评审表：\n"
+                     "序号 评审标准 说明 是否关联"),                       # 1
+            FakePage("含税价289.80万元/年（含税）；井口值守及游泳池值\n"
+                     "守业务240.00万元/年（含税）。\n"
+                     "同一投标人提交两个及以上不同的投标文件或投标报"),     # 2 表格续行
+            FakePage("6 否决条款 否\n"
+                     "价，但招标文件要求提交备选投标的除外\n"
+                     "7 投标报价低于成本，或存在串通涨价、价格欺诈行为的\n"
+                     "8 投标人出现串通投标、虚假投标、以行贿手段谋取中标\n"
+                     "9 投标人未按评标委员会要求澄清、说明或补正的\n"
+                     "10 在宝华智慧招标平台上传的投标文件不完整的（投标文\n"
+                     "件至少包括投标函、投标承诺书、投标报价、服务方 否决条款 否"),  # 3 误命中在此
+            FakePage("二、详细评审：\n（二）技术标（40.00分）\n"
+                     "4 门岗、井口值守、游泳池安保管理综合方案 0.0 10.0 否"),  # 4 真正的评分表
+            FakePage("第五章 合同条款及格式"),                              # 5 下一章
+            FakePage("（合同条款正文）"),                                   # 6
+        ])
+        located = locate_evaluation_section(pdf)
+        assert located is not None
+        start, end, text = located
+        assert start == 0
+        assert end == 4, f"评分表页被截断, got end={end}"
+        assert "门岗、井口值守、游泳池安保管理综合方案" in text
+        assert "合同条款" not in text
+
+    def test_stops_at_next_chapter_heading(self):
+        """下一个「第X章」标题出现在页首 → 评标办法章节结束.
+
+        旧实现只认 FORMAT_KEYWORDS（「投标文件格式」等），遇到
+        「第五章 合同条款及格式」这类与格式无关的下一章标题不认边界，
+        会把后面整份文档都吞进「评标办法」正文。
+        """
+        from app.services.pdf_extractor import locate_evaluation_section
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([
+            FakePage("第四章 评标办法"),
+            FakePage("评分标准：服务方案 10 分"),
+            FakePage("第五章 合同条款及格式"),
+            FakePage("（合同条款正文）"),
+            FakePage("第六章 投标文件格式"),
+        ])
+        located = locate_evaluation_section(pdf)
+        assert located is not None
+        start, end, text = located
+        assert start == 0 and end == 1, f"got start={start} end={end}"
+        assert "合同条款" not in text and "投标文件格式" not in text
+
+    def test_running_header_of_evaluation_chapter_is_not_a_boundary(self):
+        """评标办法自身的章题作为页眉重复出现时不得当作「下一章」.
+
+        `第四章 评标办法` 常作为页眉出现在本章每一页页首；若把它也算作
+        下一章标题，章节会在第 1 页就结束。
+        """
+        from app.services.pdf_extractor import locate_evaluation_section
+
+        class FakePage:
+            def __init__(self, text): self._text = text
+            def extract_text(self): return self._text
+
+        class FakePdf:
+            def __init__(self, pages): self.pages = pages
+
+        pdf = FakePdf([
+            FakePage("第四章 评标办法"),
+            FakePage("第四章 评标办法\n一、初步评审："),
+            FakePage("第四章 评标办法\n二、详细评审：服务方案 10 分"),
+            FakePage("第五章 合同条款及格式"),
+        ])
+        located = locate_evaluation_section(pdf)
+        assert located is not None
+        start, end, text = located
+        assert start == 0 and end == 2, f"got start={start} end={end}"
+        assert "详细评审" in text

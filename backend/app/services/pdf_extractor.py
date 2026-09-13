@@ -45,6 +45,31 @@ EVALUATION_HEADING_RE = re.compile(
 # 兄弟章题（定位「招标文件由下列部分组成」章节名称清单的后随行）
 _CHAPTER_SIBLING_RE = re.compile(r"^第[一二三四五六七八九十\d]+[章部]\s*\S")
 
+# 完整章标题行（用于「下一章」边界判定）：`第X章` + 简短标题。
+# 尾段不含空白/引号/句读——「第四章“评标办法”规定的方法进行评审。」这类
+# 交叉引用正文行因此被排除。
+_CHAPTER_HEADING_RE = re.compile(
+    r"^第[一二三四五六七八九十百零\d]+[章部]\s*[^\s“”\"'。；，,;、]{2,24}$"
+)
+
+
+def _leading_lines(text: str, n: int = 3) -> List[str]:
+    """页面顶部的前 n 个非空行.
+
+    章节边界只在页首判定——整页子串匹配会把正文表格里的零星提及
+    （如初步评审表第 10 条的「投标文件至少包括投标函…」）误当成章节标题。
+    """
+    return [ln.strip() for ln in (text or "").splitlines() if ln.strip()][:n]
+
+
+def _is_next_chapter_heading(line: str) -> bool:
+    """页首的「下一章」标题行.
+
+    评标办法自身的章题（`第四章 评标办法`）常作为页眉在每页页首重复，
+    不算边界。
+    """
+    return bool(_CHAPTER_HEADING_RE.match(line)) and not EVALUATION_HEADING_RE.match(line)
+
 
 def locate_format_pages(pdf) -> Tuple[int, int] | None:
     """定位招标文件中"投标文件格式"章节的起止页码.
@@ -135,7 +160,22 @@ def locate_evaluation_section(pdf):
     end_page = num_pages - 1
     for i in range(start_page + 1, num_pages):
         text = pdf.pages[i].extract_text() or ""
-        if any(kw in text for kw in FORMAT_KEYWORDS) or "投标函" in text:
+        lead = _leading_lines(text)
+
+        # 格式章节标题 / 「投标函」标题出现在页首 → 评标办法结束。
+        # 「投标函」只认行首：格式章节里它是标题行，而正文表格中的顺带
+        # 提及（初步评审表第 10 条）不是章节边界。
+        if any(any(kw in ln for kw in FORMAT_KEYWORDS) for ln in lead):
+            end_page = i - 1
+            break
+        if any(ln.startswith("投标函") for ln in lead):
+            end_page = i - 1
+            break
+
+        # 下一个「第X章」标题出现在页首 → 评标办法结束。
+        # 旧实现只认 FORMAT_KEYWORDS，遇到「第五章 合同条款及格式」这类
+        # 与格式无关的下一章标题不认边界，会把后续整份文档吞进评标办法。
+        if lead and _is_next_chapter_heading(lead[0]):
             end_page = i - 1
             break
 
