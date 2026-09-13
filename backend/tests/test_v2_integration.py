@@ -916,15 +916,15 @@ class TestV2IntegrationErrorHandling:
             extract_format_section("/nonexistent/tender.pdf")
 
     def test_empty_variables_pipeline_does_not_crash(self):
-        """空变量映射不应导致 pipeline 崩溃."""
+        """空变量映射不应导致 pipeline 崩溃，且槽位原样留着（不写占位符、不清空）."""
         variables = build_variable_values(None, None)
         text = "投标人名称：________________"
         replacements = [
             {"original": "________________", "var": "company_name", "value": variables["company_name"]},
         ]
         filled = batch_fill_text(text, replacements)
-        assert "[待补充]" in filled
-        assert "________________" not in filled
+        assert filled == text
+        assert "待补充" not in filled
 
     def test_partial_scan_result_safe(self):
         """不完整的 AI 扫描结果不应导致崩溃."""

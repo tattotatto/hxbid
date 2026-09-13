@@ -216,6 +216,168 @@ def extract_text_from_pages(pdf, start: int, end: int) -> str:
     return "\n\n".join(parts)
 
 
+# 页码行：整行只有一个数字，可带 -、—、第…页 之类的装饰。
+_PAGE_NUMBER_RE = re.compile(r"^[\s\-—–－_]*\d{1,4}[\s\-—–－_]*$")
+
+# 页码只可能落在页眉/页脚，按页高比例判定。**不能只看「整行只有数字」**——
+# 开标一览表里的序号、金额都可能独占一行，删掉就是丢数据。
+_PAGE_NUMBER_MARGIN_RATIO = 0.10
+
+# 段内换行的行距上限（相对字号）。实测大红山第 75/76 页：段内换行 9.95–10.34，
+# 换段/换列表项/换表单字段 19.91–20.03，中间没有灰区。取 1.4 倍字号。
+_WRAP_GAP_RATIO = 1.4
+
+# 「上一行顶到了右边距」的容差按该行自身高度取，即一个字宽。
+# 排版换行发生在「下一个字放不下」时，所以：
+#   - 两端对齐的正文（投标函那种）会拉伸填满，实测差 0.1–0.7pt；
+#   - 左对齐的（开标一览表的「标段名称：…」）就只能空着，实测差 7.3pt。
+# 用固定的小容差会把后者漏掉。一个字宽的余量对短标题仍然安全——第 83 页
+# 「八、投标人基本资料」x1=234，离栏边还有 270pt。
+_FLUSH_TOLERANCE_CHARS = 1.0
+
+
+def _join_wrapped(prev: str, cur: str) -> str:
+    """把被排版拆开的两行拼回去.
+
+    西文换行处原先就有一个空格（不可能在词中间断），拼回去要补上，
+    否则 ``con`` + ``tract`` 粘成一个词；中文换行是纯视觉的，不能插空格。
+    """
+    if prev and cur and prev[-1].isascii() and prev[-1].isalnum() \
+            and cur[0].isascii() and cur[0].isalnum():
+        return prev + " " + cur
+    return prev + cur
+
+
+# 列表项标号：`a)` `1）` `（3）` `一、` `• ` 等。
+# 行距判不出「换列表项」——大红山第 78 页整页统一 10.31pt，和新起一段的
+# 段内换行一模一样，纯几何判定会把 `a) …` 吃进上一行，而同一页 `b)`–`i)`
+# 因为上一行不满行又是独立行。标号是内容上的硬信号，补在这里。
+# 只在标号后面**必须**跟标号标点时才算，免得把「…金额为」+「100000元」这种
+# 数字开头的真续行一起挡掉。
+_LIST_MARKER_RE = re.compile(
+    r"^(?:"
+    r"[A-Za-z][)）.、]"
+    r"|\d{1,3}[)）.、]"
+    r"|[（(]\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[)）]"
+    r"|[一二三四五六七八九十]{1,3}[、．.]"
+    r"|[•·◆▪●○*]\s"
+    r")"
+)
+
+
+def _starts_list_item(text: str) -> bool:
+    """该行是不是列表项的开头（而不是上一行的续行）."""
+    return bool(_LIST_MARKER_RE.match(text))
+
+
+def _in_table(line: dict, table_boxes: List[tuple]) -> bool:
+    """该行是否落在某个表格区域内.（按整行都在框内判定，压线的不算.）"""
+    top, bottom = line.get("top") or 0.0, line.get("bottom") or 0.0
+    return any(box[1] <= top and bottom <= box[3] for box in table_boxes)
+
+
+def _clean_page_lines(page, lines: List[dict], table_boxes: List[tuple],
+                      right_edge: float) -> List[str]:
+    """单页的清洗后行列表：丢页码行，把段内换行的残句拼成整行.
+
+    Args:
+        lines: ``page.extract_text_lines()`` 的结果
+        table_boxes: ``page.find_tables()`` 的 bbox 列表
+        right_edge: 正文栏右边界（文档级，见 ``extract_clean_text_from_pages``）
+    """
+    if not lines:
+        return []
+
+    height = getattr(page, "height", 0) or 0
+    margin = height * _PAGE_NUMBER_MARGIN_RATIO
+
+    out: List[str] = []
+    prev_bottom = prev_height = None
+    prev_flush = prev_in_table = False
+    for ln in lines:
+        text = str(ln.get("text") or "").strip()
+        if not text:
+            continue
+        top = ln.get("top") or 0.0
+        bottom = ln.get("bottom") or 0.0
+        # 页眉/页脚里的孤立数字 = 页码（招标文件把页码排进了正文流，不删就会
+        # 跟着固定格式章节一起进标书）
+        if height and _PAGE_NUMBER_RE.match(text) and (
+            bottom > height - margin or top < margin
+        ):
+            continue
+        height_pt = bottom - top
+        flush = (ln.get("x1") or 0.0) >= right_edge - height_pt * _FLUSH_TOLERANCE_CHARS
+        now_in_table = _in_table(ln, table_boxes)
+        # 上一行顶到右边距（被排版换行截断的）+ 行距是段内的 + 两行都不在表格
+        # 里，才是续行。不要求当前行也顶到右边距：三段以上的段落，中间的续行
+        # 自己也是满的。当前行是列表项开头时一律不拼——行距分不出来。
+        if (out and prev_bottom is not None and prev_flush and not prev_in_table
+                and not now_in_table and not _starts_list_item(text)):
+            gap = top - prev_bottom
+            if 0 <= gap < _WRAP_GAP_RATIO * min(prev_height, height_pt):
+                out[-1] = _join_wrapped(out[-1], text)
+                prev_bottom, prev_height, prev_flush = bottom, height_pt, flush
+                prev_in_table = now_in_table
+                continue
+        out.append(text)
+        prev_bottom, prev_height, prev_flush = bottom, height_pt, flush
+        prev_in_table = now_in_table
+    return out
+
+
+def extract_clean_text_from_pages(pdf, start: int, end: int) -> str:
+    """提取指定页码范围文本，按行几何还原被排版拆开的段落.
+
+    与 ``extract_text_from_pages`` 的区别：后者是 ``page.extract_text()`` 的
+    原样转储，每个视觉行都是一行——招标文件里两端对齐的 CJK 正文会在右边距
+    处硬换行，印刷页码也混在正文流里。这两样直接喂给固定格式章节，标书正文
+    里就会出现断在词中间的残句和「-75-」。
+
+    页与页之间保持硬换行（跨页多半是换表单行/换章节，拼上去反而错）。
+    ``extract_text_from_pages`` 保持不变——它的输出还供评标办法定位等使用，
+    那些地方依赖逐行结构。
+
+    Args:
+        pdf: pdfplumber.PDF 实例
+        start: 起始页（0-indexed）
+        end: 结束页（0-indexed，包含）
+
+    Returns:
+        合并后的文本，页间以空行分隔
+    """
+    pages = []
+    for i in range(start, end + 1):
+        if i >= len(pdf.pages):
+            break
+        page = pdf.pages[i]
+        lines = page.extract_text_lines()
+        if not lines:
+            continue
+        pages.append((page, lines, [t.bbox for t in page.find_tables()]))
+
+    # 正文栏右边界取整份文档的表格外行，**不能在单页里取**：第 83 页表格占了大
+    # 半页，表格外只剩「八、投标人基本资料」「（一）投标人基本情况表」两行标题，
+    # 页内取最大值就把它俩当成了右边界，于是标题被判成续行拼成一句。
+    # 表格比正文栏宽，算进来又会把边界抬高，所以只取表格外的行。
+    edge_candidates = [
+        (ln.get("x1") or 0.0)
+        for _, lines, boxes in pages
+        for ln in lines
+        if not _in_table(ln, boxes)
+    ] or [
+        (ln.get("x1") or 0.0) for _, lines, _ in pages for ln in lines
+    ]
+    right_edge = max(edge_candidates) if edge_candidates else 0.0
+
+    parts = []
+    for page, lines, boxes in pages:
+        cleaned = _clean_page_lines(page, lines, boxes, right_edge)
+        if cleaned:
+            parts.append("\n".join(cleaned))
+    return "\n\n".join(parts)
+
+
 def extract_tables_from_pages(pdf, start: int, end: int) -> list[dict]:
     """提取指定页码范围的所有表格.
 
@@ -283,7 +445,10 @@ def extract_format_section(pdf_path: str) -> dict:
         else:
             start, end = location
 
-        full_text = extract_text_from_pages(pdf, start, end)
+        # 固定格式章节要按招标原文逐字回填，必须用清洗过的文本：原样转储会把
+        # 排版硬换行和印刷页码一起带进标书正文（实测「其中：治」/「安保卫业务」
+        # 断在词中间、「-75-」夹在「投标人名称：」和「日期：」之间）。
+        full_text = extract_clean_text_from_pages(pdf, start, end)
         tables = extract_tables_from_pages(pdf, start, end)
 
         result = {

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.services.pdf_extractor import (
+    extract_clean_text_from_pages,
     extract_format_section,
     extract_full_document,
     extract_tables_from_pages,
@@ -250,6 +251,187 @@ class TestExtractTextFromPages:
             assert text == ""
         finally:
             pdf.close()
+
+
+class TestExtractCleanTextFromPages:
+    """extract_clean_text_from_pages：按行几何还原被排版拆开的段落.
+
+    行数据全部取自真实招标文件（大红山）第 75/76 页（0-indexed）——页高 841.9、
+    页宽 595.3、左边距 90。段内换行 gap 10.0–10.3，真正的行结束 19.9–20.0，
+    中间没有灰区；页码 `-75-` 居中、bottom 落在页高 95.9% 处。
+    """
+
+    PAGE_W, PAGE_H = 595.3, 841.9
+
+    @staticmethod
+    def _line(text, x0, x1, top, bottom):
+        return {"text": text, "x0": x0, "x1": x1, "top": top, "bottom": bottom}
+
+    def _page(self, lines, width=None, height=None, tables=()):
+        class FakePage:
+            def __init__(self):
+                self.width = width or self.PAGE_W
+                self.height = height or self.PAGE_H
+
+            def extract_text_lines(self):
+                return lines
+
+            def find_tables(self):
+                return list(tables)
+
+            def extract_text(self):
+                return "\n".join(ln["text"] for ln in lines)
+
+        FakePage.PAGE_W = self.PAGE_W
+        FakePage.PAGE_H = self.PAGE_H
+        return FakePage()
+
+    def _pdf(self, pages):
+        class FakePdf:
+            pass
+
+        pdf = FakePdf()
+        pdf.pages = pages
+        return pdf
+
+    def test_joins_wrapped_lines_into_one_paragraph(self):
+        """段内换行按字符拼接（不插空格），换段/列表项保持独立行."""
+        page = self._page([
+            self._line("根据贵方 项目名称 招标文件（招标编号为 ），我方针对本项目的",
+                       111.00, 505.21, 212.46, 222.91),
+            self._line("投标总报价为： 万元人民币，含税（大写： 万元人民币），其中：治",
+                       90.00, 505.33, 232.95, 244.00),
+            self._line("安保卫业务的投标单价为： 万元/年人民币，含税（大写： 万元/年人",
+                       90.00, 505.21, 254.31, 265.36),
+            self._line("民币）；矿区井口、生活区游泳池值守服务业务的投标单价为： 万元/年人民",
+                       90.00, 505.21, 275.70, 286.15),
+            self._line("币，含税（大写： 万元/年人民币），提交招标文件要求的全套投标文件，包括：",
+                       90.00, 504.60, 296.10, 306.55),
+            self._line("1）招标文件中要求的投标文件；", 126.00, 278.17, 326.46, 336.91),
+        ])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+
+        # 4 行残句拼成一段，且「治」+「安保卫」中间不留空格/换行
+        assert "本项目的投标总报价为： 万元人民币" in text
+        assert "其中：治安保卫业务的投标单价为：" in text
+        assert "万元/年人民币）；矿区井口" in text
+        assert "全套投标文件，包括：" in text
+        # 列表项是独立行，不能被粘到上一段末尾
+        assert text.endswith("\n1）招标文件中要求的投标文件；")
+        # 段落内部的表格空位必须原样保留
+        assert "投标总报价为： 万元人民币" in text
+
+    def test_does_not_join_a_line_that_starts_a_list_item(self):
+        """列表项标号开头的新行不得被当续行粘上去.
+
+        大红山第 78 页（投标承诺书）整页行距统一 10.31–10.43，段内换行和换列表项
+        **没有行距差**，几何上分不开：上一行「…参加 项目的投标。」x1=498.97 顶到栏边、
+        下一行 `a) …` 间隔 10.31，纯几何判定必然把 `a) …` 吃掉，而成品里
+        `b)`–`i)` 因为各自上一行不满行又是独立行——同一份文档两种排法。
+        """
+        page = self._page([
+            self._line("将遵循公开、公平、公正和诚实守信的原则，参加 项目的投标。",
+                       90.00, 498.97, 172.83, 183.88),
+            self._line("a) 所提供的一切材料都是真实、有效、合法的。",
+                       90.00, 382.09, 194.19, 205.24),
+            self._line("b) 不与招标人或其他投标人串通投标，损害国家利益、社会利益或他人的",
+                       90.00, 503.04, 215.55, 226.60),
+            self._line("合法权益。本公司如被查实在本项目招标投标活动中存在围标串标、提供虚假材料的",
+                       90.00, 497.04, 237.03, 248.08),
+        ])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+
+        assert "\na) 所提供的一切材料都是真实、有效、合法的。" in text
+        # 「b) …」自己顶到右边距，它的续行仍要拼回去
+        assert "损害国家利益、社会利益或他人的合法权益。" in text
+
+    def test_joins_a_wrapped_line_that_begins_with_a_number(self):
+        """续行以数字开头时仍要拼回去（只有「数字+标号标点」才是列表项）."""
+        page = self._page([
+            self._line("2）金额为", 90.00, 498.00, 172.83, 183.88),
+            self._line("100000元人民币的投标保证金；", 90.00, 320.00, 194.19, 205.24),
+        ])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+        assert "2）金额为100000元人民币的投标保证金；" in text
+
+    def test_drops_page_number_in_bottom_margin(self):
+        """页脚页码整行丢弃."""
+        page = self._page([
+            self._line("投标人名称：", 90.00, 152.89, 732.90, 743.35),
+            self._line("-75-", 287.64, 307.60, 795.48, 807.60),
+        ])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+        assert "投标人名称：" in text
+        assert "-75-" not in text
+        assert "75" not in text
+
+    def test_keeps_lone_number_inside_text_area(self):
+        """正文区里独占一行的数字不是页码，必须保留.
+
+        页脚/页眉判定按页高比例，不是「整行只有数字」——开标一览表里的
+        序号、金额都可能独占一行。
+        """
+        page = self._page([
+            self._line("投标总报价（万元）", 90.00, 200.00, 400.00, 410.00),
+            self._line("1377.2262", 90.00, 160.00, 420.00, 430.00),
+        ])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+        assert "1377.2262" in text
+
+    def test_does_not_join_lines_inside_a_table(self):
+        """表格里的两行不能拼——实测响应表行距 1.1pt，比段内换行还小.
+
+        表格行跨列排布，拼起来会把两行单元格文本搅成一句。判据是行落在
+        find_tables 给出的 bbox 内，不是行距。
+        """
+        class FakeTable:
+            bbox = (89.5, 200.0, 546.7, 400.0)
+
+        page = self._page([
+            self._line("投 标人 响 应说 明 投标文件关", 89.5, 546.7, 210.00, 220.00),
+            self._line("（针对招标要求简 联内容所在", 89.5, 546.7, 223.01, 233.01),
+        ], tables=[FakeTable()])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+        assert text == "投 标人 响 应说 明 投标文件关\n（针对招标要求简 联内容所在"
+
+    def test_joins_prose_outside_table_on_a_mixed_page(self):
+        """同一页上表格外的正文照常拼——表格 bbox 只保护它自己覆盖的行."""
+        class FakeTable:
+            bbox = (89.5, 400.0, 546.7, 600.0)
+
+        page = self._page([
+            self._line("根据贵方 项目名称 招标文件（招标编号为 ），我方针对本项目的",
+                       111.00, 505.21, 212.46, 222.91),
+            self._line("投标总报价为： 万元人民币，含税。", 90.00, 505.33, 232.95, 244.00),
+            self._line("表内第一行", 89.5, 546.7, 410.00, 420.00),
+            self._line("表内第二行", 89.5, 546.7, 423.01, 433.01),
+        ], tables=[FakeTable()])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+        assert text == (
+            "根据贵方 项目名称 招标文件（招标编号为 ），我方针对本项目的"
+            "投标总报价为： 万元人民币，含税。\n表内第一行\n表内第二行"
+        )
+
+    def test_joins_latin_words_with_a_space(self):
+        """西文换行处原先就有空格，拼回去要补一个，否则 con+tract 粘成一个词."""
+        page = self._page([
+            self._line("the bidder shall submit the signed con", 90.00, 505.21, 100.00, 110.00),
+            self._line("tract within ten days.", 90.00, 300.00, 120.00, 130.00),
+        ])
+        text = extract_clean_text_from_pages(self._pdf([page]), 0, 0)
+        assert text == "the bidder shall submit the signed con tract within ten days."
+
+    def test_pages_joined_by_blank_line(self):
+        """跨页永远是硬换行：页尾「投标人名称：」不能粘上页首「日期：」."""
+        p1 = self._page([self._line("投标人名称：", 90.00, 152.89, 732.90, 743.35)])
+        p2 = self._page([self._line("日期： 年 月 日", 90.00, 231.73, 73.50, 83.95)])
+        text = extract_clean_text_from_pages(self._pdf([p1, p2]), 0, 1)
+        assert text == "投标人名称：\n\n日期： 年 月 日"
+
+    def test_out_of_range_returns_empty(self):
+        """超出页码范围不抛异常."""
+        page = self._page([self._line("正文", 90.00, 150.00, 100.00, 110.00)])
+        assert extract_clean_text_from_pages(self._pdf([page]), 99, 100) == ""
 
 
 class TestExtractTablesFromPages:

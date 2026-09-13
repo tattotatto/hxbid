@@ -242,46 +242,47 @@ def build_variable_values(
     招标编号/报价/期限/地点/保证金复用 ``extract_bid_opening_data`` 的取数约定
     （与开标一览表同源），避免同一份数据两处解析出不同结果。
 
-    取不到的值一律落 ``[待补充：X]`` 可见占位，绝不能是裸 ``[var]``：
-    ``fill_fixed_form_section_from_template`` 会把它原样写进投标函正文，而
-    ``post_scan`` 只扫 ``{word}``，扫不到 ``[word]``，没有任何兜底能拦住。
+    取不到的值一律落**空字符串**，由 ``batch_fill_text`` 解释为「这个槽位不动」，
+    招标原文的空白/占位词原样留在标书里，用户一眼能看到该填哪儿。
+
+    空串不是随便选的：曾经这里填 ``[待补充：X]`` 可见占位，结果被当成真值写进
+    正文——``post_scan`` 只扫 ``{word}``，扫不到 ``[word]``，没有任何兜底拦得住，
+    成品会带着「[待补充：投标总报价]」交付。裸 ``[var]`` 同理（模型自造的
+    unknown_N 会从 ``variables.get(var, f"[{var}]")`` 那个默认值漏出来）。
     """
     company = company_profile or {}
     reqs = requirements or {}
     opening = extract_bid_opening_data(requirements=reqs, company_profile=company)
 
-    def _pick(value: Any, label: str) -> str:
-        text = str(value or "").strip()
-        return text or f"[待补充：{label}]"
+    def _s(value: Any) -> str:
+        return str(value or "").strip()
 
-    total_amount = _pick(opening.get("total_price"), "投标总报价")
+    total_amount = _s(opening.get("total_price"))
 
     return {
-        "company_name": company.get("company_name") or "[待补充]",
-        "legal_rep_name": company.get("legal_rep_name") or "[待补充]",
-        "business_license_number": company.get("business_license_number") or "[待补充]",
-        "address": company.get("address") or "[待补充]",
-        "contact_phone": company.get("contact_phone") or "[待补充]",
-        "website": company.get("website") or "",
-        "contact_person": company.get("contact_person") or "[待补充]",
-        "fax": company.get("fax") or "",
-        "zip_code": company.get("zip_code") or "",
-        "registered_capital": company.get("registered_capital") or "",
-        "account_number": company.get("account_number") or "",
-        "bank_name": company.get("bank_name") or "",
-        "project_name": reqs.get("project_name") or "[待补充]",
-        "tenderer_name": reqs.get("tenderer_name") or "[待补充：招标人名称]",
-        "legal_rep_id_number": _pick(company.get("legal_rep_id_number"), "法定代表人身份证号"),
-        "tenderer_agency_name": _pick(reqs.get("tenderer_agency_name"), "招标代理机构"),
-        "tender_number": _pick(opening.get("tender_number"), "招标编号"),
+        "company_name": _s(company.get("company_name")),
+        "legal_rep_name": _s(company.get("legal_rep_name")),
+        "business_license_number": _s(company.get("business_license_number")),
+        "address": _s(company.get("address")),
+        "contact_phone": _s(company.get("contact_phone")),
+        "website": _s(company.get("website")),
+        "contact_person": _s(company.get("contact_person")),
+        "fax": _s(company.get("fax")),
+        "zip_code": _s(company.get("zip_code")),
+        "registered_capital": _s(company.get("registered_capital")),
+        "account_number": _s(company.get("account_number")),
+        "bank_name": _s(company.get("bank_name")),
+        "project_name": _s(reqs.get("project_name")),
+        "tenderer_name": _s(reqs.get("tenderer_name")),
+        "legal_rep_id_number": _s(company.get("legal_rep_id_number")),
+        "tenderer_agency_name": _s(reqs.get("tenderer_agency_name")),
+        "tender_number": _s(opening.get("tender_number")),
         "bid_total_amount": total_amount,
-        "bid_total_amount_words": _pick(
-            amount_to_chinese_words(total_amount), "投标报价大写"
-        ),
-        "bid_unit_amount": _pick(opening.get("unit_price"), "投标单价"),
-        "bid_deposit_amount": _pick(opening.get("bid_deposit_amount"), "投标保证金金额"),
-        "service_period": _pick(opening.get("service_period"), "服务期限"),
-        "service_location": _pick(opening.get("service_location"), "服务地点"),
+        "bid_total_amount_words": _s(amount_to_chinese_words(total_amount)),
+        "bid_unit_amount": _s(opening.get("unit_price")),
+        "bid_deposit_amount": _s(opening.get("bid_deposit_amount")),
+        "service_period": _s(opening.get("service_period")),
+        "service_location": _s(opening.get("service_location")),
         "date": date.today().strftime("%Y年%m月%d日"),
         "bid_validity_days": "120",
     }
@@ -323,6 +324,10 @@ def batch_fill_text(text: str, text_replacements: list[dict]) -> str:
       * 标签型（``投标人：``）——保留标签，值接在冒号后，不能把标签吃掉；
       * 空/纯空白——模型只给了位置，按锚点填入并吃掉紧跟的同行空白；
       * 占位词（``招标人名称``/``________``）——在锚点范围内替换掉它。
+
+    **没有值的槽位一律跳过**：拿不到数据时把占位词/空白原样留着，用户一眼能看出
+    该填哪儿；写空串等于把招标原文里的「（出具保函银行名称）」这类词删掉，正文就
+    残了。裸 ``[var]`` 占位同样不行（``post_scan`` 扫不到 ``[word]``，拦不住）。
     """
     # 按 original 长度降序
     sorted_reps = sorted(
@@ -336,7 +341,9 @@ def batch_fill_text(text: str, text_replacements: list[dict]) -> str:
         var = rep.get("var")
         if not var:
             continue
-        value = rep.get("value", f"[{var}]")
+        value = str(rep.get("value") or "").strip()
+        if not value:
+            continue  # 取不到值：原文原样留着，绝不覆盖成空串/裸占位
         original = rep.get("original") or ""
         anchor = rep.get("context_before") or ""
 
@@ -359,7 +366,11 @@ def batch_fill_text(text: str, text_replacements: list[dict]) -> str:
 
 
 def batch_fill_tables(tables: list[dict], table_fills: list[dict], variables: dict) -> list[dict]:
-    """批量表格填充：在指定位置填入变量值."""
+    """批量表格填充：在指定位置填入变量值.
+
+    与 ``batch_fill_text`` 同一条规矩：取不到值的槽位原样留着，绝不写 ``[var]``
+    占位——单元格里的 ``[unknown_1]`` 会一路走到成品标书里。
+    """
     result = [{"page": t["page"], "table_index": t["table_index"], "rows": [list(row) for row in t["rows"]]} for t in tables]
 
     for fill in table_fills:
@@ -368,7 +379,9 @@ def batch_fill_tables(tables: list[dict], table_fills: list[dict], variables: di
         row = fill.get("row")
         col = fill.get("col")
         var = fill.get("var", "")
-        value = variables.get(var, f"[{var}]")
+        value = str(variables.get(var) or "").strip()
+        if not value:
+            continue
 
         for t in result:
             if t["page"] == page and t["table_index"] == ti:
@@ -416,6 +429,32 @@ def _normalize_title(s: str) -> str:
     return re.sub(r'\s+', '', s).strip().lower()
 
 
+# 标题行前的编号，如「二、」「十一．」
+_TITLE_NUM_PREFIX_RE = re.compile(r'^[一二三四五六七八九十]{1,3}[、．\.]')
+
+
+def _strip_duplicate_heading(section_text: str, section_title: str) -> str:
+    """去掉小节开头与章节标题重复的标题行.
+
+    招标原文里每个固定格式小节都以两行标题起头（p76 实测「二、投标函」+「投标函」），
+    而标书渲染（render_engine 的 level-1 heading / 前端章节树）本来就会单独渲染一次
+    章节标题——原样回填，成品里就是三行「投标函」。
+
+    只去开头**完全相等**的标题行（可带编号前缀），正文里提到标题的行（如
+    「投标函附录」）必须留着。
+    """
+    target = _normalize_title(section_title)
+    lines = section_text.split("\n")
+    head = 0
+    while head < len(lines):
+        stripped = lines[head].strip()
+        if stripped and _normalize_title(_TITLE_NUM_PREFIX_RE.sub("", stripped)) == target:
+            head += 1
+            continue
+        break
+    return "\n".join(lines[head:]).strip()
+
+
 def extract_fixed_form_section(format_section_text: str, section_title: str) -> str:
     """从格式章节全文中定位并截取指定固定格式小节.
 
@@ -427,7 +466,7 @@ def extract_fixed_form_section(format_section_text: str, section_title: str) -> 
         section_title: 目标小节标题，如「投标函」「法定代表人授权委托书」。
 
     Returns:
-        该小节的完整文本（含标题行）；找不到返回空字符串。
+        该小节的正文（开头的重复标题行已去掉）；找不到返回空字符串。
     """
     if not format_section_text or not section_title:
         return ""
@@ -482,7 +521,8 @@ def extract_fixed_form_section(format_section_text: str, section_title: str) -> 
     else:
         section_end = len(format_section_text)
 
-    return format_section_text[section_start:section_end].strip()
+    section_text = format_section_text[section_start:section_end].strip()
+    return _strip_duplicate_heading(section_text, section_title)
 
 
 async def fill_fixed_form_section_from_template(
@@ -528,9 +568,7 @@ async def fill_fixed_form_section_from_template(
     variables = build_variable_values(company_profile, requirements)
 
     # 提示 AI 哪些变量已有真实值（避免它凭空猜测）
-    known_values = {
-        k: v for k, v in variables.items() if v and not v.startswith("[待补充")
-    }
+    known_values = {k: v for k, v in variables.items() if v}
 
     scan_result = await scan_and_mark_variables(
         full_text=section_text,
@@ -548,14 +586,27 @@ async def fill_fixed_form_section_from_template(
 
     # 把 variable 值注入到 replacement（如果 AI 没填）
     enriched = []
+    unknown_vars: list[str] = []
     for rep in scan_result.get("text_replacements", []):
         var = rep.get("var")
         if not var:
             continue  # 跳过标签行（如 {"original": "投标人名称：", "var": null}）
         rep_copy = dict(rep)
         if "value" not in rep_copy or rep_copy["value"] is None:
-            rep_copy["value"] = variables.get(var, f"[{var}]")
+            if var in variables:
+                # 已知变量但没取到值 —— 空串，交 batch_fill_text 跳过
+                rep_copy["value"] = variables[var]
+            else:
+                # AI 自造的变量名（曾经以 [unknown_1] 的形式落进正文）
+                unknown_vars.append(var)
+                rep_copy["value"] = ""
         enriched.append(rep_copy)
+
+    if unknown_vars:
+        logger.warning(
+            "Section '%s': AI marked %d variable(s) with no source, left untouched: %s",
+            section_title, len(unknown_vars), unknown_vars,
+        )
 
     filled_text = batch_fill_text(section_text, enriched)
 

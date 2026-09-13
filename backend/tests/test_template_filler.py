@@ -48,13 +48,19 @@ class TestBuildVariableValues:
 
     def test_empty_inputs(self):
         values = build_variable_values(None, None)
-        assert values["company_name"] == "[待补充]"
-        assert values["project_name"] == "[待补充]"
+        assert values["company_name"] == ""
+        assert values["project_name"] == ""
 
-    def test_missing_fields_get_placeholder(self):
+    def test_missing_fields_are_blank(self):
+        """取不到值 → 空串，不是 [待补充].
+
+        空串在 batch_fill_text 里等于「这个槽位不动」，招标原文的空白/占位词
+        原样留着；填 [待补充] 则会被当成真值写进标书正文，正常审阅根本看不出
+        那是机器留的，导出即事故。
+        """
         values = build_variable_values({}, {})
-        assert values["company_name"] == "[待补充]"
-        assert values["legal_rep_name"] == "[待补充]"
+        assert values["company_name"] == ""
+        assert values["legal_rep_name"] == ""
 
     def test_bid_validity_default(self):
         values = build_variable_values(MOCK_COMPANY, MOCK_REQS)
@@ -77,11 +83,15 @@ class TestBuildVariableValues:
         assert len(prompt_vars) > 20, "prompt 变量表解析异常，检查格式"
         assert [v for v in prompt_vars if v not in values] == []
 
-    def test_no_bare_variable_placeholder(self):
-        """无数据源时用 [待补充：X]，绝不能是裸的 [var]."""
+    def test_no_bracketed_placeholder_at_all(self):
+        """无数据源时一律空串——任何 [xxx] 形状的东西都不许出现在值里.
+
+        旧的 [待补充：X] 和裸 [var] 都进了同一个坑：post_scan 只扫 ``{word}``，
+        扫不到 ``[word]``，没有任何兜底能拦住它写进投标函正文。
+        """
         values = build_variable_values({}, {})
         for var, val in values.items():
-            assert val != f"[{var}]", f"{var} 落回裸占位符"
+            assert "[" not in val and "]" not in val, f"{var} 落了方括号占位符: {val!r}"
 
     def test_sources_from_requirements(self):
         """招标编号/期限/地点/保证金/报价从 requirements 取数（与开标一览表同源）."""
@@ -109,8 +119,8 @@ class TestBuildVariableValues:
         values = build_variable_values({}, {"tenderer_agency_name": "云南中招招标有限公司"})
         assert values["tenderer_agency_name"] == "云南中招招标有限公司"
 
-    def test_missing_sources_use_explicit_placeholders(self):
-        """无数据源 → [待补充：X] 可见占位（待人工填），而不是静默漏填."""
+    def test_missing_sources_are_blank(self):
+        """无数据源 → 空串（招标原文的槽位原样留着，待人工填）."""
         values = build_variable_values({}, {})
         for var in [
             "tender_number", "bid_total_amount", "bid_unit_amount",
@@ -118,15 +128,15 @@ class TestBuildVariableValues:
             "legal_rep_id_number", "tenderer_agency_name",
             "bid_total_amount_words",
         ]:
-            assert values[var].startswith("[待补充"), var
+            assert values[var] == "", var
 
     def test_bid_total_amount_words_derived_from_total_price(self):
         values = build_variable_values({}, {"total_price_excluding_tax": "1234567.89"})
         assert values["bid_total_amount_words"] == "壹佰贰拾叁万肆仟伍佰陆拾柒元捌角玖分"
 
-    def test_bid_total_amount_words_placeholder_without_source(self):
+    def test_bid_total_amount_words_blank_without_source(self):
         values = build_variable_values({}, {})
-        assert values["bid_total_amount_words"].startswith("[待补充")
+        assert values["bid_total_amount_words"] == ""
 
     def test_tenderer_name_distinct_from_project_name(self):
         """Regression: tenderer_name must NOT silently alias project_name.
@@ -143,19 +153,19 @@ class TestBuildVariableValues:
         assert values["tenderer_name"] == "玉溪大红山矿业有限公司"
         assert values["tenderer_name"] != values["project_name"]
 
-    def test_tenderer_name_missing_uses_distinct_placeholder(self):
-        """Missing tenderer_name should be visibly marked, never project_name."""
+    def test_tenderer_name_missing_stays_blank(self):
+        """Missing tenderer_name 留空，绝不能退化成 project_name."""
         reqs = {"project_name": "某保安服务项目"}  # no tenderer_name
         values = build_variable_values(MOCK_COMPANY, reqs)
-        assert values["tenderer_name"] == "[待补充：招标人名称]"
+        assert values["tenderer_name"] == ""
         # Project name must NOT leak into tenderer_name
         assert values["tenderer_name"] != values["project_name"]
 
     def test_tenderer_name_empty_string_treated_as_missing(self):
-        """Empty string must also fall to placeholder, not project_name."""
+        """Empty string must also stay blank, not project_name."""
         reqs = {"project_name": "某保安服务项目", "tenderer_name": ""}
         values = build_variable_values(MOCK_COMPANY, reqs)
-        assert values["tenderer_name"] == "[待补充：招标人名称]"
+        assert values["tenderer_name"] == ""
 
 
 class TestAmountToChineseWords:
@@ -228,13 +238,36 @@ class TestBatchFillText:
         result = batch_fill_text(text, replacements)
         assert "测试公司" in result
 
-    def test_missing_value_uses_fallback(self):
+    def test_missing_value_leaves_the_slot_untouched(self):
+        """值取不到时槽位原样留着——既不是 [var]，也不许把原文清掉."""
         text = "投标人：________"
         replacements = [
             {"original": "________", "var": "company_name"},
         ]
         result = batch_fill_text(text, replacements)
-        assert "[company_name]" in result
+        assert result == text
+
+    def test_empty_value_does_not_delete_original_placeholder(self):
+        """空值不能删掉原文的占位词.
+
+        回归（大红山实测）：投标保证金银行保函里 `(出具保函银行名称）` 整段
+        消失，`金额为100000的投标保证金` 被吃成 `金额为100000 的投标保证金`
+        —— 都是把变量值（空串）当成替换文本盖上去的结果。招标原文是给人看
+        的填写说明，删掉比留空更糟：用户连该填哪儿都不知道了。
+        """
+        result = batch_fill_text("投标人：（出具保函银行名称）出具本保函。", [
+            {"original": "（出具保函银行名称）", "var": "bank_name",
+             "value": "", "context_before": "投标人："},
+        ])
+        assert result == "投标人：（出具保函银行名称）出具本保函。"
+
+    def test_blank_original_with_empty_value_keeps_the_blank(self):
+        """空白型槽位：值取不到，空白也不吃掉（留给用户手填）."""
+        result = batch_fill_text("投标总报价为： 万元人民币", [
+            {"original": " ", "var": "bid_total_amount", "value": "",
+             "context_before": "投标总报价为："},
+        ])
+        assert result == "投标总报价为： 万元人民币"
 
     def test_no_replacements(self):
         text = "投标人名称：云南领航保安服务有限公司"
@@ -383,7 +416,8 @@ class TestBatchFillTables:
         assert result[0]["rows"][0][1] == "云南领航保安服务有限公司"
         assert result[0]["rows"][1][1] == "云南省昆明市官渡区XX路XX号"
 
-    def test_unknown_var_gets_bracket_name(self):
+    def test_unknown_var_leaves_the_cell_untouched(self):
+        """模型中造的变量名不能落进表格：格子里留白，用户自己看得见."""
         tables = [
             {"page": 1, "table_index": 1, "rows": [["投标人名称", ""]]}
         ]
@@ -392,7 +426,19 @@ class TestBatchFillTables:
         ]
         variables = build_variable_values(MOCK_COMPANY, MOCK_REQS)
         result = batch_fill_tables(tables, fills, variables)
-        assert result[0]["rows"][0][1] == "[unknown_var]"
+        assert result[0]["rows"][0][1] == ""
+        assert "[" not in result[0]["rows"][0][1]
+
+    def test_known_var_without_a_value_leaves_the_cell_untouched(self):
+        """已知变量但没取到值：同样不动原格."""
+        tables = [
+            {"page": 1, "table_index": 1, "rows": [["投标人名称", "（盖章）"]]}
+        ]
+        fills = [
+            {"page": 1, "table_index": 1, "row": 0, "col": 1, "var": "company_name"},
+        ]
+        result = batch_fill_tables(tables, fills, {})
+        assert result[0]["rows"][0][1] == "（盖章）"
 
     def test_out_of_bounds_safe(self):
         """行列越界应静默跳过."""
@@ -661,8 +707,8 @@ class TestExtractFixedFormSection:
             "1. 承诺遵循公开、公平、公正原则\n"
         )
         result = extract_fixed_form_section(text, "投标函")
-        assert "投标函" in result
-        assert "致：" in result
+        assert result.startswith("致：")  # 重复的标题行已去掉
+        assert "投标函" not in result
         assert "本公司郑重承诺" not in result  # 下一节不混入
         assert "总体说明" not in result  # 上一节不混入
 
@@ -754,6 +800,49 @@ class TestExtractFixedFormSection:
         # 当前设计是保守的：仅匹配数字标题行
         assert result == ""
 
+    def test_drops_leading_title_lines_duplicating_the_chapter_title(self):
+        """开头的重复标题行要去掉，正文从「致：」起.
+
+        招标原文每个固定格式小节都以两行标题起头（「二、投标函」+「投标函」），
+        而标书渲染时章节标题本来就会单独出一行——原样回填会得到三行「投标函」。
+        """
+        text = (
+            "二、投标函\n"
+            "投标函\n"
+            "致： 招标人名称\n"
+            "投标人名称：\n"
+            "\n"
+            "三、投标承诺书\n"
+            "投标承诺书\n"
+            "本公司郑重承诺：\n"
+        )
+        result = extract_fixed_form_section(text, "投标函")
+        assert result.startswith("致：")
+        assert "投标函" not in result
+
+    def test_keeps_body_lines_that_merely_contain_the_title(self):
+        """只去完全相等的标题行；正文里提到标题的行要留着."""
+        text = (
+            "二、投标函\n"
+            "投标函\n"
+            "投标函附录（投标人填写）\n"
+            "致： 招标人名称\n"
+        )
+        result = extract_fixed_form_section(text, "投标函")
+        assert "投标函附录（投标人填写）" in result
+        assert result.startswith("投标函附录")
+
+    def test_drops_numbered_heading_without_bare_repeat(self):
+        """没有裸标题重复的小节，只去掉带编号那一行."""
+        text = (
+            "十三、其他\n"
+            "投标人响应说明\n"
+            "招标文件要求\n"
+        )
+        result = extract_fixed_form_section(text, "其他")
+        assert result.startswith("投标人响应说明")
+        assert "十三、" not in result
+
 
 class TestFillFixedFormSectionFromTemplate:
     """scan-and-fill 主路径：保留原文措辞，只填空下划线/标签词."""
@@ -800,8 +889,9 @@ class TestFillFixedFormSectionFromTemplate:
         assert "我方愿承担本项目" in result  # 原文独有措辞
         assert "根据贵方" in result
         assert "（招标编号为 ）" in result
-        # 标点/章节结构保留
-        assert "二、投标函" in result
+        # 章节结构保留（标题行由渲染层单独出，正文里不再重复）
+        assert result.startswith("致：")
+        assert "投标函" not in result
         assert result.count("三、") == 0  # 不混入下一节
         # 实际值已填入
         assert "玉溪大红山矿业有限公司" in result
@@ -821,6 +911,11 @@ class TestFillFixedFormSectionFromTemplate:
         这些槽位此前无值可填，会落进 ``variables.get(var, f"[{var}]")`` 把
         「[tender_number]」直接写进投标函正文；而 post_scan 只扫 ``{word}``，
         扫不到 ``[word]``，成品会静默带着原始变量名交付。
+
+        有值的填上；没值的**保留招标原文的空白下划线**——留空（用户的选择），
+        既不删掉招标原文的空、也不写变量名（见
+        ``test_empty_value_does_not_delete_original_placeholder``）。残留的下划线由
+        post_scan 报出来，用户在导出检查清单里看得到。
         """
         marked = [
             "legal_rep_id_number", "tenderer_agency_name", "tender_number",
@@ -859,7 +954,12 @@ class TestFillFixedFormSectionFromTemplate:
             ai_adapter=mock_ai,
         )
 
-        assert "投标函" in result, "填充未生效，走了兜底路径"
+        assert "legal_rep_id_number=" in result, "填充未生效，走了兜底路径"
+        # 有来源的槽位填上了
+        assert "YXDHS-2026-001" in result
+        assert "云南中招招标有限公司" in result
+        assert "玉溪大红山矿区" in result
+        assert "530100199001011234" in result
         assert "________" not in result, "槽位未被替换"
         for var in marked:
             assert f"[{var}]" not in result, f"{var} 漏填成裸占位符"
@@ -931,8 +1031,8 @@ class TestFillFixedFormSectionFromTemplate:
         assert "授权委托" not in result
 
     @pytest.mark.asyncio
-    async def test_uses_placeholder_when_variable_missing(self):
-        """变量无值时使用 [var] 占位符，便于人工补全."""
+    async def test_missing_variable_leaves_original_wording(self):
+        """变量无值时原文原样留着，不写占位符、也不清空."""
         format_text = (
             "二、投标函\n"
             "致： 招标人名称\n"
@@ -957,10 +1057,71 @@ class TestFillFixedFormSectionFromTemplate:
             requirements={},  # tenderer_name 缺失
             ai_adapter=mock_ai,
         )
-        # company_name 已填
+        # 有值的照填
         assert "云南领航保安服务有限公司" in result
-        # tenderer_name 缺失 → build_variable_values 给 "[待补充：招标人名称]"
-        assert "[待补充：招标人名称]" in result
+        # 没值的原文措辞原样保留，用户一眼能看到该填哪儿
+        assert "致： 招标人名称" in result
+        assert "待补充" not in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_variable_never_lands_in_the_text(self):
+        """模型自造的 unknown_N 不能写进正文.
+
+        SCAN_SYSTEM_PROMPT 明确允许它在拿不准时说
+        「用 unknown_1, unknown_2 标记」——那是给 warnings 用的，但模型
+        同时会把它当成 var 返回。旧实现 ``variables.get(var, f"[{var}]")``
+        于是把「[unknown_1]」原样印进了投标函（大红山实测：
+        「（大写：[unknown_1]）」）。
+        """
+        format_text = (
+            "二、投标函\n"
+            "授权 某某某 为我方委托人。\n"
+            "（大写： 元整）\n"
+            "\n三、下一节\n"
+        )
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.return_value = json.dumps({
+            "text_replacements": [
+                {"original": "某某某", "var": "unknown_1", "context_before": "授权"},
+            ],
+            "table_fills": [],
+            "warnings": ["不确定「某某某」对应哪个变量，标记为 unknown_1"],
+        })
+
+        result = await fill_fixed_form_section_from_template(
+            section_title="投标函",
+            format_section_text=format_text,
+            format_tables=[],
+            company_profile={},
+            requirements={},
+            ai_adapter=mock_ai,
+        )
+        assert "unknown_1" not in result
+        assert "[" not in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_variable_with_ai_supplied_value_still_fills(self):
+        """模型自行给出了值（不是自造名字），照填."""
+        format_text = "二、投标函\n授权 某某某 为我方委托人。\n\n三、下一节\n"
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.return_value = json.dumps({
+            "text_replacements": [
+                {"original": "某某某", "var": "legal_rep_name",
+                 "value": "张三", "context_before": "授权"},
+            ],
+            "table_fills": [],
+            "warnings": [],
+        })
+
+        result = await fill_fixed_form_section_from_template(
+            section_title="投标函",
+            format_section_text=format_text,
+            format_tables=[],
+            company_profile={},
+            requirements={},
+            ai_adapter=mock_ai,
+        )
+        assert "授权 张三 为我方委托人" in result
 
     @pytest.mark.asyncio
     async def test_real_pdf_section_extraction(self):
@@ -983,19 +1144,19 @@ class TestFillFixedFormSectionFromTemplate:
             "四、法定代表人授权委托书\n"
             "本人 法定代表人姓名 系 投标人名称 的法定代表人。\n"
         )
-        # 投标函应能定位
+        # 投标函应能定位（开头的「二、投标函」+「投标函」两行标题已去掉）
         section = extract_fixed_form_section(sample_format_text, "投标函")
-        assert "二、投标函" in section
+        assert section.startswith("致：")
         assert "三、投标承诺书" not in section
         assert "四、法定代表人授权委托书" not in section
         # 投标承诺书
         section2 = extract_fixed_form_section(sample_format_text, "投标承诺书")
-        assert "三、投标承诺书" in section2
+        assert section2.startswith("本公司")
         assert "郑重承诺" in section2
         assert "法定代表人授权委托书" not in section2
         # 法定代表人授权委托书
         section3 = extract_fixed_form_section(sample_format_text, "法定代表人授权委托书")
-        assert "四、法定代表人授权委托书" in section3
+        assert section3.startswith("本人")
         assert "系 投标人名称" in section3
 
     @pytest.mark.asyncio
