@@ -1,6 +1,6 @@
 import React from 'react'
-import { Card, Tag, Button, Space, Progress, Empty, Typography, Spin } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { Card, Tag, Button, Space, Progress, Empty, Typography, Spin, Tooltip } from 'antd'
+import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import type { ScoringReport } from '../api/scoring'
 
 const STATUS_TAG: Record<string, { color: string; label: string }> = {
@@ -15,9 +15,20 @@ interface Props {
   loading?: boolean
   onRescore?: () => void
   rescoring?: boolean
+  /** 按评分意见自动改写该项对应的小节；不传则不显示「自动修改」 */
+  onAutoFix?: (itemId: string) => void
+  /** 正在自动修改的评分项 id —— 只让该项转圈，其他项照常可点 */
+  autoFixingId?: string | null
 }
 
-const ScoringReportCard: React.FC<Props> = ({ report, loading, onRescore, rescoring }) => {
+const ScoringReportCard: React.FC<Props> = ({
+  report,
+  loading,
+  onRescore,
+  rescoring,
+  onAutoFix,
+  autoFixingId,
+}) => {
   if (loading) return <Card size="small" loading style={{ marginBottom: 12 }} />
   if (!report || !report.items?.length) return null
   const ratio = report.scored_total > 0 ? Math.round((report.total / report.scored_total) * 100) : 0
@@ -59,9 +70,26 @@ const ScoringReportCard: React.FC<Props> = ({ report, loading, onRescore, rescor
                   <Typography.Text strong>{it.name}</Typography.Text>
                   <Typography.Text type="secondary">{it.dimension}</Typography.Text>
                 </Space>
-                <Typography.Text>
-                  {it.points_obtained} / {it.points_total} 分
-                </Typography.Text>
+                <Space>
+                  {/* 后端 auto_fixable 为 false 的项（报价等必须人工填写的、没给建议的）
+                      不显示按钮 —— 判定规则在后端一处，这里只读标记 */}
+                  {onAutoFix && it.auto_fixable && (
+                    <Tooltip title="按上面的失分点和建议，让 AI 改写对应小节（可撤销前请留意）">
+                      <Button
+                        size="small"
+                        icon={<ThunderboltOutlined />}
+                        loading={autoFixingId === it.id}
+                        disabled={!!autoFixingId && autoFixingId !== it.id}
+                        onClick={() => onAutoFix(it.id)}
+                      >
+                        自动修改
+                      </Button>
+                    </Tooltip>
+                  )}
+                  <Typography.Text>
+                    {it.points_obtained} / {it.points_total} 分
+                  </Typography.Text>
+                </Space>
               </Space>
               {it.evidence && (
                 <Typography.Paragraph type="secondary" style={{ margin: '4px 0 0', fontSize: 12 }}>

@@ -32,6 +32,20 @@ class AIEmptyContentError(RuntimeError):
     """
 
 
+class AIOutputTruncatedError(RuntimeError):
+    """content 非空，但被 ``finish_reason='length'`` 截断在半句/半表上.
+
+    同样**默认不抛**：生成路径上这是大红山 70% 叶子的常态，半篇正文好过
+    没有（见 chat_completion_stream 的注释）。调用方按需用
+    ``raise_on_truncation=True`` 收紧。
+
+    改写路径必须收紧：原文本就完整，把完整原文换成被截断的半篇是净损失，
+    而不是将就。实测两种表现——2972 字的节被截断在表格中途、后两节整段消失；
+    另一次补写内容后总长超过原文，比例看不出来，尾句却被切掉。
+    单靠「变短了」判断不可靠，``finish_reason`` 才是确定信号。
+    """
+
+
 # Provider metadata
 PROVIDERS = {
     "deepseek": {
@@ -154,8 +168,15 @@ class AIAdapter:
         max_tokens: int | None = None,
         response_format: Dict[str, str] | None = None,
         provider: str | None = None,
+        raise_on_truncation: bool = False,
     ) -> str:
-        """Send a chat completion request and return the full response text."""
+        """Send a chat completion request and return the full response text.
+
+        Args:
+            raise_on_truncation: True 时，``finish_reason='length'`` 即便 content
+                非空也抛 AIOutputTruncatedError。生成路径保持默认 False（半篇
+                好过没有），改写路径传 True（半篇会覆盖掉完整原文）。
+        """
         client = self._get_client(provider)
         model = self.get_model(provider)
 
@@ -180,6 +201,14 @@ class AIAdapter:
             raise AIEmptyContentError(
                 f"AI returned empty content (finish_reason={finish}, "
                 f"max_tokens={kwargs.get('max_tokens')}). "
+                f"Increase max_tokens to leave room after reasoning_tokens."
+            )
+        # 非空但被截断：默认放行（生成路径的常态），改写路径传 True 收紧。
+        if raise_on_truncation and choice.finish_reason == "length":
+            raise AIOutputTruncatedError(
+                f"AI output truncated (finish_reason=length, "
+                f"max_tokens={kwargs.get('max_tokens')}, "
+                f"content_len={len(content)}). "
                 f"Increase max_tokens to leave room after reasoning_tokens."
             )
         return content

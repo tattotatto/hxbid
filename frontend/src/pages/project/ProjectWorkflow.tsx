@@ -259,6 +259,8 @@ export default function ProjectWorkflow() {
   // Self-scoring report (evaluated by the scoring rubric, SSE `scoring_report` / GET /scoring-report)
   const [scoringReport, setScoringReport] = useState<ScoringReport | null>(null)
   const [rescoring, setRescoring] = useState(false)
+  // 正在自动修改的评分项 id（逐项 loading，不影响其他项）
+  const [autoFixingId, setAutoFixingId] = useState<string | null>(null)
 
   // Local chapter content edits
   const [chapterContent, setChapterContent] = useState<Record<string, string>>({})
@@ -728,6 +730,27 @@ export default function ProjectWorkflow() {
     }
   }
 
+  // 按评分意见自动改写对应小节。
+  // 后端写的是章节的 final_content + children_json，本地 project.chapters 会变旧，
+  // 编辑器切回去还是改写前的内容（和「保存后切走切回还是原文」同一个坑），
+  // 所以成功后整体重取，而不是只改本地某个字段。
+  const handleAutoFixItem = async (itemId: string) => {
+    if (!id || autoFixingId) return
+    setAutoFixingId(itemId)
+    try {
+      const r = await scoringApi.autoFixItem(id, itemId)
+      const where = r.section_title || r.chapter_title
+      message.success(
+        `已修改《${where}》${r.diff_summary ? `（${r.diff_summary}）` : ''}，建议点「重新评分」复核`,
+      )
+      await fetchProject()
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '自动修改失败')
+    } finally {
+      setAutoFixingId(null)
+    }
+  }
+
   const handleSave = async () => {
     if (!id || !activeChapter) return
     setSaving(true)
@@ -754,6 +777,23 @@ export default function ProjectWorkflow() {
       setSaving(false)
     }
   }
+
+  // TreeEditor 保存成功后回写新内容。
+  // 不接这个回调，project.chapters 里留的还是保存前的 final_content，
+  // 而 TreeEditor 的载入 effect 依赖 chapters —— 选中别的章节再点回来就会
+  // 从这份旧数据重新载入，表现为"保存成功但切走切回还是原文"。
+  // 后端其实已经存好了，所以刷新页面又能看到，极容易误判成保存失败。
+  const handleChapterContentUpdate = useCallback((chapterId: string, content: string) => {
+    setProject((prev: any) => {
+      if (!prev?.chapters) return prev
+      return {
+        ...prev,
+        chapters: prev.chapters.map((ch: Chapter) =>
+          ch.id === chapterId ? { ...ch, final_content: content } : ch,
+        ),
+      }
+    })
+  }, [])
 
   // Export checklist state
   const [includeChecklist, setIncludeChecklist] = useState<boolean>(true)
@@ -1126,6 +1166,8 @@ export default function ProjectWorkflow() {
         report={scoringReport}
         onRescore={handleRescore}
         rescoring={rescoring}
+        onAutoFix={handleAutoFixItem}
+        autoFixingId={autoFixingId}
       />
 
       {/* Failed sections warning with retry button */}
@@ -1202,6 +1244,7 @@ export default function ProjectWorkflow() {
                   })(),
                 }))}
               projectId={id || ''}
+              onContentUpdate={handleChapterContentUpdate}
             />
           ) : (
             <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>

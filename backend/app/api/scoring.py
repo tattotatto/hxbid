@@ -151,6 +151,138 @@ async def rescore_project(
     return report
 
 
+class AutoFixResponse(BaseModel):
+    success: bool = False
+    chapter_id: str = ""
+    chapter_title: str = ""
+    section_path: list[str] = []
+    section_title: str = ""
+    diff_summary: str = ""
+    modified_content: str = ""
+
+
+def _find_chapter_for_dimension(chapters: list, dimension: str):
+    """dimension ↔ 章节标题做双向包含匹配（与 score_engine._match_dimensions 同语义，首个命中）."""
+    if not dimension:
+        return None
+    for ch in sorted(chapters, key=lambda c: c.order_index):
+        title = str(ch.title or "")
+        if title and (dimension in title or title in dimension):
+            return ch
+    return None
+
+
+@router.post("/{project_id}/scoring-items/{item_id}/auto-fix", response_model=AutoFixResponse)
+async def auto_fix_scoring_item(
+    project_id: str,
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """按自我评分给出的失分点/改进建议，自动改写对应小节.
+
+    只写 ``final_content``（与 TreeEditor 保存同一层），保留 ``ai_generated_content``
+    作为 AI 原始基线。报价项（kind=price）、固定格式/表格章节、定位不到小节的项
+    一律拒绝——这些情况改了是帮倒忙。
+    """
+    from app.services.scoring_autofix import AutoFixError, apply_auto_fix, is_auto_fixable
+
+    result = await db.execute(
+        select(BidProject)
+        .where(BidProject.id == project_id)
+        .options(selectinload(BidProject.chapters))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        rubric = json.loads(project.scoring_rubric_json or "{}")
+        report = json.loads(project.scoring_report_json or "{}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="评分数据损坏，请重新评分后再试")
+
+    rubric_item = next(
+        (it for it in (rubric.get("items") or []) if str(it.get("id")) == str(item_id)), None
+    )
+    report_item = next(
+        (it for it in (report.get("items") or []) if str(it.get("id")) == str(item_id)), None
+    )
+    if not rubric_item or not report_item:
+        raise HTTPException(status_code=404, detail="评分项不存在，请重新评分后再试")
+    # 现算而不是读报告里存的 auto_fixable：报告是历史快照，判定规则一变
+    # （比如后来排除了判卷失败的行）旧报告就会失真。
+    if not is_auto_fixable(
+        rubric_item.get("kind"), report_item.get("suggestion"), report_item.get("status")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="该项需要你手工填写（如报价），或评卷尚未给出可用的改进建议，无法自动修改",
+        )
+
+    dimension = str(rubric_item.get("dimension") or report_item.get("dimension") or "")
+    chapter = _find_chapter_for_dimension(project.chapters, dimension)
+    if not chapter:
+        raise HTTPException(
+            status_code=400,
+            detail=f"评分维度「{dimension}」在目录中没有对应章节，无法自动修改",
+        )
+
+    # 素材提示（真实资质/人员/业绩）——缺了 AI 容易编造，失败不阻断
+    try:
+        from app.api.chapters import _materials_guidance_for_section
+
+        materials_guidance = await _materials_guidance_for_section(
+            str(chapter.title or ""), project_id, db
+        )
+    except Exception as exc:
+        logger.warning("自动修改取素材失败（%s）: %s", chapter.title, exc)
+        materials_guidance = ""
+
+    try:
+        fixed = await apply_auto_fix(
+            chapter_title=str(chapter.title or ""),
+            chapter_type=str(chapter.chapter_type or ""),
+            children_json=chapter.children_json or "[]",
+            chapter_content=chapter.final_content or chapter.ai_generated_content or "",
+            report_item=report_item,
+            rubric_item=rubric_item,
+            materials_guidance=materials_guidance,
+            ai_adapter=ai_adapter,
+        )
+    except AutoFixError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("评分自动修改失败（chapter=%s）", chapter.title)
+        raise HTTPException(status_code=500, detail=f"自动修改失败：{exc}")
+
+    chapter.children_json = fixed["children_json"]
+    chapter.final_content = fixed["final_content"]
+    try:
+        meta = json.loads(chapter.chapter_meta_json or "{}")
+    except json.JSONDecodeError:
+        meta = {}
+    if isinstance(meta, dict):
+        meta["auto_fix"] = {
+            "item_id": str(item_id),
+            "section_path": fixed["section_path"],
+            "diff_summary": fixed["diff_summary"],
+        }
+        chapter.chapter_meta_json = json.dumps(meta, ensure_ascii=False)
+    await db.commit()
+
+    section_path = fixed["section_path"]
+    return AutoFixResponse(
+        success=True,
+        chapter_id=str(chapter.id),
+        chapter_title=str(chapter.title or ""),
+        section_path=section_path,
+        section_title=section_path[-1] if section_path else str(chapter.title or ""),
+        diff_summary=fixed["diff_summary"],
+        modified_content=fixed["modified_content"],
+    )
+
+
 @router.get("/{project_id}/scoring-report")
 async def get_scoring_report(
     project_id: str,

@@ -923,6 +923,7 @@ class SectionSaveRequest(BaseModel):
 
 class SectionSaveResponse(BaseModel):
     success: bool = False
+    matched: bool = False
 
 
 class SectionChatRequest(BaseModel):
@@ -1111,15 +1112,24 @@ async def save_section(
     try:
         from app.services.section_editor import save_section_content
 
-        updated = save_section_content(chapter.children_json, data.section_path, data.content)
-        chapter.children_json = updated
-        await db.commit()
-
-        return SectionSaveResponse(success=True)
-
+        updated, matched = save_section_content(
+            chapter.children_json, data.section_path, data.content
+        )
     except Exception as exc:
         logger.exception("Section save failed")
         raise HTTPException(status_code=500, detail=f"保存失败: {exc}")
+
+    # 路径对不上就什么都没存，不能回 success: true —— 否则前端"保存成功"、
+    # 用户切走切回发现内容没变，还查不出原因。
+    if not matched:
+        raise HTTPException(
+            status_code=404,
+            detail=f"小节路径不存在，内容未保存: {'/'.join(data.section_path)}",
+        )
+
+    chapter.children_json = updated
+    await db.commit()
+    return SectionSaveResponse(success=True, matched=True)
 
 
 @router.post("/{project_id}/chapters/{chapter_id}/sections/chat", response_model=SectionChatResponse)

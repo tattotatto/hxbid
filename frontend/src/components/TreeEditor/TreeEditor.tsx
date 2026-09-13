@@ -87,8 +87,12 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
       // 编辑章节内小节：先写回 children_json（容器写 lead_in / 叶子写 content），
       // 保证新管线（children_json 为目录树来源）下编辑在刷新后不丢失。
       if (selectedSectionPath.length > 0 && (chapter?.children?.length ?? 0) > 0) {
+        // 前缀必须是 /bid —— 章节路由挂在 include_router(chapters_router, prefix="/bid")，
+        // /projects/... 下没有 sections/save 这条路由，打过去是 404 "Not Found"。
+        // 这一句 404 会让下面的 throw 中断整个 handleSave，连写 final_content 的 PUT
+        // 都执行不到：小节级编辑此前是一个字节都没落库。
         const secRes = await fetch(
-          `/api/v1/projects/${projectId}/chapters/${selectedChapterId}/sections/save`,
+          `/api/v1/bid/${projectId}/chapters/${selectedChapterId}/sections/save`,
           {
             method: 'POST',
             headers: {
@@ -101,7 +105,12 @@ const TreeEditor: React.FC<TreeEditorProps> = ({
             }),
           },
         );
-        if (!secRes.ok) throw new Error('保存小节失败');
+        if (!secRes.ok) {
+          // 后端在"小节路径没匹配到节点"时返回 404 —— 那是真的一个字节都没存，
+          // 把 detail 透出来，否则用户只看到一句笼统的保存失败。
+          const detail = await secRes.json().catch(() => null);
+          throw new Error(detail?.detail || '保存小节失败');
+        }
       }
 
       // 重建整章内容后写回 final_content（渲染/导出使用）：

@@ -102,6 +102,60 @@ class TestComputeReport:
         assert report["total"] == 18
 
 
+class TestAutoFixableFlag:
+    """报告项要带 kind / auto_fixable —— 前端据此决定显不显示「自动修改」按钮。"""
+
+    def _graded(self, nid, suggestion):
+        g = _g(nid, 10)
+        g["suggestion"] = suggestion
+        return g
+
+    def test_price_item_is_not_auto_fixable(self):
+        report = compute_report(_rubric(), [
+            self._graded("t1", "补充服务方案细节"),
+            self._graded("t2", "增加针对性描述"),
+            self._graded("p1", "把报价写清楚"),   # 报价项：必须用户自己填
+        ])
+        by_id = {i["id"]: i for i in report["items"]}
+        assert by_id["p1"]["kind"] == "price"
+        assert by_id["p1"]["auto_fixable"] is False
+        assert by_id["t1"]["kind"] == "content"
+        assert by_id["t1"]["auto_fixable"] is True
+        assert by_id["t2"]["auto_fixable"] is True
+
+    def test_item_without_suggestion_is_not_auto_fixable(self):
+        report = compute_report(_rubric(), [
+            self._graded("t1", ""),
+            self._graded("t2", "   "),
+            _g("p1", 0, status="unscored", evidence="未含报价"),
+        ])
+        by_id = {i["id"]: i for i in report["items"]}
+        assert by_id["t1"]["auto_fixable"] is False
+        assert by_id["t2"]["auto_fixable"] is False
+        assert by_id["p1"]["auto_fixable"] is False
+
+    def test_unscored_item_is_not_auto_fixable_even_with_suggestion_text(self):
+        """判卷失败时 run_scoring 会把错误写进 suggestion —— 那不是改进建议。"""
+        report = compute_report(_rubric(), [
+            {"id": "t1", "name": "服务方案", "dimension": "技术部分",
+             "points_obtained": 0, "status": "unscored", "evidence": "",
+             "gap": "", "suggestion": "判卷失败：Expecting ',' delimiter: line 1 column 195"},
+        ])
+        item = report["items"][0]
+        assert item["status"] == "unscored"
+        assert item["auto_fixable"] is False
+
+    def test_missing_kind_defaults_to_auto_fixable(self):
+        # 老报告没有 kind 字段时不能把按钮吞掉，price 才是唯一排除项
+        rubric = _rubric([
+            {"id": "t1", "dimension": "技术部分", "name": "服务方案", "points": 15,
+             "criteria": "…", "key_terms": ["服务方案"]},
+        ])
+        report = compute_report(rubric, [self._graded("t1", "补充细节")])
+        assert report["items"][0]["kind"] == ""
+        assert report["items"][0]["auto_fixable"] is True
+
+
 class TestMatchDimensions:
     def test_title_contains_dimension(self):
         dims = {"技术部分": [{"id": "t1"}]}

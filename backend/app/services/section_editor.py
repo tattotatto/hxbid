@@ -12,6 +12,8 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
+from app.services.ai_adapter import AIOutputTruncatedError
+
 logger = logging.getLogger(__name__)
 
 SECTION_MODIFY_SYSTEM_PROMPT = """你是投标文件编辑助手。用户正在逐节审阅标书，你需要根据用户的修改意见，
@@ -79,16 +81,22 @@ def get_section_content(children_json: str, section_path: list[str]) -> str:
 
 def save_section_content(
     children_json: str, section_path: list[str], content: str
-) -> str:
+) -> tuple[str, bool]:
     """将内容保存到子标题树中指定节的 content 字段.
 
+    路径匹配不到节点时原样返回，并把 ``matched`` 置为 False——**调用方必须
+    检查它**。旧实现只返回字符串，路径对不上时静默成功，接口照样回
+    ``success: true``，用户看到"已保存"但内容没落库（大红山实测：编辑投标函
+    后切走切回仍是原文，排查发现保存确实成功，是前端状态没回写；但同一个
+    静默成功在小节级编辑上是真的丢数据）。
+
     Returns:
-        更新后的 children_json 字符串
+        (更新后的 children_json, 是否命中目标节点)
     """
     try:
         tree = json.loads(children_json) if isinstance(children_json, str) else children_json
     except json.JSONDecodeError:
-        return children_json
+        return children_json, False
 
     # 扁平任务列表格式
     if isinstance(tree, list) and tree and "path" in tree[0]:
@@ -96,18 +104,19 @@ def save_section_content(
             if task.get("path") == section_path:
                 task["content"] = content
                 task["human_edited"] = True
-                return json.dumps(tree, ensure_ascii=False)
-        return json.dumps(tree, ensure_ascii=False)
+                return json.dumps(tree, ensure_ascii=False), True
+        return json.dumps(tree, ensure_ascii=False), False
 
     # 树形结构：容器写 lead_in，叶子写 content
     node = _find_node_by_path(tree, section_path)
-    if node:
-        if node.get("children"):
-            node["lead_in"] = content
-        else:
-            node["content"] = content
-        node["human_edited"] = True
-    return json.dumps(tree, ensure_ascii=False)
+    if not node:
+        return json.dumps(tree, ensure_ascii=False), False
+    if node.get("children"):
+        node["lead_in"] = content
+    else:
+        node["content"] = content
+    node["human_edited"] = True
+    return json.dumps(tree, ensure_ascii=False), True
 
 
 def collect_sibling_summaries(children_json: str, section_path: list[str]) -> list[str]:
@@ -161,6 +170,31 @@ def _materials_block(guidance: str) -> str:
     return f"\n【可用的真实素材（标书中必须使用，严禁编造）】\n{guidance}\n"
 
 
+# 改写要**复述整节**，预算得覆盖正文本身再加推理空间。写死 4096 时实测：
+# 2972 字的节被截断在表格中途，后面两节整段消失。ai_adapter 的注释写明推理
+# 模型 reasoning_tokens 与正文共用同一份 max_tokens，且「content 非空但
+# finish_reason=length」不抛异常——生成路径上那是对的（半篇好过没有），
+# 改写路径上则等于把完整原文换成半篇。
+REWRITE_MIN_TOKENS = 4096
+REWRITE_MAX_TOKENS = 32768
+
+
+def _rewrite_max_tokens(current_content: str) -> int:
+    """按待改写正文的长度定 max_tokens.
+
+    **上限不是预留**：模型没写满就不产生费用，所以给宽几乎无代价，给紧则会
+    截断。实测 2972 字的节给 5758 时仍然截断（模型被要求「补强」，除复述原文
+    外还要新增内容），因此这里按正文 token 数的 3 倍再加固定余量给足。
+    """
+    from app.services.token_budget import CHARS_PER_TOKEN
+
+    content_tokens = int(len(current_content or "") / CHARS_PER_TOKEN)
+    return min(
+        max(REWRITE_MIN_TOKENS, content_tokens * 3 + 8192),
+        REWRITE_MAX_TOKENS,
+    )
+
+
 async def modify_section(
     chapter_title: str,
     section_path: list[str],
@@ -207,7 +241,10 @@ async def modify_section(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,
-            max_tokens=4096,
+            max_tokens=_rewrite_max_tokens(current_content),
+            # 改写路径收紧：被截断的半篇会覆盖掉完整原文。生成路径的宽容
+            # 是有道理的（半篇好过没有），改写路径上不成立。
+            raise_on_truncation=True,
         )
 
         # 简单 diff 摘要
@@ -216,6 +253,13 @@ async def modify_section(
         return {
             "modified_content": response,
             "diff_summary": diff_summary,
+        }
+
+    except AIOutputTruncatedError:
+        logger.warning("Section modify truncated: %s", section_path)
+        return {
+            "modified_content": current_content,
+            "diff_summary": "修改失败：AI 输出被 token 上限截断，本节保持原样，请重试或手动编辑",
         }
 
     except Exception as exc:

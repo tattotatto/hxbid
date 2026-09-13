@@ -76,3 +76,45 @@ class TestEmptyContentErrorType:
             )
         assert "length" in str(exc.value)
         assert "8192" in str(exc.value)
+
+
+class TestOutputTruncated:
+    """content 非空但被 length 截断——生成路径容忍，改写路径必须能拒.
+
+    ai_adapter 此前对这种情况**故意不抛**（见 chat_completion_stream 注释：
+    那是大红山 70% 叶子的常态，半篇好过没有）。所以默认行为保持不变，
+    由调用方按 ``raise_on_truncation=True`` 自己选择要不要严格。
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_tolerates_truncation(self, monkeypatch):
+        """默认不抛——生成路径靠这个宽容度活下来，不能改."""
+        _patch(monkeypatch, content="写到一半的半篇正文", finish_reason="length")
+        out = await ai_adapter.ai_adapter.chat_completion(messages=[], max_tokens=4096)
+        assert out == "写到一半的半篇正文"
+
+    @pytest.mark.asyncio
+    async def test_opt_in_raises_dedicated_type(self, monkeypatch):
+        from app.services.ai_adapter import AIOutputTruncatedError
+
+        _patch(monkeypatch, content="写到一半的半篇正文", finish_reason="length")
+        with pytest.raises(AIOutputTruncatedError) as exc:
+            await ai_adapter.ai_adapter.chat_completion(
+                messages=[], max_tokens=4096, raise_on_truncation=True,
+            )
+        assert "length" in str(exc.value)
+        assert "4096" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_opt_in_passes_normal_completion(self, monkeypatch):
+        _patch(monkeypatch, content="完整正文", finish_reason="stop")
+        out = await ai_adapter.ai_adapter.chat_completion(
+            messages=[], max_tokens=4096, raise_on_truncation=True,
+        )
+        assert out == "完整正文"
+
+    @pytest.mark.asyncio
+    async def test_truncated_type_is_catchable_as_runtime_error(self):
+        from app.services.ai_adapter import AIOutputTruncatedError
+
+        assert issubclass(AIOutputTruncatedError, RuntimeError)

@@ -11,6 +11,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from app.services.scoring_autofix import is_auto_fixable
+
 logger = logging.getLogger(__name__)
 
 SCORE_STATUS_PASS = 0.90
@@ -78,6 +80,8 @@ def compute_report(rubric: dict, graded: list[dict]) -> dict:
                 status = "fail"
             scored_total += pts_total
             total += obtained
+        suggestion = str(g.get("suggestion") or "")
+        kind = str(item.get("kind") or "")
         out_items.append({
             "id": str(g.get("id") or item.get("id") or ""),
             "dimension": str(item.get("dimension") or g.get("dimension") or ""),
@@ -87,7 +91,11 @@ def compute_report(rubric: dict, graded: list[dict]) -> dict:
             "status": status,
             "evidence": str(g.get("evidence") or ""),
             "gap": str(g.get("gap") or ""),
-            "suggestion": str(g.get("suggestion") or ""),
+            "suggestion": suggestion,
+            # 前端据此决定显不显示「自动修改」：报价项必须用户自己填，判卷失败
+            # 的行没有真实失分点，没有改进建议的项也无从改起。规则见 scoring_autofix。
+            "kind": kind,
+            "auto_fixable": is_auto_fixable(kind, suggestion, status),
         })
 
     note = ""
