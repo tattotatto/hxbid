@@ -1252,6 +1252,82 @@ def _chapter_matches_requirement(chapter_title: str, req_name: str) -> bool:
     return chapter_title in req_name or req_name in chapter_title
 
 
+def requirements_with_rubric(requirements: dict, rubric_json: str | None) -> dict:
+    """把项目级评分指标并进 requirements（返回新 dict，不改调用方的）.
+
+    评分指标存在 ``bid_projects.scoring_rubric_json``，而 generate 处理器只读
+    ``parsed_requirements_json``。不并进来，生成期就看不到任何评分点。
+
+    rubric_json 为空/损坏/无 items 时原样返回——未配置评分指标的项目照常生成。
+    """
+    if not rubric_json:
+        return requirements
+    try:
+        rubric = json.loads(rubric_json)
+    except (json.JSONDecodeError, TypeError):
+        return requirements
+    if not isinstance(rubric, dict) or not rubric.get("items"):
+        return requirements
+    return {**requirements, "scoring_rubric": rubric}
+
+
+async def expand_pending_chapter_trees(
+    chapters: list,
+    requirements: dict,
+    ai_adapter,
+    target_pages: int = 2000,
+) -> dict:
+    """generate 第一阶段：为标题树为空的 AI 撰写章节就地展开标题树.
+
+    只碰 ``children_json`` 为空的 ai_generated 章节。用户已在 UI 里细化过
+    （``review_status`` 为 refining 且有子树）的章节一律不动——这里补的正是
+    「从没人细化过」的缺口，而 ``refine_chapter_titles`` 端点需要逐章手动触发。
+
+    就地改写 ``chapter.children_json``；失败章节保持原样（空串），由后续
+    「整章当唯一叶子」的兜底接住，不丢章节。
+
+    Returns:
+        {"expanded": [{"title", "sections", "leaves"}...], "failed": [章节标题...]}
+    """
+    from app.services.title_refiner import count_leaves, expand_chapter_titles
+
+    expanded: list[dict] = []
+    failed: list[str] = []
+
+    for chapter in chapters:
+        if chapter.chapter_type != "ai_generated":
+            continue
+        if (chapter.children_json or "").strip() not in ("", "[]"):
+            continue  # 已有子树（用户细化过或上次生成留下的），保持不动
+
+        tree = await expand_chapter_titles(
+            chapter_title=chapter.title,
+            chapter_meta=_load_chapter_meta(chapter),
+            requirements=requirements,
+            ai_adapter=ai_adapter,
+            target_pages=target_pages,
+        )
+        if tree:
+            chapter.children_json = json.dumps(tree, ensure_ascii=False)
+            expanded.append({
+                "title": chapter.title,
+                "sections": len(tree),
+                "leaves": count_leaves(tree),
+            })
+        else:
+            failed.append(chapter.title)
+
+    return {"expanded": expanded, "failed": failed}
+
+
+def _load_chapter_meta(chapter) -> dict:
+    """章节元数据 JSON → dict；损坏时返回空 dict（展开按无上下文进行）."""
+    try:
+        return json.loads(chapter.chapter_meta_json) if chapter.chapter_meta_json else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 async def generate_from_chapter_structure(
     project_id: str,
     requirements: dict,
@@ -1402,6 +1478,38 @@ async def generate_from_chapter_structure(
                     "total": len(chapters),
                 }, ensure_ascii=False),
             }
+
+    # ── 第一阶段：为从未细化过的 AI 章节展开标题树 ──
+    # 放在这里而不是 outline/confirm：展开要 1-3 分钟，前端 axios 超时 120s。
+    # 只补 children_json 为空的章节；用户手工细化过的树保持不动。
+    pending = [
+        c for c in chapters
+        if c.chapter_type == "ai_generated"
+        and (c.children_json or "").strip() in ("", "[]")
+    ]
+    if pending:
+        yield {
+            "event": "status",
+            "data": json.dumps({
+                "phase": "expanding",
+                "message": f"正在展开 {len(pending)} 个章节的标题结构...",
+            }, ensure_ascii=False),
+        }
+        expand_report = await expand_pending_chapter_trees(
+            chapters, requirements, ai_adapter, target_pages)
+        for item in expand_report["expanded"]:
+            yield {
+                "event": "chapter_expanded",
+                "data": json.dumps(item, ensure_ascii=False),
+            }
+        for title in expand_report["failed"]:
+            # 展开失败的章节不丢：后续「整章当唯一叶子」的兜底照常接手
+            logger.warning("章节标题展开失败，按整章单叶子生成：%s", title)
+            yield {
+                "event": "chapter_expand_failed",
+                "data": json.dumps({"title": title}, ensure_ascii=False),
+            }
+        await db.flush()
 
     # ── Collect all leaf tasks from ai_generated chapters（嵌套树，文档顺序）──
     all_tasks = []

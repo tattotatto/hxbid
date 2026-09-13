@@ -309,7 +309,13 @@ async def generate_bid(
             detail="请先完成信息搜集再生成标书",
         )
 
-    requirements = json.loads(project.parsed_requirements_json)
+    from app.services.ai_pipeline import requirements_with_rubric
+
+    # 评分指标另存一列，不并进来生成期（标题展开 / 内容撰写）就看不到评分点
+    requirements = requirements_with_rubric(
+        json.loads(project.parsed_requirements_json),
+        project.scoring_rubric_json,
+    )
 
     # -- Ensure outline exists --
     if not project.outline_json or project.outline_json == "[]":
