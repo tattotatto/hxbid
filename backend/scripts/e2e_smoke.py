@@ -22,6 +22,7 @@ import asyncio
 import json
 import re
 import sys
+import zipfile
 
 import httpx
 
@@ -235,6 +236,64 @@ async def ensure_bot_user() -> tuple[str, str]:
             await db.commit()  # async_session() 不会自动提交，必须显式 commit
         token = create_access_token({"sub": user.id})
         return user.id, token
+
+
+async def material_image_inventory() -> int:
+    """源资料库里可供嵌入的图片总数（口径与 bid.py 收集 chapter_images 一致）.
+
+    E2E 项目本身不预置素材，但导出会读取全局的公司资料/资质/人员/合同库。
+    若库里本来就没图，docx 无图属正常，断言应跳过而非误报失败。
+    """
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.company_profile import CompanyProfile
+    from app.models.contract import Contract
+    from app.models.personnel import PersonnelCertificate
+    from app.models.qualification import Qualification
+
+    n = 0
+    async with async_session() as db:
+        cp = (await db.execute(select(CompanyProfile).limit(1))).scalar_one_or_none()
+        if cp:
+            n += sum(
+                1
+                for f in (
+                    cp.business_license_image,
+                    cp.legal_rep_id_front_image,
+                    cp.legal_rep_id_back_image,
+                    cp.logo_image,
+                )
+                if (f or "").strip()
+            )
+        n += sum(
+            1
+            for q in (await db.execute(select(Qualification))).scalars()
+            if (q.attachment_path or "").strip()
+        )
+        n += sum(
+            1
+            for p in (await db.execute(select(PersonnelCertificate))).scalars()
+            if (p.attachment_path or "").strip()
+        )
+        for c in (await db.execute(select(Contract))).scalars():
+            try:
+                n += len([p for p in json.loads(c.image_paths_json or "[]") if p])
+            except Exception:
+                pass
+    return n
+
+
+def docx_media_count(docx_bytes: bytes) -> int:
+    """docx 内实际内嵌的图片数（word/media/ 条目）."""
+    from io import BytesIO
+
+    return len(
+        [
+            n
+            for n in zipfile.ZipFile(BytesIO(docx_bytes)).namelist()
+            if n.startswith("word/media/")
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +606,11 @@ async def main() -> int:
     # ---- docx 严格格式校验 ----
     print("\n导出 docx 并校验严格格式...")
     try:
+        try:
+            expected_imgs = await material_image_inventory()
+        except Exception as exc:  # 盘点失败不应把导出校验一起拖挂
+            print(f"  ⚠️  素材库盘点失败，跳过图片断言: {exc}")
+            expected_imgs = 0
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
             exp_resp = await client.post(
                 f"{API_BASE}/bid/export",
@@ -631,6 +695,33 @@ async def main() -> int:
                 if md_leaks:
                     print(f"  ⚠️  docx 发现 markdown 残留标记 {len(md_leaks)} 处"
                           f"（warning，不阻塞通过）: {md_leaks[:3]}")
+
+                # Check 6: 材料图片必须真的内嵌进 docx（硬断言）。
+                # d01a0ac 曾把 render_engine 的两处插图代码当死代码删掉，导出静默丢图
+                # （营业执照/法人身份证/资质证书/人员证书/合同扫描件），而 E2E 只看
+                # 目录域/章节数/文件大小，从不看 word/media，于是全绿三周。此断言就是
+                # 那次回归缺失的覆盖：库里有多少图，docx 里就得有 media。
+                media_count = docx_media_count(docx_bytes)
+                if expected_imgs > 0:
+                    checks.append(
+                        (f"docx 内嵌材料图片（media={media_count}，源库 {expected_imgs} 张）",
+                         media_count > 0)
+                    )
+                    print(f"  - docx 内嵌图片: {media_count}（源库 {expected_imgs} 张）")
+                else:
+                    print(f"  - docx 内嵌图片: {media_count}（源素材库无图，跳过断言）")
+
+                # Check 7: 图片标记绝不能泄漏成可见文字（硬断言）。
+                img_marker_leaks = [
+                    t for t in (all_para_text + table_texts)
+                    if "[IMG:" in t or "[IDPAIR:" in t
+                ]
+                checks.append(
+                    ("docx 无图片标记泄漏（[IMG:/[IDPAIR: 未成文字）",
+                     not img_marker_leaks)
+                )
+                if img_marker_leaks:
+                    print(f"  ❌ 图片标记泄漏 {len(img_marker_leaks)} 处: {img_marker_leaks[:3]}")
 
             # ---- pdf + 检查清单下载校验（与 docx 同一套相对路径归一化） ----
             from docx import Document
