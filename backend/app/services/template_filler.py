@@ -287,10 +287,42 @@ def build_variable_values(
     }
 
 
+_LABEL_TAIL_RE = re.compile(r"[:：]\s*$")  # 标签型原文，如「投标人：」
+_INLINE_WS_RE = re.compile(r"[ \t　]*")  # 同行空白（不含换行）
+
+
+def _anchor_end(text: str, anchor: str) -> int | None:
+    """锚点在正文中结束的位置；无锚点或找不到时返回 None."""
+    if not anchor:
+        return None
+    pos = text.find(anchor)
+    return None if pos < 0 else pos + len(anchor)
+
+
+def _locate(text: str, anchor: str, needle: str) -> int:
+    """needle 的位置：优先取锚点之后的首次出现，否则退回全文首次."""
+    start = _anchor_end(text, anchor)
+    if start is not None:
+        idx = text.find(needle, start)
+        if idx >= 0:
+            return idx
+    return text.find(needle)
+
+
 def batch_fill_text(text: str, text_replacements: list[dict]) -> str:
     """批量文本替换：将原文中的空白/占位符替换为实际值.
 
     按 replacement 的长度降序排列，避免短串先替换破坏长串。
+
+    定位靠模型给的 ``context_before``（"这个空前面是什么"），不用
+    ``str.replace`` 的全文首次匹配——同一份格式章节里「致： 招标人名称」和
+    「投标总报价为： 万元」都是空格/占位词，首次匹配会把值填进无关的位置
+    （大红山实测：金额被插到了「致：」后面，而该填的那格仍空着）。
+
+    原文分三类，处理方式不同：
+      * 标签型（``投标人：``）——保留标签，值接在冒号后，不能把标签吃掉；
+      * 空/纯空白——模型只给了位置，按锚点填入并吃掉紧跟的同行空白；
+      * 占位词（``招标人名称``/``________``）——在锚点范围内替换掉它。
     """
     # 按 original 长度降序
     sorted_reps = sorted(
@@ -302,10 +334,26 @@ def batch_fill_text(text: str, text_replacements: list[dict]) -> str:
     result = text
     for rep in sorted_reps:
         var = rep.get("var")
-        original = rep.get("original", "")
-        if var and original:
-            value = rep.get("value", f"[{var}]")
-            result = result.replace(original, value, 1)  # 逐个替换，避免错误匹配
+        if not var:
+            continue
+        value = rep.get("value", f"[{var}]")
+        original = rep.get("original") or ""
+        anchor = rep.get("context_before") or ""
+
+        if not original.strip():
+            start = _anchor_end(result, anchor)
+            if start is None:
+                continue  # 无锚点无从定位，只能跳过
+            tail = _INLINE_WS_RE.match(result, start)
+            result = result[:start] + value + result[tail.end():]
+            continue
+
+        idx = _locate(result, anchor, original)
+        if idx < 0:
+            continue
+        # 标签型保留标签本身，只在其后追加值
+        replacement = original + value if _LABEL_TAIL_RE.search(original) else value
+        result = result[:idx] + replacement + result[idx + len(original):]
 
     return result
 

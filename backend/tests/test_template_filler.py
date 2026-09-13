@@ -242,6 +242,104 @@ class TestBatchFillText:
         assert result == text
 
 
+class TestBatchFillTextAnchoring:
+    """按 ``context_before`` 定位，而不是全文首次匹配.
+
+    回归：模型一直会返回 ``context_before`` 指出「填在哪里」，但
+    ``batch_fill_text`` 从头到尾没用过它，只拿 ``original`` 做 ``str.replace``
+    首次匹配。修好扫描之前每个小节都在扫描处返回空、直接走 AI 兜底，
+    这条路径从未被执行，三类错误因此一起被掩盖（大红山实测）。
+    """
+
+    # 取自大红山招标文件「二、投标函」小节原文
+    TENDER_LETTER = (
+        "投标函\n致： 招标人名称\n根据贵方 项目名称 招标文件（招标编号为 ），"
+        "我方针对本项目的\n投标总报价为： 万元人民币，含税（大写： 万元人民币）"
+    )
+
+    def test_label_only_original_keeps_the_label(self):
+        """标签型原文：值接在冒号后，标签不能被吃掉.
+
+        模型自己在 warning 里就说了「实际替换时应保留标签，仅在冒号后
+        插入变量值」——它给的是标签，代码却把标签整段换成了值。
+        """
+        text = "投标人：\n法定代表人或其委托代理人：\n年 月 日"
+        result = batch_fill_text(text, [
+            {"original": "投标人：", "var": "company_name",
+             "value": "云南领航保安服务有限公司", "context_before": "封面"},
+            {"original": "法定代表人或其委托代理人：", "var": "legal_rep_name",
+             "value": "张三", "context_before": "封面"},
+        ])
+        assert "投标人：云南领航保安服务有限公司" in result
+        assert "法定代表人或其委托代理人：张三" in result
+
+    def test_blank_original_fills_at_anchor_not_first_space(self):
+        """空白原文：填到锚点处，不是文档里第一个空格."""
+        result = batch_fill_text(self.TENDER_LETTER, [
+            {"original": " ", "var": "bid_total_amount", "value": "1234567.00",
+             "context_before": "投标总报价为："},
+        ])
+        assert "投标总报价为：1234567.00万元人民币" in result
+        # 旧实现把值插进了「致：」后面
+        assert "致：1234567.00" not in result
+        assert "致： 招标人名称" in result
+
+    def test_empty_original_with_anchor_is_inserted(self):
+        """空原文 + 有锚点：按锚点插入（旧实现直接丢弃整条）."""
+        result = batch_fill_text(self.TENDER_LETTER, [
+            {"original": "", "var": "tender_number", "value": "YNDHS-2026-001",
+             "context_before": "招标文件（招标编号为 "},
+        ])
+        assert "YNDHS-2026-001" in result
+
+    def test_placeholder_word_after_anchor_is_replaced_not_inserted(self):
+        """占位词：锚点范围内替换掉它，不能变成「致： 值 招标人名称」."""
+        result = batch_fill_text(self.TENDER_LETTER, [
+            {"original": "招标人名称", "var": "tenderer_name",
+             "value": "玉溪大红山矿业有限公司", "context_before": "致："},
+        ])
+        assert "致： 玉溪大红山矿业有限公司" in result
+        assert "招标人名称" not in result
+
+    def test_replacement_after_replacement_still_lands(self):
+        """多条替换共用同一段文本时，锚点定位不被打乱."""
+        result = batch_fill_text(self.TENDER_LETTER, [
+            {"original": "招标人名称", "var": "tenderer_name",
+             "value": "玉溪大红山矿业有限公司", "context_before": "致："},
+            {"original": " ", "var": "bid_total_amount", "value": "1234567.00",
+             "context_before": "投标总报价为："},
+            {"original": "", "var": "tender_number", "value": "YNDHS-2026-001",
+             "context_before": "招标文件（招标编号为 "},
+        ])
+        assert "致： 玉溪大红山矿业有限公司" in result
+        assert "投标总报价为：1234567.00万元人民币" in result
+        assert "YNDHS-2026-001" in result
+
+    def test_no_anchor_falls_back_to_first_occurrence(self):
+        """无锚点（旧调用方）：保持全文首次匹配."""
+        text = "投标人：________________"
+        result = batch_fill_text(text, [
+            {"original": "________________", "var": "company_name", "value": "测试公司"},
+        ])
+        assert result == "投标人：测试公司"
+
+    def test_empty_original_without_anchor_still_skipped(self):
+        """无锚点的空原文无从定位，只能跳过（不塞进文首）."""
+        text = "投标人：________________"
+        result = batch_fill_text(text, [
+            {"original": "", "var": "company_name", "value": "测试公司"},
+        ])
+        assert result == text
+
+    def test_anchor_not_found_falls_back_instead_of_dropping(self):
+        """锚点在正文里找不到时，退回首次匹配，不能静默丢值."""
+        result = batch_fill_text(self.TENDER_LETTER, [
+            {"original": "招标人名称", "var": "tenderer_name",
+             "value": "玉溪大红山矿业有限公司", "context_before": "这段锚点不在正文里"},
+        ])
+        assert "玉溪大红山矿业有限公司" in result
+
+
 class TestPostScan:
     def test_clean_text(self):
         text = "投标人名称：云南领航保安服务有限公司"
