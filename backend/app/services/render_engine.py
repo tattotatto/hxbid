@@ -1544,9 +1544,9 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
 
     # ── Body: each chapter ──
     if strict_mode:
-        _render_body_strict(doc, chapters, format_template, style)
+        _render_body_strict(doc, chapters, format_template, style, chapter_images)
     else:
-        _render_body_legacy(doc, chapters, style)
+        _render_body_legacy(doc, chapters, style, chapter_images)
 
     # ── Save file ──
     output_dir = Path(settings.OUTPUT_DIR)
@@ -1558,7 +1558,7 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     return str(output_path)
 
 
-def _render_body_strict(doc, chapters, format_template, style):
+def _render_body_strict(doc, chapters, format_template, style, chapter_images=None):
     """严格模式：按 format_template.document_structure 渲染正文.
 
     每个 part 的每个 sub-section（(一)(二)(三)...）都强制分页。
@@ -1573,15 +1573,17 @@ def _render_body_strict(doc, chapters, format_template, style):
     structure = format_template.get("document_structure", []) or []
     if not structure:
         # fallback to legacy if no structure
-        _render_body_legacy(doc, chapters, style)
+        _render_body_legacy(doc, chapters, style, chapter_images)
         return
 
     # Index existing chapters by title for lookup
     by_title: dict = {}
-    for ch in chapters:
+    idx_by_title: dict = {}
+    for ch_idx, ch in enumerate(chapters):
         title = ch.get("title", "")
         if title:
             by_title[title] = ch
+            idx_by_title.setdefault(title, ch_idx)
 
     rendered_set: set = set()
 
@@ -1692,6 +1694,12 @@ def _render_body_strict(doc, chapters, format_template, style):
             if child_type in ("fixed_form", "table") or child.get("required"):
                 _append_signature_block(doc, style)
 
+        # ── Chapter material images (once per part, not per sub-section) ──
+        if chapter_images:
+            src_idx = idx_by_title.get(part_title)
+            if src_idx is not None and src_idx < len(chapter_images):
+                _insert_chapter_images(doc, chapter_images[src_idx], style)
+
     # ── Render any chapters not covered by structure (defensive) ──
     for ch in chapters:
         if ch.get("title", "") not in rendered_set:
@@ -1706,6 +1714,10 @@ def _render_body_strict(doc, chapters, format_template, style):
                     bold=True,
                 )
             _render_child_content(doc, ch.get("content", ""), style)
+            if chapter_images:
+                fb_idx = idx_by_title.get(ch.get("title", ""))
+                if fb_idx is not None and fb_idx < len(chapter_images):
+                    _insert_chapter_images(doc, chapter_images[fb_idx], style)
             rendered_set.add(ch.get("title", ""))
 
 
@@ -1742,7 +1754,19 @@ def _split_content_by_h2(content: str) -> list[str]:
     return result
 
 
-def _render_body_legacy(doc, chapters, style):
+def _insert_chapter_images(doc, images, style):
+    """把某章的材料图片（materials_injection 注入）插入文档。
+
+    images 元素形如 {"path": ..., "label": ...}；兼容纯路径字符串。
+    """
+    for item in images or []:
+        if isinstance(item, dict):
+            _insert_image(doc, item.get("path", ""), item.get("label", ""), style)
+        elif item:
+            _insert_image(doc, str(item), "", style)
+
+
+def _render_body_legacy(doc, chapters, style, chapter_images=None):
     """旧版正文渲染（无 format_template 时使用，保持向后兼容）."""
     for i, chapter in enumerate(chapters):
         if i > 0:
@@ -1761,8 +1785,11 @@ def _render_body_legacy(doc, chapters, style):
         section_type = chapter.get("section_type", "")
         if section_type == "file":
             _render_file_section_content(doc, content, style)
-            continue
-        _render_child_content(doc, content, style)
+        else:
+            _render_child_content(doc, content, style)
+
+        if chapter_images and i < len(chapter_images):
+            _insert_chapter_images(doc, chapter_images[i], style)
 
 
 def _render_child_content(doc, content, style, prefer_table=False):
@@ -1886,9 +1913,25 @@ def _render_child_content(doc, content, style, prefer_table=False):
             idx += 1
             continue
 
+        # ── Inline image marker: [IMG:path|label] ──
+        if stripped.startswith("[IMG:") and stripped.endswith("]"):
+            img_path, _, img_label = stripped[len("[IMG:"):-1].partition("|")
+            _insert_image(doc, img_path, img_label, style)
+            idx += 1
+            continue
+
+        # ── Side-by-side ID card pair: [IDPAIR:front|front_label|back|back_label] ──
+        if stripped.startswith("[IDPAIR:") and stripped.endswith("]"):
+            parts = stripped[len("[IDPAIR:"):-1].split("|")
+            if len(parts) == 4:
+                _render_id_card_pair(
+                    doc, parts[0], parts[1], parts[2], parts[3], style
+                )
+            idx += 1
+            continue
+
         # Default: body paragraph
-        if not (stripped.startswith("[IMG:") or stripped.startswith("[IDPAIR:")):
-            _add_body_paragraph(doc, stripped, style)
+        _add_body_paragraph(doc, stripped, style)
         idx += 1
 
     # Flush remaining
