@@ -1133,6 +1133,9 @@ async def _generate_single_section_with_retry(
     path = leaf.get("path", [])
     depth = leaf.get("depth", 0)
     max_tokens = leaf.get("max_tokens", 4096)
+    # 篇幅目标与推理 headroom 是两件事：max_tokens 只保证推理写完还有地方
+    # 写正文，写多长由 target_chars 决定（见 token_budget.assign_target_budgets）
+    target_chars = leaf.get("target_chars")
     sibling_summaries = leaf.get("sibling_summaries", [])
 
     # Build section-specific format guidance from tender template
@@ -1154,6 +1157,7 @@ async def _generate_single_section_with_retry(
                 depth=depth,
                 requirements=requirements,
                 max_tokens=max_tokens,
+                target_chars=target_chars,
                 sibling_summaries=sibling_summaries[:8],
                 reference_sections=reference_sections,
                 company_profile=company_profile,
@@ -1350,7 +1354,6 @@ async def generate_from_chapter_structure(
     3. AI 撰写章节 → 从嵌套目录树深度优先收集叶子任务 → 按目标页数规划篇幅 → 并行生成
     4. 树形组装（章节 → 容器 → 叶子）→ 输出
     """
-    from app.services.subsection_generator import generate_section
     from app.services.content_assembler import build_final_chapters_payload
     from app.models.project import BidProject, ProjectChapter
     from sqlalchemy import select as sa_select
@@ -1753,30 +1756,30 @@ async def generate_from_chapter_structure(
                         if materials_guidance:
                             guidance += "\n\n【可用的真实素材（标书中必须使用，严禁编造）】\n" + materials_guidance
 
-                        full_content = ""
-                        try:
-                            async for chunk in generate_section(
-                                section_title=title,
-                                section_path=task["path"],
-                                depth=depth,
-                                requirements=chapter_requirements,
-                                max_tokens=max_tokens,
-                                sibling_summaries=[],
-                                reference_sections=[],
-                                company_profile=company_profile,
-                                extra_guidance=guidance,
-                                format_template=format_template,
-                            ):
-                                full_content += chunk
-                        except Exception as exc:
-                            logger.error("Section '%s' generation failed: %s", title, exc)
+                        # 复用带指数退避的重试版（原来这里自己写了一版且**不重试**，
+                        # 空返回直接记 empty_content 收工）。实测空返回基本是暂态的：
+                        # 重跑两轮 44→18→8，每轮捞回约 56-60% 的剩余失败。
+                        # format_template 传 None —— guidance 里已经拼过
+                        # _build_section_format_guidance，再传一次会重复注入。
+                        full_content, err = await _generate_single_section_with_retry(
+                            leaf=task,
+                            requirements=chapter_requirements,
+                            company_profile=company_profile,
+                            reference_sections=[],
+                            max_retries=2,
+                            retry_delay_base=1.0,
+                            extra_guidance=guidance,
+                            format_template=None,
+                        )
+                        if err is not None:
+                            logger.error("Section '%s' generation failed: %s", title, err)
                             return {
                                 "chapter_id": task_info["chapter_id"],
                                 "path_key": path_key,
                                 "section_path": task["path"],
                                 "title": title,
                                 "content": None,
-                                "error": str(exc),
+                                "error": err,
                             }
 
                         # 预算耗尽时 AI 可能以孤立标题行收尾，裁掉避免"空标题"

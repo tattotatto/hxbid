@@ -59,6 +59,7 @@ def _build_progressive_prompt(
     company_context: str = "",
     extra_guidance: str = "",
     max_tokens: int = 4096,
+    target_chars: int | None = None,
 ) -> str:
     """Build a progressive-disclosure prompt for a single leaf section.
 
@@ -150,8 +151,8 @@ def _build_progressive_prompt(
     if extra_guidance:
         parts.append(f"\n{extra_guidance}")
 
-    # ── Length guidance (based on token budget) ──
-    parts.append(get_section_length_guidance(section_title, max_tokens))
+    # ── Length guidance (篇幅目标；max_tokens 只是推理 headroom，不表达篇幅) ──
+    parts.append(get_section_length_guidance(section_title, max_tokens, target_chars))
 
     # ── Company context (injected last so it's fresh in the AI's context) ──
     if company_context:
@@ -323,6 +324,7 @@ async def generate_section(
     depth: int,
     requirements: dict,
     max_tokens: int = 4096,
+    target_chars: int | None = None,
     sibling_summaries: List[str] | None = None,
     reference_sections: List[str] | None = None,
     company_profile: dict | None = None,
@@ -373,6 +375,7 @@ async def generate_section(
         company_context=company_context,
         extra_guidance=extra_guidance,
         max_tokens=max_tokens,
+        target_chars=target_chars,
     )
 
     # ── Build system prompt with deep-section augmentation ──

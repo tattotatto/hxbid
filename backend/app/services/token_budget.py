@@ -251,47 +251,57 @@ def hint_to_tokens(hint: str) -> int:
 
 
 def assign_target_budgets(leaf_tasks: list[dict], target_pages: int) -> list[dict]:
-    """Assign per-leaf max_tokens scaled to a whole-document page target.
+    """Assign per-leaf length target (``target_chars``) and headroom (``max_tokens``).
 
-    Each leaf starts from base = hint_to_tokens(hint) * DEPTH_MODIFIER[depth].
-    The total of all bases is scaled so the sum of estimated pages lands on
-    *target_pages*, then each leaf's max_tokens is clamped into the
-    configured [GENERATION_LEAF_MIN_TOKENS, GENERATION_LEAF_MAX_TOKENS] band so
-    every individual call stays cheap and reliable. Pages come from leaf count,
-    not from giant single calls.
+    Two *separate* knobs, deliberately:
 
-    *leaf_tasks* is mutated in-place; each leaf gets ``max_tokens`` and
-    ``estimated_pages`` written back. Returns the same list.
+    ``target_chars``
+        篇幅目标 —— what the prompt asks the model to write. Each leaf starts
+        from base = hint_to_tokens(hint) * DEPTH_MODIFIER[depth]; the total of
+        all bases is scaled so the summed targets land on *target_pages*.
+        Pages come from leaf count, not from giant single calls.
+
+    ``max_tokens``
+        **纯 headroom**，恒为 ``GENERATION_LEAF_MAX_TOKENS``。推理模型会先烧
+        reasoning_tokens，且推理量**随预算膨胀**（实测同一叶子：预算 3,525
+        时推理 2,823；8,192 时推理吃满 8,192、正文 0 字；16,384 时推理
+        3,625、正文 7,965 完整收尾）。所以这个值必须显著高于推理自然上限，
+        且**不能**拿来表达「写多长」—— 旧实现用 ``max_tokens × CHARS_PER_TOKEN``
+        反推篇幅目标，于是「给推理留空间」和「别写那么长」变成同一个旋钮，
+        想留空间就得同时叫模型写更多。
+
+    *leaf_tasks* is mutated in-place; each leaf gets ``target_chars``,
+    ``max_tokens`` and ``estimated_pages`` written back. Returns the same list.
     """
     if not leaf_tasks:
         return leaf_tasks
 
-    min_tokens = settings.GENERATION_LEAF_MIN_TOKENS
     max_tokens = settings.GENERATION_LEAF_MAX_TOKENS
     chars_per_page = settings.GENERATION_CHARS_PER_PAGE
 
     total_target_chars = target_pages * chars_per_page
-    total_target_tokens = total_target_chars / CHARS_PER_TOKEN
 
-    base_sum = 0
+    base_sum = 0.0
     for task in leaf_tasks:
         hint = task.get("token_budget_hint", "medium")
         depth = task.get("depth", 1)
         modifier = DEPTH_MODIFIER.get(depth, 0.5)
-        task["_base_tokens"] = hint_to_tokens(hint) * modifier
-        base_sum += task["_base_tokens"]
+        task["_base_weight"] = hint_to_tokens(hint) * modifier
+        base_sum += task["_base_weight"]
 
     if base_sum <= 0:
-        scale = 1.0
-    else:
-        scale = total_target_tokens / base_sum
+        # 全部 hint 都不可识别时退化为均分，别让整章目标变 0
+        for task in leaf_tasks:
+            task["_base_weight"] = 1.0
+        base_sum = float(len(leaf_tasks))
 
     for task in leaf_tasks:
-        raw = int(task.pop("_base_tokens", 0) * scale)
-        task["max_tokens"] = max(min(raw, max_tokens), min_tokens)
+        weight = task.pop("_base_weight", 0.0)
+        task["target_chars"] = max(1, int(total_target_chars * weight / base_sum))
+        task["max_tokens"] = max_tokens
         task["estimated_pages"] = max(
             1,
-            int(task["max_tokens"] * CHARS_PER_TOKEN / chars_per_page),
+            int(task["target_chars"] / chars_per_page),
         )
 
     return leaf_tasks
@@ -327,13 +337,24 @@ def collect_leaf_sections(outline_tree: list) -> List[dict]:
     return leaves
 
 
-def get_section_length_guidance(section_title: str, max_tokens: int) -> str:
+def get_section_length_guidance(
+    section_title: str,
+    max_tokens: int,
+    target_chars: int | None = None,
+) -> str:
     """Return a human-readable length hint for the AI prompt.
 
     Gives the AI a concrete word-count target rather than letting it
     stop early at an arbitrary point.
+
+    *target_chars* 是篇幅目标；给了就用它。不给才回落到
+    ``max_tokens × CHARS_PER_TOKEN``（保留给老调用方，但那条路把 headroom
+    当成了篇幅指标 —— 见 ``assign_target_budgets`` 的说明）。
     """
-    estimated_chars = int(max_tokens * CHARS_PER_TOKEN)
+    if target_chars:
+        estimated_chars = int(target_chars)
+    else:
+        estimated_chars = int(max_tokens * CHARS_PER_TOKEN)
     estimated_pages = max(1, int(estimated_chars / settings.GENERATION_CHARS_PER_PAGE))
 
     return (

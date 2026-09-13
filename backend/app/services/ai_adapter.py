@@ -191,9 +191,31 @@ class AIAdapter:
             "stream": True,
         }
         stream = await client.chat.completions.create(**kwargs)
+        produced_any = False
+        finish_reason: str | None = None
         async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+            if choice.delta.content:
+                produced_any = True
+                yield choice.delta.content
+
+        # 防御：推理模型（deepseek-v4-*）先烧 reasoning_tokens 再吐 content，
+        # max_tokens 不够时 finish_reason='length' 且 content 全空。非流式
+        # chat_completion 已显式 raise，流式此前只是静默结束 —— 调用方只能
+        # 记一个无信息的 empty_content，看不出是「推理吃光预算」还是「模型没话说」。
+        # 这里对齐非流式路径补上诊断。
+        # 注意 content 非空但被 length 截断**不抛**：那是大红山 70% 叶子的常态，
+        # 抛了等于把已写好的半篇正文丢掉重跑，代价远大于收益。
+        if not produced_any:
+            raise RuntimeError(
+                f"AI returned empty content (finish_reason={finish_reason}, "
+                f"max_tokens={kwargs.get('max_tokens')}). "
+                f"Increase max_tokens to leave room after reasoning_tokens."
+            )
 
     # ------------------------------------------------------------------
     # Vision completion (for image-based document analysis)
