@@ -43,18 +43,17 @@ FORMAT_TEMPLATE = {
 def test_format_template_to_prompt_text():
     text = _format_template_to_prompt_text(FORMAT_TEMPLATE)
     assert "一、商务部分" in text
-    assert "【必需】" in text
-    assert "（一） 投标函" in text
-    assert "固定格式表单" in text
-    assert "（二） 开标一览表" in text
-    assert "表格" in text
-    assert "序号" in text
-    assert "金额" in text
-    # Check optional part
-    assert "三、其他材料" in text
+    # 顶层标记只有三种：技术类 / 可选（文件类标题走另一分支）。旧文案
+    # 「【必需】」已废弃——「需要你设计深层大纲」比「必需」更能说明让 AI
+    # 做什么，光说必需它不知道该展开到多深。
+    assert "【技术类 — 需要你设计深层大纲】" in text
     assert "【可选】" in text
-    # Check attachment type
-    assert "附件/证明材料" in text
+    # 子项按 type 标注系统会怎么处理它
+    assert "（一） 投标函 [固定格式 — 系统自动生成]" in text
+    assert "（二） 开标一览表 [表格 — 系统自动生成]" in text
+    assert "（一） 服务方案 [需要扩展深层大纲]" in text
+    assert "（二） 资质证书 [附件 — 系统自动处理]" in text
+    assert "三、其他材料 【可选】" in text
     # Check closing line
     assert "共 3 个部分" in text
 
