@@ -212,6 +212,49 @@ class TestLocateFormatPagesBacktrack:
 class TestExtractTextFromPages:
     """extract_text_from_pages 测试."""
 
+    PAGE_H = 841.9
+
+    @staticmethod
+    def _line(text, x0, x1, top, bottom):
+        return {"text": text, "x0": x0, "x1": x1, "top": top, "bottom": bottom}
+
+    def _pdf_with_lines(self, lines):
+        class FakePage:
+            height = self.PAGE_H
+
+            def extract_text_lines(self):
+                return lines
+
+            def extract_text(self):
+                return "\n".join(ln["text"] for ln in lines)
+
+        class FakePdf:
+            pass
+
+        pdf = FakePdf()
+        pdf.pages = [FakePage()]
+        return pdf
+
+    def test_drops_page_number_in_margin(self):
+        """印刷页码不得混进正文.
+
+        回归：页码是正文流里独立的一行，原样转储会跟着页面信息一起进
+        章节正文（实测「-78-」夹在「投标人名称：」和「日期：」之间）。
+        """
+        pdf = self._pdf_with_lines([
+            self._line("投标人名称：", 90.00, 152.89, 732.90, 743.35),
+            self._line("-78-", 287.64, 307.60, 795.48, 807.60),
+        ])
+        assert extract_text_from_pages(pdf, 0, 0) == "投标人名称："
+
+    def test_keeps_lone_number_inside_the_text_area(self):
+        """正文区里的孤立数字是表格单元格，不是页码."""
+        pdf = self._pdf_with_lines([
+            self._line("4", 300.00, 307.00, 400.00, 411.05),
+            self._line("合计", 90.00, 152.89, 412.00, 423.05),
+        ])
+        assert extract_text_from_pages(pdf, 0, 0) == "4\n合计"
+
     def test_extract_text_single_page(self):
         """单页文本提取."""
         _skip_if_no_pdf()

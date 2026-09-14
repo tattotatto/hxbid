@@ -195,8 +195,31 @@ def locate_evaluation_section(pdf):
     return start_page, end_page, section_text
 
 
+# 页码行：整行只有一个数字，可带 -、—、第…页 之类的装饰。
+_PAGE_NUMBER_RE = re.compile(r"^[\s\-—–－_]*\d{1,4}[\s\-—–－_]*$")
+
+# 页码只可能落在页眉/页脚，按页高比例判定。**不能只看「整行只有数字」**——
+# 开标一览表里的序号、金额都可能独占一行，删掉就是丢数据。
+_PAGE_NUMBER_MARGIN_RATIO = 0.10
+
+
+def _is_page_number(text: str, top: float, bottom: float, height: float) -> bool:
+    """这行是不是印刷页码（页眉/页脚里的孤立数字）."""
+    if not height or not _PAGE_NUMBER_RE.match(text):
+        return False
+    margin = height * _PAGE_NUMBER_MARGIN_RATIO
+    return bottom > height - margin or top < margin
+
+
 def extract_text_from_pages(pdf, start: int, end: int) -> str:
     """提取指定页码范围的所有文本.
+
+    只做一件事：**丢掉页眉/页脚的印刷页码**。页码在招标文件里是正文流里独立
+    的一行，原样转储会跟着页面信息一起进章节正文（实测「-78-」夹在「投标人
+    名称：」和「日期：」之间）。
+
+    行结构原样保留（不拼排版换行）——``locate_evaluation_section`` 那类按行
+    锚定的地方依赖逐行结构，要拼段落的用 ``extract_clean_text_from_pages``。
 
     Args:
         pdf: pdfplumber.PDF 实例
@@ -210,18 +233,30 @@ def extract_text_from_pages(pdf, start: int, end: int) -> str:
     for i in range(start, end + 1):
         if i >= len(pdf.pages):
             break
-        text = pdf.pages[i].extract_text()
+        page = pdf.pages[i]
+        lines = getattr(page, "extract_text_lines", None)
+        lines = lines() if callable(lines) else None
+        if not lines:
+            # 无行几何（个别页/旧版本 pdfplumber）→ 退回原样转储
+            text = page.extract_text()
+            if text:
+                parts.append(text)
+            continue
+        height = getattr(page, "height", 0) or 0
+        kept = [
+            str(ln.get("text") or "").strip()
+            for ln in lines
+            if not _is_page_number(
+                str(ln.get("text") or "").strip(),
+                ln.get("top") or 0.0,
+                ln.get("bottom") or 0.0,
+                height,
+            )
+        ]
+        text = "\n".join(s for s in kept if s)
         if text:
             parts.append(text)
     return "\n\n".join(parts)
-
-
-# 页码行：整行只有一个数字，可带 -、—、第…页 之类的装饰。
-_PAGE_NUMBER_RE = re.compile(r"^[\s\-—–－_]*\d{1,4}[\s\-—–－_]*$")
-
-# 页码只可能落在页眉/页脚，按页高比例判定。**不能只看「整行只有数字」**——
-# 开标一览表里的序号、金额都可能独占一行，删掉就是丢数据。
-_PAGE_NUMBER_MARGIN_RATIO = 0.10
 
 # 段内换行的行距上限（相对字号）。实测大红山第 75/76 页：段内换行 9.95–10.34，
 # 换段/换列表项/换表单字段 19.91–20.03，中间没有灰区。取 1.4 倍字号。
@@ -289,7 +324,6 @@ def _clean_page_lines(page, lines: List[dict], table_boxes: List[tuple],
         return []
 
     height = getattr(page, "height", 0) or 0
-    margin = height * _PAGE_NUMBER_MARGIN_RATIO
 
     out: List[str] = []
     prev_bottom = prev_height = None
@@ -302,9 +336,7 @@ def _clean_page_lines(page, lines: List[dict], table_boxes: List[tuple],
         bottom = ln.get("bottom") or 0.0
         # 页眉/页脚里的孤立数字 = 页码（招标文件把页码排进了正文流，不删就会
         # 跟着固定格式章节一起进标书）
-        if height and _PAGE_NUMBER_RE.match(text) and (
-            bottom > height - margin or top < margin
-        ):
+        if _is_page_number(text, top, bottom, height):
             continue
         height_pt = bottom - top
         flush = (ln.get("x1") or 0.0) >= right_edge - height_pt * _FLUSH_TOLERANCE_CHARS
