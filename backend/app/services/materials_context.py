@@ -126,7 +126,7 @@ def build_company_context(company: dict | None) -> str:
     lines.append("")
     lines.append(
         "重要提醒：标书中公司名称、统一社会信用代码等必须以真实数据为准，不得编造。"
-        "如某字段标注为[未填写]，请在标书中留空或写[待补充]，不得编造。"
+        "如某字段标注为[未填写]，请在标书中留空（不写[待补充]之类的占位标记），不得编造。"
     )
     return "\n".join(lines)
 
