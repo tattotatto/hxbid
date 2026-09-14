@@ -9,10 +9,16 @@ These tests guard the contract:
 3. 历史合同 → 命中 CONTRACT 关键词的章节
 4. 兜底：以上都没命中时挂到最后一个章节（材料一定要出现）
 """
+import re
+
+from PIL import Image as PILImage
+
 from app.services.materials_injection import (
     QUAL_CHAPTER_KEYWORDS,
     PERSONNEL_KEYWORDS,
     CONTRACT_CHAPTER_KEYWORDS,
+    CONTRACT_PRIMARY_KEYWORDS,
+    drop_already_embedded,
     inject_materials_into_chapters,
 )
 
@@ -21,6 +27,18 @@ def _payload(titles: list[str]) -> tuple[list[dict], list[list[dict]]]:
     chapters = [{"title": t, "content": ""} for t in titles]
     images: list[list[dict]] = [[] for _ in chapters]
     return chapters, images
+
+
+def _make_png(path, color=(200, 30, 30), size=(60, 40)):
+    """真实 PNG 文件——内容去重要真的读盘算 md5."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    PILImage.new("RGB", size, color).save(path)
+    return path
+
+
+def _image_refs(content: str, images: list[dict]) -> list[str]:
+    """一章里引用到的图片路径：正文 [IMG:] 标记 + chapter_images，两条通道合起来数."""
+    return re.findall(r"\[IMG:([^|\]]*)\|", content or "") + [i["path"] for i in images]
 
 
 class TestKeywordsCoverage:
@@ -82,7 +100,6 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=qual_imgs,
             personnel_cert_images=[],
             contract_text_block="",
-            contract_images=[],
         )
 
         # 投标人基本资料 命中 QUAL → 文本 prepend + 图片注入
@@ -95,7 +112,6 @@ class TestInjectMaterialsIntoChapters:
     def test_contract_materials_appended_to_matching_chapter(self):
         chapters, images = _payload(["类似项目情况表", "其他材料"])
         contract_block = "## 公司业绩一览表\n| 项目 | 金额 |"
-        contract_imgs = [{"path": "/uploads/c1.jpg", "label": "合同1"}]
 
         inject_materials_into_chapters(
             chapters=chapters,
@@ -105,12 +121,14 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=[],
             personnel_cert_images=[],
             contract_text_block=contract_block,
-            contract_images=contract_imgs,
         )
 
-        # 类似项目情况表 命中 CONTRACT → 文本 append + 图片注入
+        # 类似项目情况表 命中 CONTRACT → 文本 append（合同图随文本里的 [IMG:] 标记
+        # 进正文，不再单独走 chapter_images）
         assert contract_block in chapters[0]["content"]
-        assert images[0] == contract_imgs
+        assert images[0] == []
+        # 「其他材料」是兜底章节，业绩正题已命中就不该再收一份
+        assert contract_block not in chapters[1]["content"]
 
     def test_personnel_images_go_to_personnel_chapter(self):
         chapters, images = _payload(["项目人员汇总表", "服务方案"])
@@ -124,7 +142,6 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=[],
             personnel_cert_images=personnel_imgs,
             contract_text_block="",
-            contract_images=[],
         )
 
         assert images[0] == personnel_imgs
@@ -145,7 +162,6 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=qual_imgs,
             personnel_cert_images=[],
             contract_text_block="",
-            contract_images=[],
         )
 
         # 全部内容挂到最后一章（项目实施方案）
@@ -159,7 +175,6 @@ class TestInjectMaterialsIntoChapters:
     def test_contract_fallback_when_no_match(self):
         chapters, images = _payload(["服务方案", "技术方案"])
         contract_block = "## 公司业绩一览表"
-        contract_imgs = [{"path": "/uploads/c1.jpg", "label": "合同1"}]
 
         inject_materials_into_chapters(
             chapters=chapters,
@@ -169,11 +184,10 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=[],
             personnel_cert_images=[],
             contract_text_block=contract_block,
-            contract_images=contract_imgs,
         )
 
         assert contract_block in chapters[-1]["content"]
-        assert images[-1] == contract_imgs
+        assert images[-1] == []
 
     def test_no_materials_no_op(self):
         """没材料 → 不污染任何章节."""
@@ -187,7 +201,6 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=[],
             personnel_cert_images=[],
             contract_text_block="",
-            contract_images=[],
         )
 
         for ch in chapters:
@@ -208,7 +221,6 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=[{"path": "/a", "label": "x"}],
             personnel_cert_images=[],
             contract_text_block="Z",
-            contract_images=[],
         )
 
         # 不抛异常，无修改
@@ -230,7 +242,6 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=[],
             personnel_cert_images=[],
             contract_text_block="",
-            contract_images=[],
         )
 
         # 注入到第一个匹配（投标人基本资料），不是最后一章
@@ -241,7 +252,6 @@ class TestInjectMaterialsIntoChapters:
         """QUAL 命中但 CONTRACT 没命中 → 只有 CONTRACT 走 fallback."""
         chapters, images = _payload(["投标人基本资料", "服务方案"])
         contract_block = "## 公司业绩一览表"
-        contract_imgs = [{"path": "/c1.jpg", "label": "合同1"}]
 
         inject_materials_into_chapters(
             chapters=chapters,
@@ -251,14 +261,131 @@ class TestInjectMaterialsIntoChapters:
             all_qual_section_images=[],
             personnel_cert_images=[],
             contract_text_block=contract_block,
-            contract_images=contract_imgs,
         )
 
         # QUAL 注入到第一章节（投标人基本资料）
         assert "## 公司基本情况" in chapters[0]["content"]
         # CONTRACT fallback 到最后一章节（服务方案）
         assert contract_block in chapters[-1]["content"]
-        assert images[-1] == contract_imgs
+        assert images[-1] == []
+
+class TestContractInjectedOnce:
+    """合同扫描件在一篇章节里只能被引用一次，且整块业绩表只落一个章节.
+
+    用户反馈「合同图重复注入」。真实产物（玉溪大红山）里 8 张合同图变成了 48 处
+    引用 = 3 个命中 CONTRACT 的章节 × (正文 [IMG:] 标记 8 + chapter_images 8)。
+    两条通道装的是同一批图：contract_text_block 里每张合同都自带 [IMG:] 标记，
+    而 chapter_images 又 extend 了一遍。
+    """
+
+    def test_contract_image_referenced_once_not_twice(self):
+        chapters, images = _payload(["类似项目情况表"])
+        block = "[IMG:/c1.jpg|A — 合同]\n[IMG:/c2.jpg|B — 合同]"
+
+        inject_materials_into_chapters(
+            chapters=chapters,
+            chapter_images=images,
+            company_text_block="",
+            qual_text_block="",
+            all_qual_section_images=[],
+            personnel_cert_images=[],
+            contract_text_block=block,
+        )
+
+        # 正文标记与 chapter_images 合起来，每张图恰好一次
+        assert _image_refs(chapters[0]["content"], images[0]) == ["/c1.jpg", "/c2.jpg"]
+
+    def test_contract_block_goes_to_the_performance_chapter_only(self):
+        """「类似项目情况表」是业绩正题，「其他材料」是兜底——只该进前者."""
+        chapters, images = _payload(
+            ["商务文件其他材料", "类似项目情况表", "技术文件其他材料"]
+        )
+        block = "## 公司业绩一览表\n| 项目 | 金额 |"
+
+        inject_materials_into_chapters(
+            chapters=chapters,
+            chapter_images=images,
+            company_text_block="",
+            qual_text_block="",
+            all_qual_section_images=[],
+            personnel_cert_images=[],
+            contract_text_block=block,
+        )
+
+        holders = [ch["title"] for ch in chapters if block in ch["content"]]
+        assert holders == ["类似项目情况表"]
+
+    def test_contract_block_goes_to_generic_chapter_when_no_performance_chapter(self):
+        chapters, images = _payload(["商务文件其他材料", "服务方案"])
+        block = "## 公司业绩一览表"
+
+        inject_materials_into_chapters(
+            chapters=chapters,
+            chapter_images=images,
+            company_text_block="",
+            qual_text_block="",
+            all_qual_section_images=[],
+            personnel_cert_images=[],
+            contract_text_block=block,
+        )
+
+        assert block in chapters[0]["content"]
+        assert block not in chapters[1]["content"]
+
+    def test_primary_keywords_exclude_generic_buckets(self):
+        for title in ("类似项目情况表", "公司业绩", "项目经验", "成功案例"):
+            assert any(kw in title for kw in CONTRACT_PRIMARY_KEYWORDS), title
+        for title in ("商务文件其他材料", "技术文件其他材料", "其他内容"):
+            assert not any(kw in title for kw in CONTRACT_PRIMARY_KEYWORDS), title
+
+
+class TestDropAlreadyEmbedded:
+    """同一份材料在库里可能有两条存储路径，内容逐字节相同.
+
+    真实数据：营业执照既是 company_profile.business_license_image
+    （uploads/company/5e71….png），又是一条同名资质（ocr/0d24….png）——
+    两个文件 md5 都是 4baee17e…。按路径字符串去重认不出，按内容才认得出，
+    于是同一张执照在「投标人基本资料」里出现了两次。
+    """
+
+    def test_same_content_under_a_different_path_is_dropped(self, tmp_path):
+        a = _make_png(tmp_path / "company" / "license.png")
+        b = _make_png(tmp_path / "ocr" / "license.png")
+
+        embedded: set[str] = set()
+        first = [{"path": str(a), "label": "营业执照"}]
+        second = [{"path": str(b), "label": "营业执照 — 530100100391096"}]
+
+        assert drop_already_embedded(first, embedded) == first
+        assert drop_already_embedded(second, embedded) == []
+
+    def test_different_content_is_kept(self, tmp_path):
+        a = _make_png(tmp_path / "company" / "license.png", color=(200, 30, 30))
+        b = _make_png(tmp_path / "ocr" / "tax.png", color=(20, 120, 200))
+
+        embedded: set[str] = set()
+        drop_already_embedded([{"path": str(a), "label": "营业执照"}], embedded)
+
+        keep = [{"path": str(b), "label": "税务登记证"}]
+        assert drop_already_embedded(keep, embedded) == keep
+
+    def test_the_returned_items_are_not_mutated(self, tmp_path):
+        a = _make_png(tmp_path / "a.png")
+        embedded: set[str] = set()
+        item = {"path": str(a), "label": "营业执照"}
+        drop_already_embedded([item], embedded)
+        assert item == {"path": str(a), "label": "营业执照"}
+
+    def test_unresolvable_paths_fall_back_to_the_path_itself(self):
+        """文件找不到时不能一律当成同一张图丢掉——那样会丢材料."""
+        embedded: set[str] = set()
+        a = [{"path": "gone/a.png", "label": "x"}]
+        b = [{"path": "gone/b.png", "label": "y"}]
+
+        assert drop_already_embedded(a, embedded) == a
+        assert drop_already_embedded(b, embedded) == b
+        assert drop_already_embedded([{"path": "gone/a.png", "label": "z"}], embedded) == []
+
 
 # ── 法定代表人身份证扫描件：按招标原文的占位行就地插图 ────────────────────
 # 用户反馈：「法定代表人授权委托书页面下面需要身份证正面扫描件 身份证反面
@@ -284,7 +411,6 @@ def _inject_with_id_scans(chapters, images, id_scans):
         all_qual_section_images=[],
         personnel_cert_images=[],
         contract_text_block="",
-        contract_images=[],
         legal_rep_id_card_scans=id_scans,
     )
 

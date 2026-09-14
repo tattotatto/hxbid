@@ -10,6 +10,7 @@ Handles markdown artifacts that may appear in AI-generated content, converting
 them to proper Word formatting (headings, bold, italic, bullets, tables).
 """
 
+import hashlib
 import logging
 import re
 import time
@@ -947,6 +948,24 @@ def _resolve_relative_path(image_path: str) -> Path | None:
         if c.exists():
             return c
     return None
+
+
+def image_content_key(image_path: str) -> str:
+    """材料的「同一个文件」判据：内容 md5，读不到时退回归一化后的路径.
+
+    资料库会把同一份扫描件存成两条记录、两个路径——真实数据里营业执照既是
+    ``company_profile.business_license_image``（``uploads/company/5e71….png``），
+    又是一条同名资质（``ocr/0d24….png``），两个文件 md5 都是 ``4baee17e…``。
+    按路径字符串去重认不出这种重复，于是同一张执照在正文里出了两次图；
+    python-docx 按内容合并 media，所以导出的 media 只有一份、引用却有两处。
+    """
+    fp = _resolve_relative_path(image_path)
+    if fp is not None:
+        try:
+            return hashlib.md5(fp.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return "path:" + str(image_path).replace("\\", "/").strip().lower()
 
 
 # ── Image insertion ───────────────────────────────────────────────────

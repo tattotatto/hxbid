@@ -35,6 +35,36 @@ CONTRACT_CHAPTER_KEYWORDS: list[str] = [
     "业绩一览", "公司业绩",
 ]
 
+# 业绩正题——「整块业绩表 + 全部合同扫描件」该落的地方。「其他材料」这类兜底章节
+# 只在没有正题章节时才接收，否则同一份业绩表会在标书里出现三次（实测玉溪大红山：
+# 商务文件其他材料 / 类似项目情况表 / 技术文件其他材料 三章各来一遍）。
+CONTRACT_PRIMARY_KEYWORDS: list[str] = [
+    "业绩", "类似项目", "项目经验", "成功案例",
+]
+
+
+def drop_already_embedded(images: list[dict], embedded_images: set[str]) -> list[dict]:
+    """剔除「内容已经出过图」的材料，**并把留下来的就地登记进 embedded_images**.
+
+    注意有副作用：返回的一定是新图（调用方据此出图就不会重复），登记之后同一份
+    材料换个路径再来也会被后续调用丢掉——资质里那条与公司资料重复的营业执照就是
+    这样被挡掉的，所以别把返回值再喂给第二次调用，也别绕过登记。
+
+    按**内容**判重而不是按路径：同一份扫描件在库里常有两个存储路径（公司资料存
+    ``uploads/company/x.png``，资质 OCR 又存了 ``ocr/y.png``），路径不同、字节
+    相同。路径比较认不出，同一张营业执照就会在正文里出两次图。
+    """
+    from app.services.render_engine import image_content_key
+
+    out = []
+    for img in images:
+        key = image_content_key(img["path"])
+        if key in embedded_images:
+            continue
+        embedded_images.add(key)
+        out.append(img)
+    return out
+
 
 def _has_content(text: str) -> bool:
     return bool(text and text.strip())
@@ -42,6 +72,14 @@ def _has_content(text: str) -> bool:
 
 def _has_images(images: list[dict]) -> bool:
     return bool(images)
+
+
+def _first_matching_index(chapters: list[dict], keywords: list[str]) -> int | None:
+    """第一个标题命中关键词的章节下标；都没有则 None."""
+    for idx, ch in enumerate(chapters):
+        if any(kw in ch.get("title", "") for kw in keywords):
+            return idx
+    return None
 
 
 # ── 法定代表人身份证扫描件：按招标原文的占位行就地插图 ──
@@ -116,7 +154,6 @@ def inject_materials_into_chapters(
     all_qual_section_images: list[dict],
     personnel_cert_images: list[dict],
     contract_text_block: str,
-    contract_images: list[dict],
     legal_rep_id_card_scans: dict | None = None,
 ) -> None:
     """将公司资料/资质证书/人员证书/历史合同注入到对应章节.
@@ -124,7 +161,9 @@ def inject_materials_into_chapters(
     匹配规则：
       - QUAL 关键词命中 → 公司信息 + 资质证书 文本 prepend，资质图片 inline
       - PERSONNEL 关键词命中 → 人员证书图片 inline
-      - CONTRACT 关键词命中 → 合同文本 append + 合同图片 inline
+      - CONTRACT：整块业绩表 append 到**一个**章节（业绩正题优先，其次兜底章节，
+        都没有才挂最后一章）。合同扫描件以 [IMG:] 标记随文本一起进去，不再单独
+        走 chapter_images——两条通道装的是同一批图，会每张出两次。
       - 法人身份证扫描件 → 插到章节里「身份证正/反面扫描件」占位行之后
       （内容驱动，不看章节标题——「法定代表人授权委托书」不命中任何关键词）
     Fallback（任一未命中）：
@@ -146,11 +185,10 @@ def inject_materials_into_chapters(
     qual_payload_text = (company_text_block or "") + (qual_text_block or "")
     has_qual = _has_content(qual_payload_text) or _has_images(all_qual_section_images)
     has_personnel = _has_images(personnel_cert_images)
-    has_contract = _has_content(contract_text_block) or _has_images(contract_images)
+    has_contract = _has_content(contract_text_block)
 
     matched_qual = False
     matched_personnel = False
-    matched_contract = False
 
     for idx, ch in enumerate(chapters):
         title = ch.get("title", "")
@@ -165,13 +203,6 @@ def inject_materials_into_chapters(
         if has_personnel and any(kw in title for kw in PERSONNEL_KEYWORDS):
             matched_personnel = True
             chapter_images[idx].extend(personnel_cert_images)
-
-        if has_contract and any(kw in title for kw in CONTRACT_CHAPTER_KEYWORDS):
-            matched_contract = True
-            if contract_text_block:
-                ch["content"] = (ch.get("content") or "") + "\n" + contract_text_block
-            if contract_images:
-                chapter_images[idx].extend(contract_images)
 
     # ── Fallback：未命中时挂到最后一章 ──
     fallback_idx = len(chapters) - 1
@@ -192,16 +223,18 @@ def inject_materials_into_chapters(
             fallback_chapter.get("title"),
         )
 
-    if has_contract and not matched_contract:
-        if contract_text_block:
-            fallback_chapter["content"] = (
-                (fallback_chapter.get("content") or "") + "\n" + contract_text_block
-            )
-        if contract_images:
-            chapter_images[fallback_idx].extend(contract_images)
+    if has_contract:
+        target = _first_matching_index(chapters, CONTRACT_PRIMARY_KEYWORDS)
+        if target is None:
+            target = _first_matching_index(chapters, CONTRACT_CHAPTER_KEYWORDS)
+        if target is None:
+            target = fallback_idx
+        chapters[target]["content"] = (
+            (chapters[target].get("content") or "") + "\n" + contract_text_block
+        )
         logger.info(
-            "CONTRACT materials fell back to last chapter: %s",
-            fallback_chapter.get("title"),
+            "CONTRACT materials injected into chapter: %s",
+            chapters[target].get("title"),
         )
 
     # personnel 走 fallback 的语义：图片本应有人查看，挂到最后章节

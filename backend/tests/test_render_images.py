@@ -264,3 +264,32 @@ def test_render_bid_to_docx_without_images_still_works(tmp_path, monkeypatch):
 
     doc = Document(out)
     assert _image_count(doc) == 0
+
+
+# ── 内容判重：同一份材料的两条存储路径 ────────────────────────────────────
+
+class TestImageContentKey:
+    """资料库把同一份扫描件存了两遍（公司资料一份、资质 OCR 一份），
+    路径不同、内容相同。只按路径去重的话，同一张营业执照会在正文里出两次图。
+    """
+
+    def test_same_bytes_under_different_paths_share_a_key(self, tmp_path):
+        a = _make_png(tmp_path, "license_company.png")
+        b = _make_png(tmp_path, "license_ocr.png")
+
+        assert a != b
+        assert a.read_bytes() == b.read_bytes()
+        assert render_engine.image_content_key(str(a)) == render_engine.image_content_key(str(b))
+
+    def test_different_bytes_get_different_keys(self, tmp_path):
+        a = _make_png(tmp_path, "a.png", size=(60, 40))
+        b = _make_png(tmp_path, "b.png", size=(80, 40))
+
+        assert render_engine.image_content_key(str(a)) != render_engine.image_content_key(str(b))
+
+    def test_missing_file_does_not_raise(self):
+        """路径解析不到时退回归一化路径——不同路径仍要给出不同的 key."""
+        assert render_engine.image_content_key("gone/a.png") != render_engine.image_content_key("gone/b.png")
+
+    def test_same_missing_path_is_stable(self):
+        assert render_engine.image_content_key("gone/a.png") == render_engine.image_content_key("gone/a.png")

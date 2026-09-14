@@ -39,7 +39,8 @@ from app.services.notification import send_notification
 from app.services.collection import get_collected_resources
 from app.services.rag import assemble_chapter_context
 from app.services.scoring_rubric import normalize_rubric
-from app.services.render_engine import export_to_pdf, render_bid_to_docx
+from app.services.materials_injection import drop_already_embedded, inject_materials_into_chapters
+from app.services.render_engine import export_to_pdf, image_content_key, render_bid_to_docx
 from app.services.vector_store import vector_store
 from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
@@ -1124,7 +1125,9 @@ async def export_bid(
 
     # ── Build structured company info text block with inline images ──
     company_text_block = ""
-    embedded_images = set()  # track (path, label) of images already embedded inline
+    # 已内联出过图的材料，存的是「内容 key」（image_content_key）不是路径——
+    # 同一份扫描件在库里可能有两条记录、两个路径（见 image_content_key 的注释）
+    embedded_images: set[str] = set()
     # 法人身份证正反面路径，供「法定代表人授权委托书」按占位行插图（见
     # materials_injection._inject_id_card_scans）
     legal_rep_id_card_scans: dict = {}
@@ -1148,21 +1151,21 @@ async def export_bid(
         # Business license image — inline right after company info
         if cp.business_license_image and cp.business_license_image.strip():
             company_text_block += f"\n[IMG:{cp.business_license_image}|营业执照 — {cp.company_name or ''}]\n"
-            embedded_images.add(cp.business_license_image)
+            embedded_images.add(image_content_key(cp.business_license_image))
 
         # ID card images — side-by-side pair
         front = cp.legal_rep_id_front_image or ""
         back = cp.legal_rep_id_back_image or ""
         if front.strip() and back.strip():
             company_text_block += f"\n[IDPAIR:{front}|法定代表人身份证（正面）|{back}|法定代表人身份证（反面）]\n"
-            embedded_images.add(front)
-            embedded_images.add(back)
+            embedded_images.add(image_content_key(front))
+            embedded_images.add(image_content_key(back))
         elif front.strip():
             company_text_block += f"\n[IMG:{front}|法定代表人身份证（正面）]\n"
-            embedded_images.add(front)
+            embedded_images.add(image_content_key(front))
         elif back.strip():
             company_text_block += f"\n[IMG:{back}|法定代表人身份证（反面）]\n"
-            embedded_images.add(back)
+            embedded_images.add(image_content_key(back))
 
         # 同一对图另给「法定代表人授权委托书」用：那节的招标原文自带
         # 「身份证正面扫描件 / 身份证反面扫描件」占位行，注入函数按行插图
@@ -1174,6 +1177,12 @@ async def export_bid(
             legal_rep_id_card_scans["back_label"] = "法定代表人身份证（反面）"
 
     # ── Build structured qualification text block with inline images ──
+    # 先剔除「内容已经出过图」的材料：营业执照既是 company_profile 里的
+    # business_license_image，又可能是一条同名资质（各自一个存储路径、字节相同）。
+    # 不去重的话同一张执照会带着两个不同图注在正文里出现两次。
+    # 资质本身仍留在 qual_text_items 里——只少一张重复的图，清单文字不动。
+    qual_images = drop_already_embedded(qual_images, embedded_images)
+
     qual_text_block = ""
     if qual_text_items:
         qual_text_block = "\n\n资质证书清单\n\n"
@@ -1190,10 +1199,10 @@ async def export_bid(
                 qual_text_block += f"   有效期至：{q['expiry_date']}\n"
             if q['has_image']:
                 # Find the matching qual_image entry
+                # （qi 已按内容去过重；被剔掉的资质这里自然找不到 qi，只上图注文字）
                 for qi in qual_images:
                     if qi['label'].startswith(q['name']):
                         qual_text_block += f"\n[IMG:{qi['path']}|{qi['label']}]\n"
-                        embedded_images.add(qi['path'])
                         break
             qual_text_block += "\n"
 
@@ -1263,25 +1272,14 @@ async def export_bid(
             lines.append("")
         contract_text_block = "\n".join(lines)
 
-    # Flat contract images for chapters that don't get text injection
-    contract_images = []
-    for ct in contracts:
-        try:
-            img_paths = json.loads(ct.image_paths_json or "[]")
-        except Exception:
-            img_paths = []
-        for img_path in img_paths:
-            if img_path:
-                contract_images.append({"path": img_path, "label": f"{ct.project_name} — 合同"})
-
     # ── Only add images to chapter_images that weren't already embedded inline ──
-    remaining_images = [img for img in (company_images + qual_images)
-                        if img['path'] not in embedded_images]
+    # 合同图不走这条通道：contract_text_block 里每张合同自带 [IMG:] 标记，
+    # 再 extend 一遍就是同一张图出两次（原来 3 个命中章节 × 2 条通道 = 每张 6 次）。
+    remaining_images = drop_already_embedded(company_images + qual_images, embedded_images)
     all_qual_section_images = remaining_images
 
     # ── Inject company info + qualification text into the 资格审查部分 chapter ──
     # 使用抽出的辅助函数（含 fallback 兜底），避免关键词缺口导致材料丢失
-    from app.services.materials_injection import inject_materials_into_chapters
     inject_materials_into_chapters(
         chapters=chapters_payload,
         chapter_images=chapter_images,
@@ -1290,7 +1288,6 @@ async def export_bid(
         all_qual_section_images=all_qual_section_images,
         personnel_cert_images=personnel_cert_images,
         contract_text_block=contract_text_block,
-        contract_images=contract_images,
         legal_rep_id_card_scans=legal_rep_id_card_scans,
     )
 
