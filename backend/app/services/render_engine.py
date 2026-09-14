@@ -1335,8 +1335,17 @@ def _render_file_section_content(doc, content, style):
     """
     lines = content.split('\n')
     for line in lines:
-        # Strip markdown markers first so headings are detected on clean text
-        stripped = _clean_lone_symbols(line.strip())
+        raw = line.strip()
+
+        # 材料标记行出图（营业执照/法人身份证/资质/合同扫描件都走这里）。
+        # 必须在 _clean_lone_symbols 之前认：那条 markdown 斜体正则会把路径里
+        # 成对的单个下划线当强调剥掉（…/test_a_b/license.png → …/testab/…），
+        # 路径一改文件就找不到，图片静默丢弃——标记认的是原文，不是清洗后的字。
+        if _render_image_marker(doc, raw, style):
+            continue
+
+        # Strip markdown markers so headings are detected on clean text
+        stripped = _clean_lone_symbols(raw)
         if not stripped:
             # Blank line → empty paragraph spacer
             spacer = doc.add_paragraph()
@@ -1356,6 +1365,28 @@ def _render_file_section_content(doc, content, style):
             _set_run_font(run, style["heading2_font_name"], style["heading2_font_size"], bold=True)
         else:
             _add_body_paragraph(doc, stripped, style)
+
+
+def _render_image_marker(doc, line, style) -> bool:
+    """``[IMG:…]`` / ``[IDPAIR:…]`` 标记行就地出图；不是标记行返回 False.
+
+    两条渲染分支都要走这里：``_render_child_content``（AI 生成的正文）和
+    ``_render_file_section_content``（固定格式章节）。材料注入是把标记写进
+    章节正文的，而「投标人基本资料」「法定代表人授权委托书」这些正是固定格式
+    章节——只认前一条分支，注入的营业执照/法人身份证就整批丢失，标记本身还会
+    当正文打在标书上（一行 ``uploads/company/xxx.png`` 的字）。d01a0ac 修的
+    是同一类问题，但只补了前者。
+    """
+    if line.startswith("[IMG:") and line.endswith("]"):
+        img_path, _, img_label = line[len("[IMG:"):-1].partition("|")
+        _insert_image(doc, img_path, img_label, style)
+        return True
+    if line.startswith("[IDPAIR:") and line.endswith("]"):
+        parts = line[len("[IDPAIR:"):-1].split("|")
+        if len(parts) == 4:
+            _render_id_card_pair(doc, parts[0], parts[1], parts[2], parts[3], style)
+        return True
+    return False
 
 
 def _looks_like_file_section_heading(line):
@@ -1913,20 +1944,8 @@ def _render_child_content(doc, content, style, prefer_table=False):
             idx += 1
             continue
 
-        # ── Inline image marker: [IMG:path|label] ──
-        if stripped.startswith("[IMG:") and stripped.endswith("]"):
-            img_path, _, img_label = stripped[len("[IMG:"):-1].partition("|")
-            _insert_image(doc, img_path, img_label, style)
-            idx += 1
-            continue
-
-        # ── Side-by-side ID card pair: [IDPAIR:front|front_label|back|back_label] ──
-        if stripped.startswith("[IDPAIR:") and stripped.endswith("]"):
-            parts = stripped[len("[IDPAIR:"):-1].split("|")
-            if len(parts) == 4:
-                _render_id_card_pair(
-                    doc, parts[0], parts[1], parts[2], parts[3], style
-                )
+        # ── 材料图片标记：[IMG:path|label] / [IDPAIR:正|标签|反|标签] ──
+        if _render_image_marker(doc, stripped, style):
             idx += 1
             continue
 

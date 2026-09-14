@@ -8,6 +8,7 @@ Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,70 @@ def _has_images(images: list[dict]) -> bool:
     return bool(images)
 
 
+# ── 法定代表人身份证扫描件：按招标原文的占位行就地插图 ──
+# 招标文件自带「身份证正面扫描件」「身份证反面扫描件」这样的整行占位
+# （玉溪大红山 PDF 第 1732-1733 行），那一行的位置就是图片该出现的地方。
+# 「法定代表人授权委托书」既不命中下面任何关键词组，内容又是招标原文，
+# 所以只能靠原文自己说明插图位置。
+#
+# 必须**整行**匹配：句子里的「附：身份证、职称证（如有）…等扫描件。」同样
+# 含「身份证」+「扫描件」，但那是要项目负责人的证件，不是法人身份证的插图位；
+# 整行匹配天然把它排除。「身份证号码：」同理不含扫描件/复印件字样，不触发。
+_ID_SCAN_PLACEHOLDER_RE = re.compile(
+    r"^(?:法定代表人|授权委托人|授权代理人|委托代理人|本人|投标人|附[:：])?"
+    r"身份证(?:正面|反面|正反面)?"
+    r"(?:复印件|扫描件|影印件)?"
+    r"(?:粘贴处|复印件粘贴处|扫描件粘贴处)?$"
+)
+_ID_SCAN_STRIP_CHARS = "[]【】（）() \t　"
+
+
+def _is_id_scan_placeholder(line: str) -> bool:
+    """整行就是身份证扫描件占位标签（不是夹在句子里的提及）."""
+    s = (line or "").strip().strip(_ID_SCAN_STRIP_CHARS)
+    return bool(s) and bool(_ID_SCAN_PLACEHOLDER_RE.match(s))
+
+
+def _build_id_scan_marker(scans: dict | None) -> str:
+    """正反面都在 → 成对标记；只有一面 → 单张；都没有 → 空串（不动原文）."""
+    scans = scans or {}
+    front = str(scans.get("front_path") or "").strip()
+    back = str(scans.get("back_path") or "").strip()
+    front_label = str(scans.get("front_label") or "法定代表人身份证（正面）").strip()
+    back_label = str(scans.get("back_label") or "法定代表人身份证（反面）").strip()
+    if front and back:
+        return f"[IDPAIR:{front}|{front_label}|{back}|{back_label}]"
+    if front:
+        return f"[IMG:{front}|{front_label}]"
+    if back:
+        return f"[IMG:{back}|{back_label}]"
+    return ""
+
+
+def _inject_id_card_scans(chapters: list[dict], scans: dict | None) -> None:
+    """把身份证图标记插到占位行之后（最后一个占位行下面）."""
+    marker = _build_id_scan_marker(scans)
+    if not marker:
+        return
+    for ch in chapters:
+        content = ch.get("content") or ""
+        if not content:
+            continue
+        lines = content.split("\n")
+        anchor = None
+        for i, line in enumerate(lines):
+            if _is_id_scan_placeholder(line):
+                anchor = i
+        if anchor is None:
+            continue
+        lines.insert(anchor + 1, marker)
+        ch["content"] = "\n".join(lines)
+        logger.info(
+            "法定代表人身份证扫描件 injected after placeholder line in chapter: %s",
+            ch.get("title"),
+        )
+
+
 def inject_materials_into_chapters(
     chapters: list[dict],
     chapter_images: list[list[dict]],
@@ -52,6 +117,7 @@ def inject_materials_into_chapters(
     personnel_cert_images: list[dict],
     contract_text_block: str,
     contract_images: list[dict],
+    legal_rep_id_card_scans: dict | None = None,
 ) -> None:
     """将公司资料/资质证书/人员证书/历史合同注入到对应章节.
 
@@ -59,16 +125,23 @@ def inject_materials_into_chapters(
       - QUAL 关键词命中 → 公司信息 + 资质证书 文本 prepend，资质图片 inline
       - PERSONNEL 关键词命中 → 人员证书图片 inline
       - CONTRACT 关键词命中 → 合同文本 append + 合同图片 inline
+      - 法人身份证扫描件 → 插到章节里「身份证正/反面扫描件」占位行之后
+      （内容驱动，不看章节标题——「法定代表人授权委托书」不命中任何关键词）
     Fallback（任一未命中）：
       - 挂到最后一章，保证材料不丢失
 
     Args:
         chapters: ``[{"title": str, "content": str}, ...]``，就地修改 content。
         chapter_images: 与 chapters 等长的图片列表（每章一个），就地 extend。
+        legal_rep_id_card_scans: ``{"front_path", "front_label", "back_path",
+            "back_label"}``（只有存在的面才给键），来自 company_profile。
         其余参数：来自资料库（CompanyProfile / Qualification / PersonnelCert / ProjectContract）。
     """
     if not chapters:
         return
+
+    # 身份证扫描件走内容驱动，与下面的关键词匹配互不影响
+    _inject_id_card_scans(chapters, legal_rep_id_card_scans)
 
     qual_payload_text = (company_text_block or "") + (qual_text_block or "")
     has_qual = _has_content(qual_payload_text) or _has_images(all_qual_section_images)

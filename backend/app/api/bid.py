@@ -1125,6 +1125,9 @@ async def export_bid(
     # ── Build structured company info text block with inline images ──
     company_text_block = ""
     embedded_images = set()  # track (path, label) of images already embedded inline
+    # 法人身份证正反面路径，供「法定代表人授权委托书」按占位行插图（见
+    # materials_injection._inject_id_card_scans）
+    legal_rep_id_card_scans: dict = {}
     if cp:
         cp_parts = []
         if cp.company_name:
@@ -1160,6 +1163,15 @@ async def export_bid(
         elif back.strip():
             company_text_block += f"\n[IMG:{back}|法定代表人身份证（反面）]\n"
             embedded_images.add(back)
+
+        # 同一对图另给「法定代表人授权委托书」用：那节的招标原文自带
+        # 「身份证正面扫描件 / 身份证反面扫描件」占位行，注入函数按行插图
+        if front.strip():
+            legal_rep_id_card_scans["front_path"] = front
+            legal_rep_id_card_scans["front_label"] = "法定代表人身份证（正面）"
+        if back.strip():
+            legal_rep_id_card_scans["back_path"] = back
+            legal_rep_id_card_scans["back_label"] = "法定代表人身份证（反面）"
 
     # ── Build structured qualification text block with inline images ──
     qual_text_block = ""
@@ -1279,6 +1291,7 @@ async def export_bid(
         personnel_cert_images=personnel_cert_images,
         contract_text_block=contract_text_block,
         contract_images=contract_images,
+        legal_rep_id_card_scans=legal_rep_id_card_scans,
     )
 
     # -- Read format_template from project --

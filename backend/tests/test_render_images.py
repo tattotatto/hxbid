@@ -99,6 +99,80 @@ def test_idpair_marker_embeds_two_images(tmp_path):
 
 # ── Robustness ───────────────────────────────────────────────────────────
 
+# ── 固定格式章节（_render_file_section_content）同样吃标记 ────────────────
+# 固定格式章节走的是另一条渲染分支：不做 markdown 解析、逐行当正文出。
+# 「投标人基本资料」「法定代表人授权委托书」这类章节恰恰是材料的落点，
+# 标号却只有 _render_child_content 认——注入的 [IMG:]/[IDPAIR:] 会被当成
+# 正文原样打进标书（用户看到的是一行 uploads/company/xxx.png 的字）。
+
+def test_img_marker_embeds_image_in_fixed_form_section(tmp_path):
+    img = _make_png(tmp_path)
+    doc = Document()
+
+    render_engine._render_file_section_content(
+        doc, f"投标人基本情况表\n[IMG:{img}|营业执照]\n", STYLE
+    )
+
+    assert _image_count(doc) == 1
+
+
+def test_img_marker_does_not_leak_as_text_in_fixed_form_section(tmp_path):
+    img = _make_png(tmp_path)
+    doc = Document()
+
+    render_engine._render_file_section_content(
+        doc, f"[IMG:{img}|营业执照]\n", STYLE
+    )
+
+    assert not any("[IMG:" in t for t in _all_text(doc))
+
+
+def test_idpair_marker_embeds_two_images_in_fixed_form_section(tmp_path):
+    """法定代表人授权委托书末尾的身份证正反面：成对的 [IDPAIR:] 要出两张图."""
+    front = _make_png(tmp_path, "front.png")
+    back = _make_png(tmp_path, "back.png")
+    doc = Document()
+    content = (
+        "法定代表人授权委托书\n"
+        "本人 （姓名）系 （投标人名称）的法定代表人。\n"
+        "年 月 日\n"
+        "身份证正面扫描件\n"
+        "身份证反面扫描件\n"
+        f"[IDPAIR:{front}|法定代表人身份证（正面）|{back}|法定代表人身份证（反面）]\n"
+    )
+
+    render_engine._render_file_section_content(doc, content, STYLE)
+
+    assert _image_count(doc) == 2
+    assert not any("[IDPAIR:" in t for t in _all_text(doc))
+    # 原始措辞照旧出
+    assert any("身份证正面扫描件" in t for t in _all_text(doc))
+
+
+def test_marker_path_with_underscores_survives_markdown_cleaning(tmp_path):
+    """路径里的成对单下划线不得被 markdown 斜体正则剥掉。
+
+    固定格式章节先清洗 markdown 再认标记，而 `_clean_lone_symbols` 的斜体正则
+    `(?<!_)_(?!_)(.+?)(?<!_)_(?!_)` 会把 `…/test_a_b/license.png` 里的两个
+    下划线当 `_强调_` 剥掉，路径变成 `…/testab/license.png`——文件找不到，
+    图片静默丢弃。真实素材路径（`uploads/company/legal_rep_id_front.png` 这类
+    多段下划线文件名）就会踩中。
+    """
+    sub = tmp_path / "legal_rep_front_scan"
+    sub.mkdir()
+    img = PILImage.new("RGB", (60, 40), (200, 30, 30))
+    img.save(sub / "id_card_front.png")
+    doc = Document()
+
+    render_engine._render_file_section_content(
+        doc,
+        f"投标人基本情况表\n[IMG:{sub / 'id_card_front.png'}|营业执照]\n",
+        STYLE,
+    )
+
+    assert _image_count(doc) == 1
+
+
 def test_missing_image_file_is_skipped_without_error(tmp_path):
     """A marker pointing at a missing file must not crash the export."""
     doc = Document()

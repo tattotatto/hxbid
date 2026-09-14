@@ -259,3 +259,126 @@ class TestInjectMaterialsIntoChapters:
         # CONTRACT fallback 到最后一章节（服务方案）
         assert contract_block in chapters[-1]["content"]
         assert images[-1] == contract_imgs
+
+# ── 法定代表人身份证扫描件：按招标原文的占位行就地插图 ────────────────────
+# 用户反馈：「法定代表人授权委托书页面下面需要身份证正面扫描件 身份证反面
+# 扫描件，没有插入」。招标原文（玉溪大红山 PDF 第 1732-1733 行）自带
+# 「身份证正面扫描件」「身份证反面扫描件」两行占位——那两行就是插图位置。
+# 授权委托书 既不命中 QUAL/PERSONNEL/CONTRACT 任何关键词，fixed_form 分支
+# 又没有图片标记入口，两处缺口叠加 → 图片从未出现。
+
+ID_SCANS = {
+    "front_path": "uploads/company/front.png",
+    "front_label": "法定代表人身份证（正面）",
+    "back_path": "uploads/company/back.png",
+    "back_label": "法定代表人身份证（反面）",
+}
+
+
+def _inject_with_id_scans(chapters, images, id_scans):
+    inject_materials_into_chapters(
+        chapters=chapters,
+        chapter_images=images,
+        company_text_block="",
+        qual_text_block="",
+        all_qual_section_images=[],
+        personnel_cert_images=[],
+        contract_text_block="",
+        contract_images=[],
+        legal_rep_id_card_scans=id_scans,
+    )
+
+
+class TestLegalRepIdCardScans:
+    """招标原文的「身份证正/反面扫描件」占位行必须就地变成真的图片标记."""
+
+    def test_pair_marker_inserted_after_the_placeholder_lines(self):
+        chapters, images = _payload(["法定代表人授权委托书"])
+        chapters[0]["content"] = (
+            "本人 陈涛系 XX公司的法定代表人。\n"
+            "年 月 日\n"
+            "身份证正面扫描件\n"
+            "身份证反面扫描件\n"
+        )
+
+        _inject_with_id_scans(chapters, images, ID_SCANS)
+
+        content = chapters[0]["content"]
+        assert "[IDPAIR:" in content
+        # 两张图成对，且落在占位行之后（图片要出现在那两行下面）
+        assert content.index("[IDPAIR:") > content.index("身份证反面扫描件")
+
+    def test_pair_marker_pairs_front_with_back(self):
+        chapters, images = _payload(["法定代表人授权委托书"])
+        chapters[0]["content"] = "身份证正面扫描件\n身份证反面扫描件"
+
+        _inject_with_id_scans(chapters, images, ID_SCANS)
+
+        assert (
+            "[IDPAIR:uploads/company/front.png|法定代表人身份证（正面）"
+            "|uploads/company/back.png|法定代表人身份证（反面）]"
+            in chapters[0]["content"]
+        )
+
+    def test_身份证号码_lines_do_not_trigger(self):
+        """「身份证号码：」不是扫描件占位——不得在那里插图."""
+        chapters, images = _payload(["法定代表人授权委托书"])
+        original = "法定代表人：\n身份证号码：\n授权委托人：\n身份证号码：\n"
+        chapters[0]["content"] = original
+
+        _inject_with_id_scans(chapters, images, ID_SCANS)
+
+        assert chapters[0]["content"] == original
+
+    def test_prose_mentioning_id_scans_does_not_trigger(self):
+        """夹在句子里的「身份证…扫描件」不是占位行，不得触发."""
+        chapters, images = _payload(["项目人员配置"])
+        original = "附：身份证、职称证（如有）、执业证书（如有）等扫描件。\n"
+        chapters[0]["content"] = original
+
+        _inject_with_id_scans(chapters, images, ID_SCANS)
+
+        assert chapters[0]["content"] == original
+
+    def test_paste_placeholder_line_triggers(self):
+        """另一份标书的写法：「[身份证复印件粘贴处]」."""
+        chapters, images = _payload(["法定代表人授权委托书"])
+        chapters[0]["content"] = "附：授权代理人身份证复印件\n\n[身份证复印件粘贴处]\n"
+
+        _inject_with_id_scans(chapters, images, ID_SCANS)
+
+        assert "[IDPAIR:" in chapters[0]["content"]
+
+    def test_single_side_scan_uses_img_marker(self):
+        """只有正面时出单张图，不拼半拉子的 IDPAIR."""
+        chapters, images = _payload(["法定代表人授权委托书"])
+        chapters[0]["content"] = "身份证正面扫描件\n"
+
+        _inject_with_id_scans(
+            chapters, images, {"front_path": "uploads/company/front.png",
+                               "front_label": "法定代表人身份证（正面）"}
+        )
+
+        content = chapters[0]["content"]
+        assert "[IDPAIR:" not in content
+        assert "[IMG:uploads/company/front.png|法定代表人身份证（正面）]" in content
+
+    def test_placeholder_without_scans_leaves_content_untouched(self):
+        """资料库里没传身份证 → 原文原样留着，不写空标记."""
+        chapters, images = _payload(["法定代表人授权委托书"])
+        original = "身份证正面扫描件\n身份证反面扫描件\n"
+        chapters[0]["content"] = original
+
+        _inject_with_id_scans(chapters, images, {})
+
+        assert chapters[0]["content"] == original
+
+    def test_scans_do_not_leak_into_unrelated_chapters(self):
+        """占位行只出现在授权委托书里——别的章节不得被塞图."""
+        chapters, images = _payload(["法定代表人授权委托书", "服务方案"])
+        chapters[0]["content"] = "身份证正面扫描件\n身份证反面扫描件\n"
+        chapters[1]["content"] = "服务方案正文，无占位。"
+
+        _inject_with_id_scans(chapters, images, ID_SCANS)
+
+        assert "[IDPAIR:" not in chapters[1]["content"]
