@@ -11,6 +11,7 @@ them to proper Word formatting (headings, bold, italic, bullets, tables).
 """
 
 import hashlib
+import html
 import logging
 import re
 import time
@@ -889,6 +890,56 @@ def _render_table(doc, rows, style, is_first_row_header=True):
 
 # ── Content preprocessing ─────────────────────────────────────────────
 
+# ── 编辑器存进来的 HTML → 渲染器认的按行纯文本 ──
+# BidEditor 保存的是 editor.getHTML()，而本模块全程按 "\n" 切行排版，且不认任何
+# HTML。编辑器 HTML 里一个换行都没有，于是编辑过的章节整章塌成一行、标签原样印进
+# 文档（真实案例：投标函导出成 "一、投标函<p>二、投标函<br>投标函<br>致：…"）。
+# TreeEditor 重建章节时存的是纯文本，所以只有走 BidEditor 的章节会中招——同一个
+# final_content 字段混着两种表示，归一化只能放在渲染这个共同出口。
+_HTML_BLOCK_TAGS = frozenset({
+    "p", "br", "div", "span", "strong", "em", "ul", "ol", "li",
+    "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "td", "th",
+    "blockquote", "font", "sub", "sup",
+})
+_HTML_TAG_RE = re.compile(r"<\s*/?\s*([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>")
+
+
+def _looks_like_html(content: str) -> bool:
+    """正文是否真的是 HTML（而不是恰好含 ``<`` ``>`` 的普通文本）.
+
+    只认已知标签名：``报价 <5 家`` 里 ``<`` 后面不是字母，``本项目 <5 人`` 同理，
+    都不会命中；``a < b > c`` 这种要命中得凑出 ``<b>``，故自带 ``b``/``i``/``a``
+    这类单字母标签**不在**集合里（TipTap 的加粗/斜体是 ``<strong>``/``<em>``）。
+    """
+    return any(m.group(1).lower() in _HTML_BLOCK_TAGS
+               for m in _HTML_TAG_RE.finditer(content))
+
+
+def normalize_editor_html(content: str) -> str:
+    """把编辑器 HTML 折成按行纯文本；不是 HTML 就原样返回.
+
+    ``<br>`` 是软换行，正好对上渲染器「一行一段」的粒度；块级闭合标签补一个换行，
+    其余标签（含 ``<p>`` 开标签）直接吃掉。实体还原（TipTap 把用户打的 ``<`` 存成
+    ``&lt;``，不还原就会在文档里显示成 ``&lt;``）。
+    """
+    if not content or not _looks_like_html(content):
+        return content
+
+    def _replace(match: re.Match) -> str:
+        name = match.group(1).lower()
+        if name == "br":
+            return "\n"
+        # 闭合块级标签 = 段落到此为止；开标签不额外补行，避免行首空段
+        is_closing = match.group(0).lstrip().startswith("</")
+        return "\n" if (is_closing and name in _HTML_BLOCK_TAGS) else ""
+
+    text = _HTML_TAG_RE.sub(_replace, content)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip("\n")
+
+
 def _preprocess_content(content):
     """Clean up AI-generated content before rendering.
 
@@ -1472,6 +1523,14 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     style = dict(DEFAULT_STYLE)
     if style_config:
         style.update(style_config)
+
+    # ── 归一化章节正文：编辑器存的是 HTML，本模块只认按行纯文本 ──
+    # 放在这里（而不是各渲染分支里）是因为 legacy / strict 两条路径都从这批 dict
+    # 取内容，一处覆盖全；也因为是按索引复制，chapter_images 的下标对齐不受影响。
+    chapters = [
+        {**ch, "content": normalize_editor_html(ch.get("content") or "")}
+        for ch in chapters
+    ]
 
     strict_mode = bool(
         format_template and format_template.get("document_structure")
