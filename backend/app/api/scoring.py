@@ -17,6 +17,7 @@ from app.database import get_db
 from app.models.project import BidProject
 from app.models.user import User
 from app.services.ai_adapter import ai_adapter
+from app.services.render_engine import normalize_editor_html
 from app.services.score_engine import run_scoring
 from app.services.scoring_rubric import extract_rubric, normalize_rubric, validate_rubric
 from app.utils.security import get_current_user
@@ -100,6 +101,39 @@ async def update_scoring_rubric(
     return {"rubric": rubric, "problems": problems}
 
 
+def _chapter_text_for_ai(chapter) -> str:
+    """章节正文喂给 AI 前取哪一份（判卷与自动修改共用）.
+
+    ``final_content`` 里可能是 BidEditor 存的 HTML（见 render_engine
+    ``normalize_editor_html`` 的说明），不归一化就会把标签当正文判卷、甚至
+    在自动修改时把标签复述回写。
+    """
+    return normalize_editor_html(chapter.final_content or chapter.ai_generated_content or "")
+
+
+def _build_scoring_inputs(chapters) -> list[dict]:
+    """把章节转成判卷输入：正文 + 小节标题（与导出同一份顺序）."""
+    out = []
+    for ch in sorted(chapters, key=lambda c: c.order_index):
+        content = _chapter_text_for_ai(ch)
+        try:
+            children = json.loads(ch.children_json or "[]")
+        except json.JSONDecodeError:
+            children = []
+        titles: list[str] = []
+
+        def _walk(nodes):
+            for n in nodes or []:
+                titles.append(str(n.get("title") or ""))
+                _walk(n.get("children"))
+
+        _walk(children)
+        if titles:
+            content = f"{content}\n\n小节：\n" + "\n".join(titles)
+        out.append({"title": ch.title, "content": content})
+    return out
+
+
 @router.post("/{project_id}/score")
 async def rescore_project(
     project_id: str,
@@ -126,26 +160,7 @@ async def rescore_project(
             detail="该项目未检测到可用评分指标（状态 none），请先粘贴/编辑评分办法",
         )
 
-    def _load_chapters() -> list[dict]:
-        out = []
-        for ch in sorted(project.chapters, key=lambda c: c.order_index):
-            content = ch.final_content or ch.ai_generated_content or ""
-            try:
-                children = json.loads(ch.children_json or "[]")
-            except json.JSONDecodeError:
-                children = []
-            titles: list[str] = []
-            def _walk(nodes):
-                for n in nodes or []:
-                    titles.append(str(n.get("title") or ""))
-                    _walk(n.get("children"))
-            _walk(children)
-            if titles:
-                content = f"{content}\n\n小节：\n" + "\n".join(titles)
-            out.append({"title": ch.title, "content": content})
-        return out
-
-    report = await run_scoring(rubric, _load_chapters(), ai_adapter)
+    report = await run_scoring(rubric, _build_scoring_inputs(project.chapters), ai_adapter)
     project.scoring_report_json = json.dumps(report, ensure_ascii=False)
     await db.commit()
     return report
@@ -244,7 +259,7 @@ async def auto_fix_scoring_item(
             chapter_title=str(chapter.title or ""),
             chapter_type=str(chapter.chapter_type or ""),
             children_json=chapter.children_json or "[]",
-            chapter_content=chapter.final_content or chapter.ai_generated_content or "",
+            chapter_content=_chapter_text_for_ai(chapter),
             report_item=report_item,
             rubric_item=rubric_item,
             materials_guidance=materials_guidance,

@@ -209,7 +209,8 @@ async def apply_auto_fix(
     """按评分意见改写目标小节.
 
     Args:
-        chapter_content: 章节现有正文（调用方传 ``final_content or ai_generated_content``）
+        chapter_content: 章节现有正文（调用方传 ``final_content or ai_generated_content``
+            并已归一化为按行纯文本，见 ``scoring._chapter_text_for_ai``）
         report_item: 评分报告项（含 gap / suggestion）
         rubric_item: 评分指标项（含 name / key_terms / criteria）
 
