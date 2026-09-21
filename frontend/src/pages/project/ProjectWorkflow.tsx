@@ -841,11 +841,19 @@ export default function ProjectWorkflow() {
         format === 'docx'
           ? [docx_url, checklist_docx_url]
           : [pdf_url, checklist_pdf_url]
-      urls.forEach((u: string) => {
-        if (u) triggerDownload(u)
-      })
+      const downloaded = urls.filter((u: string) => Boolean(u))
+      downloaded.forEach(triggerDownload)
 
-      message.success('导出成功')
+      if (downloaded.length === 0) {
+        // 服务端 URL 为空串 = 那一步渲染失败但没抛错：export_to_pdf 在容器内
+        // LibreOffice 挂掉/超时时返回 None，接口照样 200。不区分的话这个按钮
+        // 点了什么都不下，却报「导出成功」，用户只会以为是自己没找到文件。
+        message.warning(
+          `导出完成，但服务端没有产出可下载的${format === 'docx' ? ' Word ' : ' PDF '}文件，请检查服务端渲染是否正常`,
+        )
+      } else {
+        message.success('导出成功')
+      }
       // Refresh project to update status to exported
       await fetchProject()
     } catch {
