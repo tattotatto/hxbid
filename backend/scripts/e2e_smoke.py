@@ -759,6 +759,26 @@ async def main() -> int:
                 ck_pdf_resp = await client.get(_norm(ck_pdf_url), headers=headers)
                 checks.append(("检查清单 PDF 可下载", ck_pdf_resp.status_code == 200
                                and len(ck_pdf_resp.content) > 1000))
+
+            # ---- 导出格式分离契约（前端「导出 Word」/「导出 PDF」两个按钮）----
+            # 前端「导出 Word」传 format='docx'，此时两个 pdf url 必须是空串 ——
+            # 否则后端仍把 PDF 一起吐出来，前端拆分下载就白拆了；
+            # 反向也顺带断言 docx url 照样有（docx 是 PDF 的渲染源，'pdf' 时也不该为空）。
+            word_resp = await client.post(
+                f"{API_BASE}/bid/export",
+                headers=headers,
+                json={"project_id": project_id, "format": "docx",
+                      "include_checklist": True},
+            )
+            word_resp.raise_for_status()
+            word_data = word_resp.json()
+            checks.append(("format=docx 仍含 docx_url", bool(word_data.get("docx_url"))))
+            checks.append(("format=docx 含 checklist_docx_url",
+                           bool(word_data.get("checklist_docx_url"))))
+            checks.append(("format=docx 的 pdf_url 为空（不白转 PDF）",
+                           word_data.get("pdf_url", "") == ""))
+            checks.append(("format=docx 的 checklist_pdf_url 为空（不白转 PDF）",
+                           word_data.get("checklist_pdf_url", "") == ""))
     except Exception as exc:
         print(f"  ⚠️  docx 校验异常: {exc}")
         import traceback

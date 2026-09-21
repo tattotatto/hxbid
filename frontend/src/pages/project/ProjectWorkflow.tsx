@@ -808,13 +808,15 @@ export default function ProjectWorkflow() {
     setCustomRows((p) => [...p, { key: `custom-${++checklistCustomRowSeq}`, label: v }])
   }
 
-  const handleExport = async () => {
+  // 导出按格式分开：Word 与 PDF 各自独立触发，一次点击只下载自己那一对文件。
+  // 后端 format 参数本来就支持 'docx' | 'pdf' | 'both'，这里不再写死 'both'。
+  const handleExport = async (format: 'docx' | 'pdf') => {
     if (!id) return
     setExporting(true)
     try {
       const res = await client.post('/bid/export', {
         project_id: id,
-        format: 'both',
+        format,
         template_id: selectedTemplateId,
         include_checklist: includeChecklist,
         checklist_items: customRows.map((r) => ({ key: r.key, label: r.label }))
@@ -833,18 +835,15 @@ export default function ProjectWorkflow() {
         document.body.removeChild(a)
       }
 
-      if (docx_url) {
-        triggerDownload(docx_url)
-      }
-      if (pdf_url) {
-        triggerDownload(pdf_url)
-      }
-      if (checklist_docx_url) {
-        triggerDownload(checklist_docx_url)
-      }
-      if (checklist_pdf_url) {
-        triggerDownload(checklist_pdf_url)
-      }
+      // 只下载本次格式对应的那一对：Word 按钮拿 docx，PDF 按钮拿 pdf。
+      // 另一种格式的 URL 后端照样会返回（docx 是 PDF 的渲染源），这里一律忽略。
+      const urls =
+        format === 'docx'
+          ? [docx_url, checklist_docx_url]
+          : [pdf_url, checklist_pdf_url]
+      urls.forEach((u: string) => {
+        if (u) triggerDownload(u)
+      })
 
       message.success('导出成功')
       // Refresh project to update status to exported
@@ -1078,9 +1077,17 @@ export default function ProjectWorkflow() {
             icon={<DownloadOutlined />}
             loading={exporting}
             disabled={!hasChapters || generating || retrying}
-            onClick={handleExport}
+            onClick={() => handleExport('docx')}
           >
-            导出 Word + PDF
+            导出 Word
+          </Button>
+          <Button
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            disabled={!hasChapters || generating || retrying}
+            onClick={() => handleExport('pdf')}
+          >
+            导出 PDF
           </Button>
           <Button
             icon={<ExperimentOutlined />}
