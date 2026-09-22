@@ -10,7 +10,7 @@ import {
   DeleteOutlined,
 } from '@ant-design/icons'
 import client from '../../api/client'
-import QualificationPickerModal from './QualificationPickerModal'
+import QualificationPickerModal, { PickerMode, PickerSelection } from './QualificationPickerModal'
 import QuickPersonnelForm from './QuickPersonnelForm'
 import QuickQualificationUpload from './QuickQualificationUpload'
 
@@ -40,6 +40,18 @@ interface Props {
   onComplete: () => void
 }
 
+// 「资质与证件」行资质/合同/人员三路都能挂、后端也都会回显，所以 tab 不设限。
+// 「人员配置」行只给人员——资质/合同挂到岗位名下没有任何行会显示它（后端按 role
+// 取人员、按 requirement_name 取文档，两个键对不上）。
+const DOC_ROW_MODES: PickerMode[] = [
+  'qualification', 'contract', 'personnel', 'history_bid', 'company',
+]
+const PERSONNEL_ROW_MODES: PickerMode[] = ['personnel', 'history_bid', 'company']
+
+// 标签上标出资源类型：一行里可能同时混挂三类，只靠名字分不清。
+// 资质是这个卡片的默认预期，不加后缀。
+const SOURCE_SUFFIX: Record<string, string> = { contract: '合同', personnel: '人员' }
+
 export default function CollectionStep({ projectId, onComplete }: Props) {
   const [data, setData] = useState<CollectionData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -48,7 +60,8 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
   // Modal state
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerReq, setPickerReq] = useState('')
-  const [pickerDefaultMode, setPickerDefaultMode] = useState<'qualification' | 'personnel' | 'contract' | 'history_bid' | 'company'>('qualification')
+  const [pickerDefaultMode, setPickerDefaultMode] = useState<PickerMode>('qualification')
+  const [pickerAllowedModes, setPickerAllowedModes] = useState<PickerMode[]>(DOC_ROW_MODES)
   const [quickPersonnelOpen, setQuickPersonnelOpen] = useState(false)
   const [quickPersonnelRole, setQuickPersonnelRole] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
@@ -75,32 +88,32 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
 
   // ── Actions ──
 
-  const handleLinkQuals = async (quals: any[], reqName: string) => {
+  // 一次确认可能同时带回资质 + 合同 + 人员（跨分类混选），逐类落库后统一刷新一次。
+  // 失败时不再逐条提示——整批走同一个 try，避免混选下一半成功一半失败看不出。
+  const handleConfirmSelection = async (picks: PickerSelection) => {
+    const { qualifications, contracts, personnel } = picks
     try {
-      for (const q of quals) {
+      for (const q of qualifications) {
         await client.post(`/collection/${projectId}/qualification/link`, {
           qualification_id: q.id,
-          requirement_name: reqName,
+          requirement_name: pickerReq,
         })
       }
-      message.success(`已关联 ${quals.length} 项资质`)
-      setPickerOpen(false)
-      fetchStatus()
-    } catch {
-      message.error('关联失败')
-    }
-  }
-
-  // Batch link contracts
-  const handleLinkContracts = async (contracts: any[], reqName: string) => {
-    try {
       for (const c of contracts) {
         await client.post(`/collection/${projectId}/contract/link`, {
           contract_id: c.id,
-          requirement_name: reqName,
+          requirement_name: pickerReq,
         })
       }
-      message.success(`已关联 ${contracts.length} 份合同`)
+      for (const p of personnel) {
+        await client.post(`/collection/${projectId}/personnel/assign`, {
+          personnel_id: p.id,
+          role: pickerReq,
+          requirement_desc: pickerReq,
+        })
+      }
+      const total = qualifications.length + contracts.length + personnel.length
+      message.success(`已关联 ${total} 项资源`)
       setPickerOpen(false)
       fetchStatus()
     } catch {
@@ -153,12 +166,15 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
     }
   }
 
-  // 移除某条匹配（人员走 unassign，合同/资质走 unlink）
+  // 移除某条匹配。按 match 自己的 source 分派接口——一行里可能混挂资质/合同/人员，
+  // 按「行的 category」分派会走错：业绩类需求的 category 实际是 other（parse 侧从
+  // 不产出 contract_performance），合同标签会落到 qualification/unlink 上，而它按
+  // qualification_id 过滤，永远匹配不到 contract_id —— 表现为 × 点了没反应、也不报错。
   const removeMatch = async (item: ResourceMatch, m: any) => {
     try {
-      if (item.requirement.category === 'personnel') {
+      if (m.source === 'personnel') {
         await client.post(`/collection/${projectId}/personnel/unassign`, { assignment_id: m.link_id })
-      } else if (item.requirement.category === 'contract_performance') {
+      } else if (m.source === 'contract') {
         await client.post(`/collection/${projectId}/contract/unlink`, { requirement_name: item.requirement.name, resource_id: m.id })
       } else {
         await client.post(`/collection/${projectId}/qualification/unlink`, { requirement_name: item.requirement.name, resource_id: m.id })
@@ -177,6 +193,30 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
     if (s === 'auto') return { text: '自动匹配', color: 'blue', icon: <LinkOutlined /> }
     if (s === 'matched') return { text: '候选', color: 'orange', icon: <LinkOutlined /> }
     return { text: '待处理', color: 'red', icon: <CloseCircleOutlined /> }
+  }
+
+  // 一行里可能混挂资质/合同/人员，所以标签上标出类型（资质是这卡片的默认预期，不加后缀）
+  const renderMatchTags = (item: ResourceMatch) => {
+    if (item.matches.length === 0) return null
+    return (
+      <div style={{ marginTop: 4 }}>
+        {item.matches.map((m: any, i: number) => (
+          <Tag
+            key={m.link_id || m.id || i}
+            closable={!!m.link_id}
+            color={m.selection === 'auto' ? 'blue' : 'green'}
+            onClose={async (e) => {
+              e.preventDefault()
+              await removeMatch(item, m)
+            }}
+          >
+            {m.name}
+            {SOURCE_SUFFIX[m.source] ? `（${SOURCE_SUFFIX[m.source]}）` : ''}
+            {m.selection === 'auto' ? '（自动）' : ''}
+          </Tag>
+        ))}
+      </div>
+    )
   }
 
   // ── Stats ──
@@ -240,6 +280,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                           icon={<LinkOutlined />}
                           onClick={() => {
                             setPickerReq(item.requirement.name)
+                            setPickerAllowedModes(DOC_ROW_MODES)
                             // parse 侧业绩类需求实际落 category=other（合同/业绩关键词识别），
                             // 与后端 _is_performance_requirement 同口径，否则默认打开资质选择器
                             setPickerDefaultMode(
@@ -265,26 +306,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                       </span>
                     }
                     description={
-                      <span>
-                        {item.matches.length > 0 && (
-                          <div style={{ marginTop: 4 }}>
-                            {item.matches.map((m: any, i: number) => (
-                              <Tag
-                                key={m.link_id || m.id || i}
-                                closable={!!m.link_id}
-                                color={m.selection === 'auto' ? 'blue' : 'green'}
-                                onClose={async (e) => {
-                                  e.preventDefault()
-                                  await removeMatch(item, m)
-                                }}
-                              >
-                                {m.name}
-                                {m.selection === 'auto' ? '（自动）' : ''}
-                              </Tag>
-                            ))}
-                          </div>
-                        )}
-                      </span>
+                      <span>{renderMatchTags(item)}</span>
                     }
                   />
                 </List.Item>
@@ -317,6 +339,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                           icon={<UserAddOutlined />}
                           onClick={() => {
                             setPickerReq(item.requirement.name)
+                            setPickerAllowedModes(PERSONNEL_ROW_MODES)
                             setPickerDefaultMode('personnel')
                             setPickerOpen(true)
                           }}
@@ -345,26 +368,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                       </span>
                     }
                     description={
-                      <span>
-                        {item.matches.length > 0 && (
-                          <div style={{ marginTop: 4 }}>
-                            {item.matches.map((m: any, i: number) => (
-                              <Tag
-                                key={m.link_id || m.id || i}
-                                closable={!!m.link_id}
-                                color={m.selection === 'auto' ? 'blue' : 'green'}
-                                onClose={async (e) => {
-                                  e.preventDefault()
-                                  await removeMatch(item, m)
-                                }}
-                              >
-                                {m.name}
-                                {m.selection === 'auto' ? '（自动）' : ''}
-                              </Tag>
-                            ))}
-                          </div>
-                        )}
-                      </span>
+                      <span>{renderMatchTags(item)}</span>
                     }
                   />
                 </List.Item>
@@ -430,10 +434,9 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         open={pickerOpen}
         requirementName={pickerReq}
         defaultMode={pickerDefaultMode}
+        allowedModes={pickerAllowedModes}
         onCancel={() => setPickerOpen(false)}
-        onSelectQuals={(list) => handleLinkQuals(list, pickerReq)}
-        onSelectPersonnel={(list) => handleAssignPersonnelList(list, pickerReq)}
-        onSelectContract={(list) => handleLinkContracts(list, pickerReq)}
+        onConfirmSelection={handleConfirmSelection}
         onSelectHistoryBid={(bid) => {
           message.info(`已选择历史投标「${bid.name}」作为参考`)
           setPickerOpen(false)

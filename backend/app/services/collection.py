@@ -43,6 +43,68 @@ def _is_performance_requirement(name: str, category: str) -> bool:
     return any(k in name for k in _PERFORMANCE_KEYWORDS)
 
 
+def _persisted_matches_for(
+    name: str,
+    pq_rows: List[Any],
+    pc_rows: List[Any],
+    pp_rows: List[Any],
+) -> List[Dict[str, Any]]:
+    """汇总挂在某需求名下的全部已落库资源——资质 / 合同 / 人员三路混合.
+
+    历史上每个需求只取「对应那一类」（业绩行取合同、其余行只取资质、人员行只按
+    role 取）。用户从资源库把另一类挂到这一行时，数据落了库却在信息搜集页面读不
+    回来——看不见就等于以为没挂上。
+
+    顺序固定为 资质 → 合同 → 人员，前端标签顺序才稳定。
+
+    人员是按 ``role`` 存需求名的（``/personnel/assign`` 的 role 即需求名），文档行
+    挂人员落的也是这个字段，所以这里用 ``pp.role`` 比对，不另开一列。
+    """
+    out: List[Dict[str, Any]] = []
+
+    for pq in pq_rows:
+        if pq.requirement_name != name:
+            continue
+        out.append({
+            "source": "qualification", "selection": "selected",
+            "id": pq.qualification_id, "link_id": pq.id,
+            "name": pq.qualification.name if pq.qualification else pq.requirement_name,
+            "cert_number": pq.qualification.cert_number if pq.qualification else "",
+            "issuing_authority": (
+                pq.qualification.issuing_authority if pq.qualification else ""
+            ),
+        })
+
+    for pc in pc_rows:
+        if pc.requirement_name != name:
+            continue
+        out.append({
+            "source": "contract", "selection": "selected",
+            "id": pc.contract_id, "link_id": pc.id,
+            "name": pc.contract.project_name if pc.contract else pc.requirement_name,
+            "procurement_unit": pc.contract.procurement_unit if pc.contract else "",
+            "contract_amount": pc.contract.contract_amount if pc.contract else "",
+            "contract_date": (
+                str(pc.contract.contract_date)
+                if pc.contract and pc.contract.contract_date else ""
+            ),
+        })
+
+    for pp in pp_rows:
+        if pp.role != name:
+            continue
+        out.append({
+            "source": "personnel", "selection": "selected",
+            "id": pp.personnel_id, "link_id": pp.id,
+            "name": pp.personnel.name if pp.personnel else "(未指定)",
+            "education": pp.personnel.education if pp.personnel else "",
+            "tags": pp.personnel.tags if pp.personnel else "",
+            "role": pp.role,
+        })
+
+    return out
+
+
 async def analyze_collection_needs(
     project_id: str,
     db: AsyncSession,
@@ -105,41 +167,20 @@ async def analyze_collection_needs(
         name = doc["name"] if isinstance(doc, dict) else str(doc)
         category = doc.get("category", "other") if isinstance(doc, dict) else "other"
 
+        # 已落库选择三路一起取：用户可以从资源库把资质/合同/人员混挂到同一行
+        persisted = _persisted_matches_for(name, pq_rows, pc_rows, pp_rows)
+
         if _is_performance_requirement(name, category):
             auto = _match_contracts(name, contracts)
-            persisted = [
-                {
-                    "source": "contract", "selection": "selected",
-                    "id": pc.contract_id, "link_id": pc.id,
-                    "name": pc.contract.project_name if pc.contract else pc.requirement_name,
-                    "procurement_unit": pc.contract.procurement_unit if pc.contract else "",
-                    "contract_amount": pc.contract.contract_amount if pc.contract else "",
-                    "contract_date": str(pc.contract.contract_date) if pc.contract and pc.contract.contract_date else "",
-                }
-                for pc in pc_rows if pc.requirement_name == name
-            ]
             matches, match_status = _merge_matches(persisted, auto, "contract")
-            # 自动候选标 selection=auto（与 qualification/personnel 分支一致）
-            if match_status in ("auto", "matched"):
-                for m in matches:
-                    m.setdefault("selection", "auto")
         else:
             auto = _match_document(name, category, quals, company)
-            persisted = [
-                {
-                    "source": "qualification", "selection": "selected",
-                    "id": pq.qualification_id, "link_id": pq.id,
-                    "name": pq.qualification.name if pq.qualification else pq.requirement_name,
-                    "cert_number": pq.qualification.cert_number if pq.qualification else "",
-                    "issuing_authority": pq.qualification.issuing_authority if pq.qualification else "",
-                }
-                for pq in pq_rows if pq.requirement_name == name
-            ]
             matches, match_status = _merge_matches(persisted, auto, category)
-            # 自动候选标 selection=auto（已落库选择在 persisted 里已是 selected）
-            if match_status in ("auto", "matched"):
-                for m in matches:
-                    m.setdefault("selection", "auto")
+
+        # 自动候选标 selection=auto（已落库选择在 persisted 里已是 selected）
+        if match_status in ("auto", "matched"):
+            for m in matches:
+                m.setdefault("selection", "auto")
 
         document_items.append({
             "requirement": {"name": name, "category": category},

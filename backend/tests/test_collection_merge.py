@@ -1,15 +1,27 @@
 """宏曦标书 - 资料选择合并逻辑 单元测试.
 Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 """
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from app.models.company_profile import CompanyProfile
+from app.models.contract import Contract
+from app.models.personnel import Personnel
+from app.models.project_resource import (
+    ProjectContract,
+    ProjectPersonnel,
+    ProjectQualification,
+)
+from app.models.qualification import Qualification
 from app.services.collection import (
     _auto_occupy_confident_matches,
     _is_confident_auto,
     _is_performance_requirement,
     _merge_matches,
+    _persisted_matches_for,
     _pick_auto_occupy,
+    analyze_collection_needs,
 )
 
 
@@ -184,6 +196,92 @@ class TestPickAutoOccupy:
         ]
 
 
+class _Row:
+    """轻量假行对象——helper 只按属性取值，鸭子类型即可."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def _fake_pq(req_name: str, qual_id: str, name: str):
+    return _Row(
+        requirement_name=req_name, qualification_id=qual_id, id=f"link-{qual_id}",
+        qualification=_Row(name=name, cert_number=f"NO-{qual_id}",
+                           issuing_authority="某发证机构"),
+    )
+
+
+def _fake_pc(req_name: str, contract_id: str, name: str):
+    return _Row(
+        requirement_name=req_name, contract_id=contract_id, id=f"link-{contract_id}",
+        contract=_Row(project_name=name, procurement_unit="某采购单位",
+                      contract_amount="100万元", contract_date=None),
+    )
+
+
+def _fake_pp(role: str, person_id: str, name: str):
+    return _Row(
+        role=role, personnel_id=person_id, id=f"link-{person_id}",
+        personnel=_Row(name=name, education="本科", tags="保安员"),
+    )
+
+
+class TestPersistedMatchesFor:
+    """某需求名下已落库资源的**三路**汇总.
+
+    回归：历史上每个需求只取「对应那一类」——业绩行取合同、其余行只取资质，
+    人员行只按 role 取。用户从资源库挂了另一类，数据落了库却在信息搜集页面
+    读不回来（看不见 = 以为没挂上）。现在三路都取。
+    """
+
+    def test_qualification_and_contract_on_same_row(self):
+        """核心场景：从资源库同时挂资质 + 合同到同一行，两路都要读出来."""
+        pq = _fake_pq("投标人认为有必要提供的声明和文件", "q1", "保安服务许可证")
+        pc = _fake_pc("投标人认为有必要提供的声明和文件", "c1", "某安保服务合同")
+        got = _persisted_matches_for(
+            "投标人认为有必要提供的声明和文件", [pq], [pc], []
+        )
+        assert [m["source"] for m in got] == ["qualification", "contract"]
+        assert [m["id"] for m in got] == ["q1", "c1"]
+
+    def test_personnel_matched_by_role(self):
+        """人员是按 role 存需求名的——文档行挂人员同样落这个字段."""
+        pp = _fake_pp("其他材料", "p1", "张三")
+        got = _persisted_matches_for("其他材料", [], [], [pp])
+        assert len(got) == 1
+        assert got[0]["source"] == "personnel"
+        assert got[0]["name"] == "张三"
+        assert got[0]["role"] == "其他材料"
+
+    def test_all_three_sources_in_fixed_order(self):
+        """顺序固定为 资质 → 合同 → 人员，前端标签顺序才不抖."""
+        got = _persisted_matches_for(
+            "其他材料",
+            [_fake_pq("其他材料", "q1", "A")],
+            [_fake_pc("其他材料", "c1", "B")],
+            [_fake_pp("其他材料", "p1", "C")],
+        )
+        assert [m["source"] for m in got] == ["qualification", "contract", "personnel"]
+        assert [m["name"] for m in got] == ["A", "B", "C"]
+
+    def test_other_requirements_excluded(self):
+        got = _persisted_matches_for(
+            "投标函", [_fake_pq("营业执照", "q1", "营业执照")], [], []
+        )
+        assert got == []
+
+    def test_empty_when_nothing_linked(self):
+        assert _persisted_matches_for("其他材料", [], [], []) == []
+
+    def test_each_match_carries_link_id_for_removal(self):
+        """前端取消勾选要按 link_id 回删，字段不能缺."""
+        got = _persisted_matches_for(
+            "其他材料", [_fake_pq("其他材料", "q1", "A")], [], []
+        )
+        assert got[0]["link_id"] == "link-q1"
+        assert got[0]["selection"] == "selected"
+
+
 class _FakeScalars:
     def __init__(self, rows):
         self._rows = rows
@@ -287,3 +385,130 @@ class TestAutoOccupyConfidentMatches:
 
         db.execute = AsyncMock(side_effect=fake_execute)
         return db
+
+
+class _AnalyzeScalars:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+    def one_or_none(self):
+        return self._rows[0] if self._rows else None
+
+
+class _AnalyzeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return _AnalyzeScalars(self._rows)
+
+
+def _make_analyze_db(project, *, quals=(), personnel=(), company=None,
+                     contracts=(), pq=(), pp=(), pc=()):
+    """按 select 的实体分派结果 —— 不依赖查询顺序，实现里调整取数次序也不会误报."""
+    by_entity = {
+        Qualification: list(quals),
+        Personnel: list(personnel),
+        CompanyProfile: [company] if company else [],
+        Contract: list(contracts),
+        ProjectQualification: list(pq),
+        ProjectPersonnel: list(pp),
+        ProjectContract: list(pc),
+    }
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=project)
+
+    async def fake_execute(stmt, *args, **kwargs):
+        entity = stmt.column_descriptions[0]["entity"]
+        if entity not in by_entity:
+            raise AssertionError(f"未预期的查询实体: {entity}")
+        return _AnalyzeResult(by_entity[entity])
+
+    db.execute = AsyncMock(side_effect=fake_execute)
+    return db
+
+
+class TestAnalyzeCollectionNeedsMixedSources:
+    """接线层：analyze_collection_needs 对同一需求行必须把三路已落库资源都返回.
+
+    上面 TestPersistedMatchesFor 只覆盖汇总函数本身；这里确保它真的被用上——
+    历史上三个分支各取一路（业绩行只取合同、其余行只取资质、人员行只按 role），
+    兜底行「投标人认为有必要提供的文件或附件」挂上合同就读不回来。
+    """
+
+    @pytest.mark.asyncio
+    async def test_document_row_returns_all_three_sources(self):
+        project = _Row(id="p1", status="parsing", parsed_requirements_json=json.dumps({
+            "required_documents": [
+                {"name": "投标人认为有必要提供的声明和文件", "category": "other"},
+            ],
+            "required_personnel": [],
+        }))
+        db = _make_analyze_db(
+            project,
+            pq=[_fake_pq("投标人认为有必要提供的声明和文件", "q1", "保安服务许可证")],
+            pc=[_fake_pc("投标人认为有必要提供的声明和文件", "c1", "某安保服务合同")],
+            pp=[_fake_pp("投标人认为有必要提供的声明和文件", "p1", "张三")],
+        )
+        got = await analyze_collection_needs("p1", db)
+
+        row = got["document_items"][0]
+        assert [m["source"] for m in row["matches"]] == [
+            "qualification", "contract", "personnel",
+        ]
+        assert row["match_status"] == "selected"
+        assert row["matched"] is True
+
+    @pytest.mark.asyncio
+    async def test_performance_row_also_returns_qualification(self):
+        """业绩行以前只读合同；用户从资源库挂了资质到这一行，也要能读出来."""
+        project = _Row(id="p1", status="parsing", parsed_requirements_json=json.dumps({
+            "required_documents": [{"name": "类似项目业绩证明材料", "category": "other"}],
+            "required_personnel": [],
+        }))
+        db = _make_analyze_db(
+            project,
+            pq=[_fake_pq("类似项目业绩证明材料", "q1", "保安服务许可证")],
+            pc=[_fake_pc("类似项目业绩证明材料", "c1", "某安保服务合同")],
+        )
+        got = await analyze_collection_needs("p1", db)
+
+        row = got["document_items"][0]
+        assert [m["source"] for m in row["matches"]] == ["qualification", "contract"]
+
+    @pytest.mark.asyncio
+    async def test_personnel_row_still_reads_by_role(self):
+        """人员配置行不受影响：仍按 role 取，且不把文档资源混进来."""
+        project = _Row(id="p1", status="parsing", parsed_requirements_json=json.dumps({
+            "required_documents": [],
+            "required_personnel": [{"role": "项目经理", "certifications": [], "count": 1}],
+        }))
+        db = _make_analyze_db(
+            project,
+            pp=[_fake_pp("项目经理", "p1", "李四")],
+            pq=[_fake_pq("项目经理", "q1", "不该出现在这里的资质")],
+        )
+        got = await analyze_collection_needs("p1", db)
+
+        assert got["document_items"] == []
+        row = got["personnel_items"][0]
+        assert [m["name"] for m in row["matches"]] == ["李四"]
+        assert row["match_status"] == "selected"
+
+    @pytest.mark.asyncio
+    async def test_unmatched_row_is_missing(self):
+        project = _Row(id="p1", status="parsing", parsed_requirements_json=json.dumps({
+            "required_documents": [{"name": "投标函", "category": "other"}],
+            "required_personnel": [],
+        }))
+        db = _make_analyze_db(project)
+        got = await analyze_collection_needs("p1", db)
+
+        row = got["document_items"][0]
+        assert row["matches"] == []
+        assert row["match_status"] == "missing"
+        assert row["matched"] is False
+        assert got["is_complete"] is False

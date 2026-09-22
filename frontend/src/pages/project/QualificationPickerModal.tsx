@@ -46,28 +46,55 @@ interface CompanyProfile {
   website: string
 }
 
-type PickerMode = 'qualification' | 'personnel' | 'contract' | 'history_bid' | 'company'
+export type PickerMode = 'qualification' | 'personnel' | 'contract' | 'history_bid' | 'company'
+
+const ALL_MODES: PickerMode[] = [
+  'qualification', 'personnel', 'contract', 'history_bid', 'company',
+]
+
+const MODE_LABELS: Record<PickerMode, string> = {
+  qualification: '公司资质',
+  personnel: '人员管理',
+  contract: '历史合同',
+  history_bid: '历史投标',
+  company: '公司信息',
+}
 
 // 支持多选的模式
 const MULTI_SELECT_MODES: PickerMode[] = ['qualification', 'personnel', 'contract']
+
+/** 一次确认带回的完整选择——可以跨分类混选. */
+export interface PickerSelection {
+  qualifications: Qualification[]
+  contracts: Contract[]
+  personnel: Personnel[]
+}
+
+type SelectionMap = Record<PickerMode, React.Key[]>
+
+const EMPTY_SELECTION: SelectionMap = {
+  qualification: [], personnel: [], contract: [], history_bid: [], company: [],
+}
 
 interface Props {
   open: boolean
   requirementName: string
   defaultMode?: PickerMode
+  /** 只显示这几个 tab。不传 = 全部。用于「人员配置」行——那里挂资质/合同
+   *  落库后没有任何行会显示它，所以干脆不给选。 */
+  allowedModes?: PickerMode[]
   onCancel: () => void
-  // 多选（资质、人员、合同）
-  onSelectQuals: (quals: Qualification[]) => void
-  onSelectPersonnel?: (personnel: Personnel[]) => void
-  onSelectContract?: (contracts: Contract[]) => void
-  // 单选
+  /** 确认时一次性带回三类选择，调用方自行决定怎么落库. */
+  onConfirmSelection: (picks: PickerSelection) => void | Promise<void>
   onSelectHistoryBid?: (bid: HistoryBid) => void
 }
 
 export default function QualificationPickerModal({
-  open, requirementName, defaultMode, onCancel,
-  onSelectQuals, onSelectPersonnel, onSelectContract, onSelectHistoryBid,
+  open, requirementName, defaultMode, allowedModes, onCancel,
+  onConfirmSelection, onSelectHistoryBid,
 }: Props) {
+  const visibleModes = allowedModes ?? ALL_MODES
+
   const [mode, setMode] = useState<PickerMode>(defaultMode ?? 'qualification')
   const [quals, setQuals] = useState<Qualification[]>([])
   const [personnel, setPersonnel] = useState<Personnel[]>([])
@@ -76,13 +103,15 @@ export default function QualificationPickerModal({
   const [company, setCompany] = useState<CompanyProfile | null>(null)
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
-  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  // 按 tab 分别保留勾选：切 tab 不清空，才能跨分类混选
+  const [selectedByMode, setSelectedByMode] = useState<SelectionMap>(EMPTY_SELECTION)
 
   useEffect(() => {
     if (open) {
-      setMode(defaultMode ?? 'qualification')
+      const preferred = defaultMode ?? 'qualification'
+      setMode(visibleModes.includes(preferred) ? preferred : visibleModes[0])
       setSearch('')
-      setSelectedRowKeys([])
+      setSelectedByMode(EMPTY_SELECTION)
       setLoading(true)
       Promise.all([
         client.get('/qualifications/'),
@@ -104,6 +133,8 @@ export default function QualificationPickerModal({
         .catch(() => message.error('获取资源列表失败'))
         .finally(() => setLoading(false))
     }
+    // visibleModes 是每次渲染新建的数组，依赖它会导致重复请求；open/defaultMode 才是真信号
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, defaultMode])
 
   // ── Filters ──
@@ -126,29 +157,28 @@ export default function QualificationPickerModal({
     ? historyBids.filter((b) => b.name.includes(search))
     : historyBids
 
-  const selectedRows = {
-    qualification: quals.filter((q) => selectedRowKeys.includes(q.id)),
-    personnel: personnel.filter((p) => selectedRowKeys.includes(p.id)),
-    contract: contracts.filter((c) => selectedRowKeys.includes(c.id)),
-  }
+  const keysOf = (m: PickerMode) => selectedByMode[m] ?? []
 
-  const handleConfirmMulti = () => {
-    if (selectedRowKeys.length === 0) { message.warning('请至少选择一项'); return }
-    if (mode === 'qualification') {
-      onSelectQuals(selectedRows.qualification)
-    } else if (mode === 'personnel') {
-      onSelectPersonnel?.(selectedRows.personnel)
-    } else if (mode === 'contract') {
-      onSelectContract?.(selectedRows.contract)
-    }
+  const picks: PickerSelection = {
+    qualifications: quals.filter((q) => keysOf('qualification').includes(q.id)),
+    contracts: contracts.filter((c) => keysOf('contract').includes(c.id)),
+    personnel: personnel.filter((p) => keysOf('personnel').includes(p.id)),
+  }
+  const multiCount =
+    picks.qualifications.length + picks.contracts.length + picks.personnel.length
+
+  const handleConfirmMulti = async () => {
+    if (multiCount === 0) { message.warning('请至少选择一项'); return }
+    await onConfirmSelection(picks)
   }
 
   // ── Row selection for multi-select modes ──
 
   const multiSelect = MULTI_SELECT_MODES.includes(mode)
     ? {
-        selectedRowKeys,
-        onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
+        selectedRowKeys: keysOf(mode),
+        onChange: (keys: React.Key[]) =>
+          setSelectedByMode((prev) => ({ ...prev, [mode]: keys })),
       }
     : undefined
 
@@ -235,14 +265,15 @@ export default function QualificationPickerModal({
     }
   }
 
-  const multiCount = selectedRowKeys.length
+  // 当前 tab 是只读参考（历史投标/公司信息）但别处已勾了东西时，也要能点确定
+  const showFooter = multiCount > 0 || MULTI_SELECT_MODES.includes(mode)
 
   return (
     <Modal
       title={`选择资源 — ${requirementName}`}
       open={open}
       onCancel={onCancel}
-      footer={multiSelect ? (
+      footer={showFooter ? (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ color: '#666' }}>已选 {multiCount} 项</span>
           <div>
@@ -256,15 +287,12 @@ export default function QualificationPickerModal({
       <div style={{ marginBottom: 16 }}>
         <Segmented
           value={mode}
-          onChange={(v) => { setMode(v as PickerMode); setSearch(''); setSelectedRowKeys([]) }}
+          onChange={(v) => { setMode(v as PickerMode); setSearch('') }}
           block
-          options={[
-            { value: 'qualification', label: '公司资质' },
-            { value: 'personnel', label: '人员管理' },
-            { value: 'contract', label: '历史合同' },
-            { value: 'history_bid', label: '历史投标' },
-            { value: 'company', label: '公司信息' },
-          ]}
+          options={visibleModes.map((m) => {
+            const n = keysOf(m).length
+            return { value: m, label: n > 0 ? `${MODE_LABELS[m]} (${n})` : MODE_LABELS[m] }
+          })}
         />
         {mode !== 'company' && (
           <Input
