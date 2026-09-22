@@ -30,7 +30,7 @@ from app.services.collection import (
     unassign_personnel,
     unlink_contract,
     unlink_qualification,
-    upload_qualification,
+    upload_requirement_document,
 )
 from app.utils.permissions import require_editor
 
@@ -140,10 +140,16 @@ async def upload_qualification_for_project(
     project_id: str,
     file: UploadFile,
     requirement_name: str = "",
+    category: str = "",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_editor),
 ):
-    """Upload a file to fulfil a missing qualification requirement."""
+    """上传一份需求材料，并同步建进资源库（业绩类进历史合同，其余进公司资质）.
+
+    路径里的 ``qualification`` 现在名不副实——它会按需求名分流，业绩类需求落的是
+    ``Contract``。保留这个路径是为了部署瞬间旧前端标签页不至于 404，不值得为改名
+    去冒这个险。带 ``category`` 是为了跟 ``_is_performance_requirement`` 同口径。
+    """
     # Save file
     upload_dir = Path(settings.UPLOAD_DIR)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -155,16 +161,20 @@ async def upload_qualification_for_project(
     with open(saved_path, "wb") as f:
         f.write(content)
 
-    pq = await upload_qualification(
+    result = await upload_requirement_document(
         project_id,
         requirement_name or file.filename or "未命名证件",
+        category,
         str(saved_path),
         db,
     )
+    # 响应形状保持与改造前一致（id/requirement_name/status），旧前端不破
     return {
-        "id": pq.id,
-        "requirement_name": pq.requirement_name,
-        "status": pq.match_status,
+        "id": result["link_id"],
+        "requirement_name": result["requirement_name"],
+        "status": result["status"],
+        "kind": result["kind"],
+        "library_id": result["library_id"],
     }
 
 

@@ -8,12 +8,15 @@ const { Dragger } = Upload
 interface Props {
   open: boolean
   requirementName: string
+  /** 需求分类（parse 侧产出）。后端据此与 _is_performance_requirement 同口径分流：
+   *  业绩/合同类落历史合同，其余落公司资质。 */
+  category?: string
   projectId: string
   onCancel: () => void
   onUploaded: () => void
 }
 
-export default function QuickQualificationUpload({ open, requirementName, projectId, onCancel, onUploaded }: Props) {
+export default function QuickQualificationUpload({ open, requirementName, category, projectId, onCancel, onUploaded }: Props) {
   const [uploading, setUploading] = useState(false)
 
   const handleUpload: UploadProps['customRequest'] = (options) => {
@@ -23,6 +26,7 @@ export default function QuickQualificationUpload({ open, requirementName, projec
     const formData = new FormData()
     formData.append('file', file as File)
     formData.append('requirement_name', requirementName)
+    formData.append('category', category ?? '')
 
     const token = localStorage.getItem('token')
     const xhr = new XMLHttpRequest()
@@ -31,7 +35,10 @@ export default function QuickQualificationUpload({ open, requirementName, projec
 
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        message.success(`「${(file as File).name}」已上传`)
+        const kind = JSON.parse(xhr.responseText)?.kind
+        message.success(
+          `「${(file as File).name}」已上传，并存入资源库${kind === 'contract' ? '（历史合同）' : '（公司资质）'}`,
+        )
         onUploaded()
         onSuccess?.(JSON.parse(xhr.responseText))
       } else {
@@ -54,7 +61,7 @@ export default function QuickQualificationUpload({ open, requirementName, projec
 
   return (
     <Modal
-      title={`上传证件 — ${requirementName}`}
+      title={`上传材料 — ${requirementName}`}
       open={open}
       onCancel={onCancel}
       footer={null}
@@ -70,7 +77,9 @@ export default function QuickQualificationUpload({ open, requirementName, projec
           <InboxOutlined />
         </p>
         <p className="ant-upload-text">点击或拖拽文件到此区域上传</p>
-        <p className="ant-upload-hint">支持 JPG、PNG、PDF、BMP 格式</p>
+        <p className="ant-upload-hint">
+          支持 JPG、PNG、PDF、BMP 格式。上传后会同步存入资源库，以后可直接从资源库选用。
+        </p>
       </Dragger>
     </Modal>
   )

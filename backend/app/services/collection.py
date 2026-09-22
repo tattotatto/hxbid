@@ -9,6 +9,7 @@ Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 
 import json
 import logging
+import uuid
 from typing import Any, Dict, List
 
 from sqlalchemy import select
@@ -657,23 +658,78 @@ async def link_qualification(
     return pq
 
 
-async def upload_qualification(
+async def upload_requirement_document(
     project_id: str,
     requirement_name: str,
+    category: str,
     file_path: str,
     db: AsyncSession,
-) -> ProjectQualification:
-    """Record an uploaded file for a missing qualification requirement."""
-    pq = ProjectQualification(
+) -> Dict[str, Any]:
+    """记录上传的需求材料，并在资源库里**同步建一条**，下次可直接从资源库选.
+
+    分流口径与 ``_is_performance_requirement`` 一致：
+
+    - 业绩/合同类行 → 历史合同（文件进 ``image_paths_json``）
+    - 其余行        → 公司资质（文件进 ``attachment_path``）
+
+    库条目的 id 在构造时就定下来，关联行直接引用——不依赖 flush 回填。这一步必须
+    可靠：``ProjectContract.contract_id`` / ``ProjectQualification.qualification_id``
+    为空的话，``_persisted_matches_for`` 读出来的 name 会退化成需求名，且
+    ``get_collected_resources`` 取不到图，导出的标书里就没有这份材料。
+
+    **不做去重**：同一行可能对应多份不同材料，按名字合并会把不同项目的业绩揉成
+    一条。重复上传造成的冗余由用户在资源库页里删。
+    """
+    from app.models.contract import Contract
+
+    if _is_performance_requirement(requirement_name, category):
+        library = Contract(
+            id=str(uuid.uuid4()),
+            project_name=requirement_name,
+            image_paths_json=json.dumps([file_path], ensure_ascii=False),
+            notes="由信息搜集上传",
+        )
+        db.add(library)
+        await db.flush()
+        link = ProjectContract(
+            project_id=project_id,
+            contract_id=library.id,
+            requirement_name=requirement_name,
+            match_status="matched",
+        )
+        db.add(link)
+        await db.flush()
+        return {
+            "kind": "contract",
+            "library_id": library.id,
+            "link_id": link.id,
+            "requirement_name": requirement_name,
+            "status": "matched",
+        }
+
+    library = Qualification(
+        id=str(uuid.uuid4()),
+        name=requirement_name,
+        attachment_path=file_path,
+        notes="由信息搜集上传",
+    )
+    db.add(library)
+    await db.flush()
+    link = ProjectQualification(
         project_id=project_id,
+        qualification_id=library.id,
         requirement_name=requirement_name,
         match_status="uploaded",
-        uploaded_file_path=file_path,
     )
-    db.add(pq)
+    db.add(link)
     await db.flush()
-    await db.refresh(pq)
-    return pq
+    return {
+        "kind": "qualification",
+        "library_id": library.id,
+        "link_id": link.id,
+        "requirement_name": requirement_name,
+        "status": "uploaded",
+    }
 
 
 async def link_contract(

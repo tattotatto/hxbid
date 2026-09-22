@@ -66,6 +66,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
   const [quickPersonnelRole, setQuickPersonnelRole] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [uploadReq, setUploadReq] = useState('')
+  const [uploadCategory, setUploadCategory] = useState('')
   const [company, setCompany] = useState<any>(null)
 
   const fetchStatus = useCallback(async () => {
@@ -264,38 +265,48 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                 <List.Item
                   style={isDone ? { background: '#f6ffed', borderLeft: '3px solid #52c41a', paddingLeft: 12 } : {}}
                   actions={[
-                    isDone ? (
-                      <Tag color={meta.color} icon={meta.icon}>{meta.text}</Tag>
-                    ) : (
-                      <Space>
-                        <Button
-                          size="small"
-                          icon={<UploadOutlined />}
-                          onClick={() => { setUploadReq(item.requirement.name); setUploadOpen(true) }}
-                        >
-                          上传
-                        </Button>
-                        <Button
-                          size="small"
-                          icon={<LinkOutlined />}
-                          onClick={() => {
-                            setPickerReq(item.requirement.name)
-                            setPickerAllowedModes(DOC_ROW_MODES)
-                            // parse 侧业绩类需求实际落 category=other（合同/业绩关键词识别），
-                            // 与后端 _is_performance_requirement 同口径，否则默认打开资质选择器
-                            setPickerDefaultMode(
-                              item.requirement.category === 'contract_performance' ||
-                              /业绩|合同|类似项目|中标|履约/.test(item.requirement.name)
-                                ? 'contract'
-                                : 'qualification'
-                            )
-                            setPickerOpen(true)
-                          }}
-                        >
-                          从资源库选择
-                        </Button>
-                      </Space>
-                    ),
+                    <Space key="actions">
+                      {isDone && <Tag color={meta.color} icon={meta.icon}>{meta.text}</Tag>}
+                      {/* 自动匹配的行以前被锁死：只有标签、没按钮，而自动候选没有 link_id
+                          所以标签也没有 ×，想换一份完全无从下手。现在照样给「上传／从资源库
+                          选择」——一动手就以手动的为准（后端 _merge_matches 只在无已落库选择
+                          时才回落到自动候选，自动的那条由 _pick_auto_occupy 落库、只处理
+                          match_status=='auto' 的行，所以你一动它就轮不上了）。 */}
+                      {(!isDone || item.match_status === 'auto') && (
+                        <>
+                          <Button
+                            size="small"
+                            icon={<UploadOutlined />}
+                            onClick={() => {
+                              setUploadReq(item.requirement.name)
+                              setUploadCategory(item.requirement.category)
+                              setUploadOpen(true)
+                            }}
+                          >
+                            上传
+                          </Button>
+                          <Button
+                            size="small"
+                            icon={<LinkOutlined />}
+                            onClick={() => {
+                              setPickerReq(item.requirement.name)
+                              setPickerAllowedModes(DOC_ROW_MODES)
+                              // parse 侧业绩类需求实际落 category=other（合同/业绩关键词识别），
+                              // 与后端 _is_performance_requirement 同口径，否则默认打开资质选择器
+                              setPickerDefaultMode(
+                                item.requirement.category === 'contract_performance' ||
+                                /业绩|合同|类似项目|中标|履约/.test(item.requirement.name)
+                                  ? 'contract'
+                                  : 'qualification'
+                              )
+                              setPickerOpen(true)
+                            }}
+                          >
+                            从资源库选择
+                          </Button>
+                        </>
+                      )}
+                    </Space>,
                   ]}
                 >
                   <List.Item.Meta
@@ -330,31 +341,33 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
                 <List.Item
                   style={isDone ? { background: '#f6ffed', borderLeft: '3px solid #52c41a', paddingLeft: 12 } : {}}
                   actions={[
-                    isDone ? (
-                      <Tag color={meta.color} icon={meta.icon}>{meta.text}</Tag>
-                    ) : (
-                      <Space>
-                        <Button
-                          size="small"
-                          icon={<UserAddOutlined />}
-                          onClick={() => {
-                            setPickerReq(item.requirement.name)
-                            setPickerAllowedModes(PERSONNEL_ROW_MODES)
-                            setPickerDefaultMode('personnel')
-                            setPickerOpen(true)
-                          }}
-                        >
-                          从人员库选择
-                        </Button>
-                        <Button
-                          size="small"
-                          icon={<PlusOutlined />}
-                          onClick={() => { setQuickPersonnelRole(item.requirement.name); setQuickPersonnelOpen(true) }}
-                        >
-                          添加新人员
-                        </Button>
-                      </Space>
-                    ),
+                    <Space key="actions">
+                      {isDone && <Tag color={meta.color} icon={meta.icon}>{meta.text}</Tag>}
+                      {/* 同「资质与证件」：自动匹配的行也给按钮，一动手就以手动的为准 */}
+                      {(!isDone || item.match_status === 'auto') && (
+                        <>
+                          <Button
+                            size="small"
+                            icon={<UserAddOutlined />}
+                            onClick={() => {
+                              setPickerReq(item.requirement.name)
+                              setPickerAllowedModes(PERSONNEL_ROW_MODES)
+                              setPickerDefaultMode('personnel')
+                              setPickerOpen(true)
+                            }}
+                          >
+                            从人员库选择
+                          </Button>
+                          <Button
+                            size="small"
+                            icon={<PlusOutlined />}
+                            onClick={() => { setQuickPersonnelRole(item.requirement.name); setQuickPersonnelOpen(true) }}
+                          >
+                            添加新人员
+                          </Button>
+                        </>
+                      )}
+                    </Space>,
                   ]}
                 >
                   <List.Item.Meta
@@ -451,6 +464,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
       <QuickQualificationUpload
         open={uploadOpen}
         requirementName={uploadReq}
+        category={uploadCategory}
         projectId={projectId}
         onCancel={() => setUploadOpen(false)}
         onUploaded={() => { setUploadOpen(false); fetchStatus() }}

@@ -22,6 +22,7 @@ from app.services.collection import (
     _persisted_matches_for,
     _pick_auto_occupy,
     analyze_collection_needs,
+    upload_requirement_document,
 )
 
 
@@ -512,3 +513,91 @@ class TestAnalyzeCollectionNeedsMixedSources:
         assert row["match_status"] == "missing"
         assert row["matched"] is False
         assert got["is_complete"] is False
+
+
+def _mock_db():
+    """只需 add / flush / refresh 的假 db（上传建条目不查库）."""
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+    db.refresh = AsyncMock()
+    return db
+
+
+class TestUploadRequirementDocument:
+    """上传需求材料时**同步建一条资源库条目**，下次可直接从资源库选.
+
+    口径与 _is_performance_requirement 一致：业绩/合同类行进「历史合同」，
+    其余行进「公司资质」。上传前只写 ProjectQualification.uploaded_file_path，
+    资源库完全不碰，导致同一个文件换个项目还得重传。
+    """
+
+    @pytest.mark.asyncio
+    async def test_performance_row_creates_contract_in_library(self):
+        db = _mock_db()
+        got = await upload_requirement_document(
+            "proj1", "保安服务业绩证明材料", "other",
+            "uploads/collection_ab12.png", db,
+        )
+
+        added = [type(c.args[0]).__name__ for c in db.add.call_args_list]
+        assert added == ["Contract", "ProjectContract"]
+
+        contract = db.add.call_args_list[0].args[0]
+        assert contract.project_name == "保安服务业绩证明材料"
+        assert json.loads(contract.image_paths_json) == ["uploads/collection_ab12.png"]
+
+        pc = db.add.call_args_list[1].args[0]
+        assert pc.project_id == "proj1"
+        assert pc.requirement_name == "保安服务业绩证明材料"
+        # FK 必须设上，否则 _persisted_matches_for 读出来的 name 会退化成需求名
+        assert pc.contract_id == contract.id
+        assert pc.contract_id is not None
+
+        assert got["kind"] == "contract"
+        assert got["library_id"] == contract.id
+
+    @pytest.mark.asyncio
+    async def test_plain_row_creates_qualification_in_library(self):
+        db = _mock_db()
+        got = await upload_requirement_document(
+            "proj1", "营业执照", "company", "uploads/collection_cd34.png", db,
+        )
+
+        added = [type(c.args[0]).__name__ for c in db.add.call_args_list]
+        assert added == ["Qualification", "ProjectQualification"]
+
+        qual = db.add.call_args_list[0].args[0]
+        assert qual.name == "营业执照"
+        assert qual.attachment_path == "uploads/collection_cd34.png"
+
+        pq = db.add.call_args_list[1].args[0]
+        assert pq.project_id == "proj1"
+        assert pq.requirement_name == "营业执照"
+        assert pq.qualification_id == qual.id
+        assert pq.qualification_id is not None
+        assert pq.match_status == "uploaded"
+
+        assert got["kind"] == "qualification"
+        assert got["library_id"] == qual.id
+
+    @pytest.mark.asyncio
+    async def test_contract_performance_category_routes_to_contract(self):
+        """category 显式给了 contract_performance 也要走合同分支（口径统一）."""
+        db = _mock_db()
+        got = await upload_requirement_document(
+            "proj1", "任意名称", "contract_performance", "uploads/x.png", db,
+        )
+        assert got["kind"] == "contract"
+
+    @pytest.mark.asyncio
+    async def test_library_row_ids_are_generated_up_front(self):
+        """库条目 id 在构造时就定下来，不依赖 flush 回填——ProjectContract/
+        ProjectQualification 的 FK 直接用它."""
+        db = _mock_db()
+        await upload_requirement_document("proj1", "营业执照", "", "uploads/a.png", db)
+        qual = db.add.call_args_list[0].args[0]
+        pq = db.add.call_args_list[1].args[0]
+        assert isinstance(qual.id, str) and len(qual.id) == 36
+        assert pq.qualification_id == qual.id
+        db.flush.assert_awaited()
