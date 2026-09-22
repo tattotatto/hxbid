@@ -7,7 +7,7 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -139,8 +139,8 @@ async def unlink_contract_from_project(
 async def upload_qualification_for_project(
     project_id: str,
     file: UploadFile,
-    requirement_name: str = "",
-    category: str = "",
+    requirement_name: str = Form(""),
+    category: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_editor),
 ):
@@ -149,6 +149,11 @@ async def upload_qualification_for_project(
     路径里的 ``qualification`` 现在名不副实——它会按需求名分流，业绩类需求落的是
     ``Contract``。保留这个路径是为了部署瞬间旧前端标签页不至于 404，不值得为改名
     去冒这个险。带 ``category`` 是为了跟 ``_is_performance_requirement`` 同口径。
+
+    ``requirement_name`` / ``category`` **必须标 Form()**：不标的话 FastAPI 按 query
+    参数解析，前端塞在 formData 里的值收不到，会静默退化成 ``file.filename``——
+    于是需求名变成「证明.png」，按需求名匹配的行永远回显不出这份上传，
+    分流也会因为文件名里没有业绩关键词而走错分支。2026-09-22 实测确认过。
     """
     # Save file
     upload_dir = Path(settings.UPLOAD_DIR)

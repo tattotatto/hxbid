@@ -601,3 +601,34 @@ class TestUploadRequirementDocument:
         assert isinstance(qual.id, str) and len(qual.id) == 36
         assert pq.qualification_id == qual.id
         db.flush.assert_awaited()
+
+
+class TestUploadEndpointBindsFormFields:
+    """上传接口的 requirement_name / category 必须是 Form 字段.
+
+    回归（2026-09-22 真实服务器实测）：这两个参数原先只写 ``str = ""``，FastAPI 会
+    当成 **query 参数**，而前端是塞在 formData 里发的，于是值收不到、静默退化成
+    ``file.filename``——需求名变成「证明.png」，按需求名匹配的行永远回显不出这份上传；
+    分流也会因为文件名里没有业绩关键词而把业绩材料落进「公司资质」。
+
+    service 层的单测测不出这个（函数收什么名字就按什么名字建），只能盯参数声明。
+    """
+
+    @staticmethod
+    def _default(param: str):
+        import inspect
+
+        from app.api.collection import upload_qualification_for_project
+
+        sig = inspect.signature(upload_qualification_for_project)
+        return sig.parameters[param].default
+
+    def test_requirement_name_is_form_field(self):
+        from fastapi import params
+
+        assert isinstance(self._default("requirement_name"), params.Form)
+
+    def test_category_is_form_field(self):
+        from fastapi import params
+
+        assert isinstance(self._default("category"), params.Form)
