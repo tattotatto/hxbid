@@ -21,7 +21,13 @@ services:
       start_period: 15s
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      # 内网交付后没有外网时，在 .env 里设 PIP_INDEX（如 https://mirrors.aliyun.com/pypi/simple/），
+      # 否则 pip install 阶段会直接失败。留空 = 走默认源（当前服务器有外网）。
+      args:
+        PIP_INDEX: ${PIP_INDEX:-}
+        PIP_EXTRA_INDEX: ${PIP_EXTRA_INDEX:-}
     container_name: hongxi-backend
     environment:
       # Database
@@ -74,7 +80,12 @@ services:
       start_period: 60s
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      # 同上：内网无外网时在 .env 里设 NPM_REGISTRY（如 https://registry.npmmirror.com），
+      # 否则 npm ci 会失败。
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
     container_name: hongxi-frontend
     depends_on:
       - backend

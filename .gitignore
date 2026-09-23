@@ -29,6 +29,20 @@ outputs/
 templates/
 素材/
 
+# 嵌入模型：服务器上是指向 /hxbid/bge-base-zh-v1.5 的符号链接（pytorch_model.bin ~400MB）。
+# 不 ignore 的话它会出现在 git status 里，而 `git clean -fd` 会删掉那条链接、
+# 容器 EMBEDDING_MODEL 的 bind 挂载随即失效。模型本身不在仓库里，也不该在。
+bge-base-zh-v1.5/
+
+# 部署过程产生的一次性产物（.deploy-backup-* 等由部署脚本创建）
+.deploy-backup-*/
+.git-sync-backup-*/
+bk-*/
+*.tar.gz
+*.bak*
+_bak_*/
+_probe_*.py
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
