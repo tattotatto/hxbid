@@ -214,7 +214,9 @@ export default function ProjectWorkflow() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
 
-  const [project, setProject] = useState<any>(null)
+  // 类型写成 `| null` 而不是 any：否则 `project.status` 在守卫之前求值时
+  // tsc 不会报「可能为 null」，白屏类 bug 只能靠线上发现。
+  const [project, setProject] = useState<Record<string, any> | null>(null)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [currentChapter, setCurrentChapter] = useState('')
@@ -224,7 +226,7 @@ export default function ProjectWorkflow() {
 
   // Edit analysis
   const [analyzing, setAnalyzing] = useState(false)
-  const [editAnalysis, setEditAnalysis] = useState<any>(null)
+  const [editAnalysis, setEditAnalysis] = useState<Record<string, any> | null>(null)
   const [analysisModalOpen, setAnalysisModalOpen] = useState(false)
 
   // Feedback loop
@@ -643,16 +645,18 @@ export default function ProjectWorkflow() {
   // 与后端 _GENERATABLE_STATUS 一致：目录确认之前不许生成。
   // 前端也拦一道，免得用户点了拿到 400 再回头猜。
   const GENERATABLE_STATUS = ['parsed', 'review', 'error', 'exported', 'generating']
-  const generateBlockedHint =
-    project.status === 'collecting'
+  // 注意：这段在 `if (!project) return` 守卫**之前**求值，首次渲染时 project 还是
+  // null —— 必须用可选链，否则整个页面白屏（线上就是这么炸的）。
+  const projectStatus: string = project?.status ?? ''
+  const generateBlockedHint = !projectStatus || GENERATABLE_STATUS.includes(projectStatus)
+    ? ''
+    : projectStatus === 'collecting'
       ? '请先完成信息搜集'
-      : project.status === 'structure_ready'
+      : projectStatus === 'structure_ready'
         ? '请先到「目录确认」页确认目录'
-        : project.status === 'archived'
+        : projectStatus === 'archived'
           ? '项目已归档'
-          : !GENERATABLE_STATUS.includes(project.status)
-            ? `当前状态「${project.status}」不允许生成`
-            : ''
+          : `当前状态「${projectStatus}」不允许生成`
 
   const handleGenerate = async () => {
     if (!id) return

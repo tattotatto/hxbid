@@ -729,7 +729,7 @@ function AIModelConfig() {
 }
 
 function DatasetExporter() {
-  const [stats, setStats] = useState<any>(null)
+  const [stats, setStats] = useState<Record<string, any> | null>(null)
   const [preview, setPreview] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)

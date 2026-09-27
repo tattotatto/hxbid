@@ -4,7 +4,7 @@ import { UploadOutlined, SaveOutlined, ScanOutlined } from '@ant-design/icons'
 import client from '../../api/client'
 
 export default function CompanyInfo() {
-  const [profile, setProfile] = useState<any>(null)
+  const [profile, setProfile] = useState<Record<string, any> | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [form] = Form.useForm()

@@ -57,8 +57,8 @@ export default function Workbench() {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [vectorStats, setVectorStats] = useState<VectorStats | null>(null)
-  const [analytics, setAnalytics] = useState<any>(null)
-  const [winFactors, setWinFactors] = useState<any>(null)
+  const [analytics, setAnalytics] = useState<Record<string, any> | null>(null)
+  const [winFactors, setWinFactors] = useState<Record<string, any> | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {

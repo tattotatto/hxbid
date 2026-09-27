@@ -67,7 +67,7 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [uploadReq, setUploadReq] = useState('')
   const [uploadCategory, setUploadCategory] = useState('')
-  const [company, setCompany] = useState<any>(null)
+  const [company, setCompany] = useState<Record<string, any> | null>(null)
 
   const fetchStatus = useCallback(async () => {
     setLoading(true)
