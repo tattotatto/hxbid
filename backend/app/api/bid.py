@@ -130,6 +130,16 @@ async def upload_and_parse(
     except Exception as e:
         requirements = {"project_name": project_name or file.filename or "未命名项目", "parse_error": str(e)}
 
+    # -- Persist full text for 全文匹配兜底 (best-effort, non-blocking) --
+    # 章节匹配在「投标文件格式」章节里找不到目标小节时退到全文；全文此前只在
+    # 本请求内存在，落成文件供后续匹配读取。放在 try/except 之外：parse_bid_requirements
+    # 失败时 document_text 仍可能是好的，兜底语料依然值得留下。
+    if document_text:
+        from app.services.tender_corpus import persist_full_text
+        rel_full_text = persist_full_text(str(upload_dir), saved_path.stem, document_text)
+        if rel_full_text:
+            requirements["full_text_path"] = rel_full_text
+
     # -- Extract format section from PDF (best-effort, non-blocking) --
     # Uses pdf_extractor to extract format section text, tables, and page range
     # from the uploaded tender document. The extracted data is stored in the
