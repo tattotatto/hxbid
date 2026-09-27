@@ -155,3 +155,69 @@ class TestGenerationChapterType:
 
         assert _generation_chapter_type("") == "ai_generated"
         assert _generation_chapter_type("胡说") == "ai_generated"
+
+
+class TestMatchPayload:
+    def test_best_carries_truncated_preview(self):
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        corpus = "一、投标函\n\n" + "甲" * 5000
+        result = match_tender_section(
+            "投标函", chapter_type="fixed_form", format_section_text=corpus,
+        )
+        payload = _to_match_payload(result, corpus)
+        assert payload["status"] == "matched"
+        assert payload["best"]["title"] == "投标函"
+        assert payload["best"]["start"] == 0
+        assert len(payload["best"]["preview"]) == 4000
+        assert payload["best"]["preview_truncated"] is True
+        assert payload["picked"] == "auto"
+
+    def test_missing_has_no_best(self):
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        corpus = "一、投标函\n\n正文"
+        result = match_tender_section(
+            "不存在", chapter_type="fixed_form", format_section_text=corpus,
+        )
+        payload = _to_match_payload(result, corpus)
+        assert payload["status"] == "missing"
+        assert payload["best"] is None
+
+    def test_na_for_ai_generated(self):
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        result = match_tender_section("服务方案", chapter_type="ai_generated")
+        payload = _to_match_payload(result, "")
+        assert payload["status"] == "na"
+
+    def test_table_preview_present_when_no_text_section(self):
+        """表格章节 best 为空时，抽屉靠 table_preview 显示命中内容。"""
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        tables = [{"page": 33, "table_index": 0,
+                   "rows": [["序号", "服务内容"], ["1", "安保"]]}]
+        corpus = "一、别的章节\n\n正文\n"
+        result = match_tender_section(
+            "序号服务内容", chapter_type="table",
+            format_section_text=corpus, format_tables=tables,
+        )
+        payload = _to_match_payload(result, corpus, tables)
+        assert payload["best"] is None
+        assert payload["table_index"] == 0
+        assert "| 序号 | 服务内容 |" in payload["table_preview"]
+
+    def test_table_preview_absent_for_text_matches(self):
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        corpus = "一、投标函\n\n正文"
+        result = match_tender_section(
+            "投标函", chapter_type="fixed_form", format_section_text=corpus,
+        )
+        payload = _to_match_payload(result, corpus)
+        assert payload["table_preview"] is None

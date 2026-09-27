@@ -394,6 +394,29 @@ def batch_fill_tables(tables: list[dict], table_fills: list[dict], variables: di
     return result
 
 
+def rows_to_markdown(rows: list[list]) -> str:
+    """把 pdfplumber 的行列结构转成 markdown 表格（render_engine 走 markdown 渲染）.
+
+    首行为表头。Cell 为 None 或空串时写空字符串而不是 "None"——"None" 会一路
+    印进成品标书。单元格里的 `|` 必须转义，否则会把表断成多列。
+    """
+    if not rows:
+        return ""
+
+    def _cell(v) -> str:
+        text = "" if v is None else str(v)
+        return text.replace("|", "\\|").replace("\n", " ").strip()
+
+    header = [_cell(c) for c in rows[0]]
+    out = ["| " + " | ".join(header) + " |",
+           "| " + " | ".join("---" for _ in header) + " |"]
+    for row in rows[1:]:
+        cells = [_cell(c) for c in row]
+        cells += [""] * (len(header) - len(cells))
+        out.append("| " + " | ".join(cells[:len(header)]) + " |")
+    return "\n".join(out)
+
+
 def post_scan(text: str) -> list[str]:
     """后处理兜底：扫描残留的空白/占位符."""
     issues = []

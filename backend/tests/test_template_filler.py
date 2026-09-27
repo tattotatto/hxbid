@@ -17,6 +17,7 @@ from app.services.template_filler import (
     extract_fixed_form_section,
     fill_fixed_form_section_from_template,
     fill_fixed_form_section_from_template_with_tables,
+    rows_to_markdown,
     post_scan,
     scan_and_mark_variables,
 )
@@ -1311,3 +1312,28 @@ class TestTableFillsCarriedOut:
             ai_adapter=mock_ai,
         )
         assert table_fills, "table_fills 必须带出来，不能再被丢弃"
+
+
+class TestRowsToMarkdown:
+    """pdfplumber 的行列结构 → markdown 表格（render_engine 走 markdown 渲染）."""
+
+    def test_header_and_body(self):
+        md = rows_to_markdown([["序号", "服务内容"], ["1", "安保"]])
+        assert md.splitlines()[0] == "| 序号 | 服务内容 |"
+        assert md.splitlines()[1] == "| --- | --- |"
+        assert md.splitlines()[2] == "| 1 | 安保 |"
+
+    def test_none_cell_becomes_empty_not_none_string(self):
+        md = rows_to_markdown([["A"], [None]])
+        assert "None" not in md
+
+    def test_pipe_in_cell_is_escaped(self):
+        md = rows_to_markdown([["A|B"], ["x"]])
+        assert "A\|B" in md
+
+    def test_ragged_row_is_padded(self):
+        md = rows_to_markdown([["A", "B", "C"], ["1"]])
+        assert md.splitlines()[2] == "| 1 |  |  |"
+
+    def test_empty_rows(self):
+        assert rows_to_markdown([]) == ""

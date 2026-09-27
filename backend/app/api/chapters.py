@@ -1385,3 +1385,115 @@ async def save_chapter_structure(
     return ChapterStructureSaveResponse(
         success=True, chapters_count=len(tree), pruned_attachments=pruned,
     )
+
+
+# ---------------------------------------------------------------------------
+# 章节试匹配（结构页实时预览命中的招标原文）
+# ---------------------------------------------------------------------------
+
+# 匹配预览的原文片段上限——结构页只是给人看的，没必要把整个小节（可能上万字）
+# 走一遍网络；超出截断并在响应里标记，前端据此提示。
+PREVIEW_MAX_CHARS = 4000
+
+
+def _load_match_inputs(project) -> tuple[dict, str | None]:
+    """取出匹配需要的语料：requirements + 全文（可能为 None）."""
+    from app.services.tender_corpus import load_full_text
+
+    try:
+        requirements = json.loads(project.parsed_requirements_json or "{}")
+    except json.JSONDecodeError:
+        requirements = {}
+    return requirements, load_full_text(requirements, settings.UPLOAD_DIR)
+
+
+def _to_match_payload(result, corpus: str, tables: list[dict] | None = None) -> dict:
+    """把 MatchResult 转成前端要的形状，附上预览片段.
+
+    表格章节的 ``best`` 可能为空（标题文案对不上小节、只按表头选出了表），
+    那不是"没匹配上"——所以额外给出 ``table_preview``，让抽屉有东西可显示。
+    """
+    from app.services.template_filler import rows_to_markdown
+
+    def _cand(c) -> dict:
+        preview = corpus[c.start:c.end]
+        return {
+            "title": c.title,
+            "raw": c.raw,
+            "level": c.level,
+            "start": c.start,
+            "end": c.end,
+            "score": round(c.score, 4),
+            "page": c.page,
+            "preview": preview[:PREVIEW_MAX_CHARS],
+            "preview_truncated": len(preview) > PREVIEW_MAX_CHARS,
+        }
+
+    table_preview = None
+    if result.source == "table" and result.table_index is not None:
+        rows = tables or []
+        if 0 <= result.table_index < len(rows):
+            table_preview = rows_to_markdown(
+                [list(r) for r in (rows[result.table_index].get("rows") or [])][:20]
+            )
+
+    return {
+        "status": result.status,
+        "source": result.source,
+        "best": _cand(result.best) if result.best else None,
+        "candidates": [_cand(c) for c in result.candidates],
+        "table_index": result.table_index,
+        "table_preview": table_preview,
+        # 服务端一律给 auto；用户从候选里点选后由前端改成 manual（见 §4.1）
+        "picked": "auto",
+        "corpus_hash": result.corpus_hash,
+    }
+
+
+class ChapterMatchRequest(BaseModel):
+    title: str = ""
+    type: str = "fixed_form"
+
+
+@router.post("/{project_id}/chapter-structure/match")
+async def match_chapter_section(
+    project_id: str,
+    payload: ChapterMatchRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """试匹配：给定标题与类型，返回命中的招标原文片段或候选列表.
+
+    纯读操作，不改任何状态。前端在标题/类型变化后防抖调用它来刷新徽标。
+    """
+    from app.services.tender_section_matcher import match_tender_section
+
+    result = await db.execute(select(BidProject).where(BidProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status not in _STRUCTURE_EDITABLE_STATUS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目已进入 {project.status} 阶段，不能再试匹配章节",
+        )
+
+    requirements, full_text = _load_match_inputs(project)
+    match_result = match_tender_section(
+        payload.title,
+        chapter_type=payload.type,
+        format_section_text=requirements.get("format_section_text"),
+        full_text=full_text,
+        format_tables=requirements.get("format_tables") or [],
+        format_page_map=requirements.get("format_page_map") or [],
+    )
+
+    # 预览片段取自实际用到的语料
+    if match_result.source == "full_text":
+        corpus = full_text or ""
+    else:
+        corpus = requirements.get("format_section_text") or ""
+    return _to_match_payload(
+        match_result, corpus, requirements.get("format_tables") or [],
+    )
