@@ -460,3 +460,45 @@ class TestWeakCandidatesAreStillOffered:
             "投标函", chapter_type="fixed_form", format_section_text=None,
         )
         assert res.candidates == []
+
+
+class TestTrailingAnnotationIsStripped:
+    """标题末尾的括号注释不是标题的一部分.
+
+    实测：AI 提取的章节标题常带注释后缀 ——「投标承诺书（廉洁诚信承诺书）」
+    「法定代表人授权委托书（含法定代表人身份证明书）」「投标保证金及基本户
+    凭证（投标保证金银行保函）」。而招标原文的小节就叫「三、投标承诺书」。
+    不剥后缀时二者是子串关系，得分 0.8×5/13 ≈ 0.31 低于命中阈值 → 判 missing，
+    用户看到的是红色「未匹配」（13 个需匹配章节里有 5 个是这样）。
+    """
+
+    CORPUS = "三、投标承诺书\n\n承诺正文\n\n四、法定代表人授权委托书\n\n委托正文\n"
+
+    def test_strips_trailing_full_width_parenthetical(self):
+        assert normalize_title("投标承诺书（廉洁诚信承诺书）") == "投标承诺书"
+
+    def test_strips_trailing_half_width_parenthetical(self):
+        assert normalize_title("投标承诺书(廉洁诚信承诺书)") == "投标承诺书"
+
+    def test_strips_trailing_parenthetical_after_numbering(self):
+        assert normalize_title("三、投标承诺书（廉洁诚信承诺书）") == "投标承诺书"
+
+    def test_annotation_suffix_no_longer_blocks_match(self):
+        res = match_tender_section(
+            "投标承诺书（廉洁诚信承诺书）", chapter_type="fixed_form",
+            format_section_text=self.CORPUS,
+        )
+        assert res.status == "matched", "带注释后缀的标题应当能匹配上"
+        assert res.best.title == "投标承诺书"
+
+    def test_whole_title_in_parentheses_is_not_emptied(self):
+        """整条标题都在括号里时不能剥成空串（否则啥都匹配不上）."""
+        assert normalize_title("（投标函）") != ""
+        assert normalize_title("（投标函）") == "投标函"
+
+    def test_embedded_parenthetical_is_kept(self):
+        """只剥**末尾**的注释；中间带括号的标题不动（括号会转半角，这是既有的归一化）."""
+        assert normalize_title("投标函（格式）及附录") == "投标函(格式)及附录"
+
+    def test_empty_parenthetical_does_not_break(self):
+        assert normalize_title("投标函（）") == "投标函"

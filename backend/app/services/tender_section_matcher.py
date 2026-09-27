@@ -61,6 +61,13 @@ _FULLWIDTH_MAP = str.maketrans(
     "0123456789().、 ",
 )
 
+# 标题末尾的括号注释（「投标承诺书（廉洁诚信承诺书）」里的后缀）——
+# 归一化时剥掉。只认**末尾**的，中间带括号的标题不动。
+_TRAILING_PAREN_RE = re.compile(r"[（(][^（()）]{0,80}[）)]\s*$")
+
+# 整条标题就是一个括号（「（投标函）」）—— 脱括号而不是剥成空串
+_WHOLE_PAREN_RE = re.compile(r"^\s*[（(]([^（()）]{1,80})[）)]\s*$")
+
 # 标题行前的编号前缀，归一化时剥掉
 _TITLE_NUM_PREFIX_RE = re.compile(
     r"^\s*(?:"
@@ -84,15 +91,31 @@ class SectionHeader:
 
 
 def normalize_title(s: str) -> str:
-    """归一化标题：全角转半角、剥编号前缀、去所有空白、转小写.
+    """归一化标题：全角转半角、剥编号前缀、**剥末尾括号注释**、去空白、转小写.
 
     用户标题常从 Word 粘贴带全角空格与手写编号，招标原文的标题行也带编号，
     两边都剥掉才能等价比较。
+
+    末尾的括号注释也要剥：AI 提取的章节标题常带注释后缀 ——
+    「投标承诺书（廉洁诚信承诺书）」「法定代表人授权委托书（含法定代表人身份
+    证明书）」—— 而招标原文的小节就叫「三、投标承诺书」。不剥时二者只是子串
+    关系（0.8×5/13 ≈ 0.31），低于命中阈值 → 判 missing，用户看到假的「未匹配」。
+    两侧都过这个函数，所以剥了是一致的。
     """
     if not s:
         return ""
     s = s.translate(_FULLWIDTH_MAP)
     s = _TITLE_NUM_PREFIX_RE.sub("", s)
+
+    without_annotation = _TRAILING_PAREN_RE.sub("", s).strip()
+    if without_annotation:
+        s = without_annotation
+    else:
+        # 整条标题都在括号里（「(投标函)」）→ 脱括号，别剥成空串
+        inner = _WHOLE_PAREN_RE.match(s)
+        if inner:
+            s = inner.group(1)
+
     return re.sub(r"\s+", "", s).strip().lower()
 
 
