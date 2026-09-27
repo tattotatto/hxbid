@@ -245,3 +245,38 @@ class TestAttachmentUploadRules:
         assert _is_allowed_attachment("a.PDF") is True
         assert _is_allowed_attachment("a.exe") is False
         assert _is_allowed_attachment("noext") is False
+
+
+class TestBuildChapterMetaCarriesMatchAndAttachments:
+    def test_match_and_attachments_are_merged(self):
+        from app.api.chapters import _build_chapter_meta
+
+        ch_data = {
+            "number": "一",
+            "title": "投标函",
+            "match": {"status": "matched", "start": 10, "end": 40,
+                      "corpus_hash": "sha1:x"},
+            "attachments": [{"kind": "upload", "id": "u1", "label": "凭证",
+                             "path": "project_p1/a.png"}],
+        }
+        meta = json.loads(_build_chapter_meta(ch_data, None))
+        assert meta["match"]["start"] == 10
+        assert meta["attachments"][0]["label"] == "凭证"
+
+    def test_absent_match_is_omitted_not_null(self):
+        from app.api.chapters import _build_chapter_meta
+
+        meta = json.loads(_build_chapter_meta({"title": "甲"}, None))
+        assert "match" not in meta
+        assert meta["attachments"] == []
+
+    def test_part_metadata_and_global_rules_merged(self):
+        from app.api.chapters import _build_chapter_meta
+
+        part = {"table_schema": [{"name": "序号"}],
+                "signature_block": {"lines": ["投标人：（公章）"]}}
+        meta = json.loads(_build_chapter_meta(
+            {"title": "投标函"}, part, {"numbering_style": "chinese_legal"}))
+        assert meta["table_schema"] == [{"name": "序号"}]
+        assert meta["signature_block"]["lines"] == ["投标人：（公章）"]
+        assert meta["numbering_style"] == "chinese_legal"

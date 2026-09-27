@@ -78,6 +78,35 @@ def _generation_chapter_type(raw: str) -> str:
     return raw if raw in USER_SELECTABLE_TYPES else "ai_generated"
 
 
+def _build_chapter_meta(
+    ch_data: dict, part: dict | None, global_rules: dict | None = None,
+) -> str:
+    """组装 ProjectChapter.chapter_meta_json.
+
+    ``match`` / ``attachments`` 是 2026-09-27 新增的键：前者是结构页固化的
+    原文匹配引用（生成阶段据此切片），后者是附件清单。老项目没有这两个键，
+    读取侧一律兜底（match 视作 status=na，attachments 视作 []）。
+    """
+    meta = {
+        "number": ch_data.get("number", ""),
+        "format_notes": ch_data.get("format_notes", ""),
+        "scoring_context": ch_data.get("scoring_context", ""),
+        "table_columns": ch_data.get("table_columns", []),
+        "attachments": list(ch_data.get("attachments") or []),
+    }
+    if ch_data.get("match"):
+        meta["match"] = ch_data["match"]
+    if part:
+        # 合并招标文件格式模板中的表/签章/序号约束，供生成阶段严格遵循
+        meta["table_schema"] = part.get("table_schema", [])
+        meta["fixed_text_segments"] = part.get("fixed_text_segments", [])
+        meta["signature_block"] = part.get("signature_block", {})
+        meta["numbering_style"] = (global_rules or {}).get(
+            "numbering_style", "chinese_legal",
+        )
+    return json.dumps(meta, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -358,9 +387,14 @@ class OutlineConfirmResponse(BaseModel):
     added_from_rubric: list[str] = []
 
 
+class OutlineConfirmRequest(BaseModel):
+    chapters: list[dict] | None = None
+
+
 @router.post("/{project_id}/outline/confirm", response_model=OutlineConfirmResponse)
 async def confirm_outline(
     project_id: str,
+    payload: OutlineConfirmRequest | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -368,6 +402,9 @@ async def confirm_outline(
 
     这是「目录确认门」唯一合法的状态出口：从 structure_ready 推进到 collecting。
     物化 ProjectChapter 行的逻辑与 /chapters/lock 共享 _materialise_chapters。
+
+    body 可选带整棵树——带了就先存再物化，避免"用户改了忘保存"导致白改。
+    不带时行为与历史完全一致。
     """
     result = await db.execute(
         select(BidProject)
@@ -386,6 +423,12 @@ async def confirm_outline(
                 "请先 POST /extract-chapters，再走确认流程。"
             ),
         )
+
+    if payload is not None and payload.chapters:
+        tree = _normalize_chapter_tree(payload.chapters)
+        await _prune_attachments(tree, db)
+        project.chapter_structure_json = json.dumps(tree, ensure_ascii=False)
+        await db.flush()
 
     chapters_json = project.chapter_structure_json
     if not chapters_json or chapters_json in ("[]", "{}", ""):
@@ -462,21 +505,6 @@ async def _materialise_chapters(
                 return part
         return None
 
-    def _build_meta(ch_data: dict, part: dict | None) -> str:
-        meta = {
-            "number": ch_data.get("number", ""),
-            "format_notes": ch_data.get("format_notes", ""),
-            "scoring_context": ch_data.get("scoring_context", ""),
-            "table_columns": ch_data.get("table_columns", []),
-        }
-        if part:
-            # 合并招标文件格式模板中的表/签章/序号约束，供生成阶段严格遵循
-            meta["table_schema"] = part.get("table_schema", [])
-            meta["fixed_text_segments"] = part.get("fixed_text_segments", [])
-            meta["signature_block"] = part.get("signature_block", {})
-            meta["numbering_style"] = global_rules.get("numbering_style", "chinese_legal")
-        return json.dumps(meta, ensure_ascii=False)
-
     def _make_chapter(
         title: str,
         order_index: int,
@@ -498,12 +526,16 @@ async def _materialise_chapters(
     # Create ProjectChapter records（含格式模板元数据合并）
     created: list[ProjectChapter] = []
     for ch_data in chapters:
-        ch_type = ch_data.get("type", "ai_generated")
+        ch_type = _generation_chapter_type(ch_data.get("type", "ai_generated"))
         chapter = _make_chapter(
             title=ch_data.get("title", ""),
             order_index=ch_data.get("order_index", 0),
             ch_type=ch_type,
-            meta=_build_meta(ch_data, _find_structure_part(ch_data.get("title", ""))),
+            meta=_build_chapter_meta(
+                ch_data,
+                _find_structure_part(ch_data.get("title", "")),
+                global_rules,
+            ),
             children=ch_data.get("children", []),
         )
         db.add(chapter)
@@ -530,12 +562,12 @@ async def _materialise_chapters(
                 final_order.append(match)
                 consumed.add(match.id)
             elif part.get("required", True):
-                ch_type = part.get("type", "ai_generated")
+                ch_type = _generation_chapter_type(part.get("type", "ai_generated"))
                 placeholder = _make_chapter(
                     title=part_title,
                     order_index=0,  # 下方统一重新编号
                     ch_type=ch_type,
-                    meta=_build_meta({}, part),
+                    meta=_build_chapter_meta({}, part, global_rules),
                     children=part.get("children", []),
                 )
                 db.add(placeholder)
