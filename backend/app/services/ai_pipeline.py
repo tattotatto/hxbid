@@ -1390,6 +1390,34 @@ def _resolve_section_text(
     return None, [f"「{chapter.title}」未匹配到招标原文，将改由 AI 撰写"]
 
 
+def _generate_attachment_chapter(chapter, meta: dict) -> tuple[str, list[str]]:
+    """把附件清单渲染成 ``[IMG:path|label]`` 标记行，返回 (内容, 警告列表).
+
+    标记由 ``render_engine._render_image_marker`` 就地出图，两条渲染分支都认。
+    去重不在这一步做——同一张扫描件挂了多个章节时，由保存章节结构时的
+    ``_prune_attachments``（按内容 md5）拦掉，与
+    ``materials_injection.drop_already_embedded`` 同一口径。
+    """
+    warnings: list[str] = []
+    attachments = (meta or {}).get("attachments") or []
+    if not attachments:
+        return "", [f"「{chapter.title}」未挂载任何附件，将渲染为占位页"]
+
+    lines: list[str] = []
+    for att in attachments:
+        path = (att or {}).get("path") or ""
+        label = (att or {}).get("label") or ""
+        if not path:
+            warnings.append(
+                f"「{chapter.title}」的附件「{label or (att or {}).get('id')}」缺少文件路径，已跳过"
+            )
+            continue
+        if not label:
+            label = path.rsplit("/", 1)[-1]
+        lines.append(f"[IMG:{path}|{label}]")
+    return "\n".join(lines), warnings
+
+
 async def _generate_table_chapter(
     chapter, meta: dict, requirements: dict, company_profile: dict, ai_adapter,
     full_text: str | None,
@@ -1553,7 +1581,7 @@ async def generate_from_chapter_structure(
     full_text = load_full_text(requirements, settings.UPLOAD_DIR)
 
     for chapter in chapters:
-        if chapter.chapter_type in ("fixed_form", "table"):
+        if chapter.chapter_type in ("fixed_form", "table", "attachment"):
             chapter_meta = json.loads(chapter.chapter_meta_json) if chapter.chapter_meta_json else {}
 
             # Generate file section content.
@@ -1595,6 +1623,12 @@ async def generate_from_chapter_structure(
                     ai_adapter, full_text,
                 )
                 format_warnings.extend(table_warnings)
+
+            elif chapter.chapter_type == "attachment":
+                file_content, att_warnings = _generate_attachment_chapter(
+                    chapter, chapter_meta,
+                )
+                format_warnings.extend(att_warnings)
 
             if not file_content and chapter.chapter_type == "fixed_form":
                 try:

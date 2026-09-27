@@ -293,3 +293,22 @@ class TestImageContentKey:
 
     def test_same_missing_path_is_stable(self):
         assert render_engine.image_content_key("gone/a.png") == render_engine.image_content_key("gone/a.png")
+
+
+def test_missing_image_file_is_skipped_not_crashed(tmp_path, monkeypatch):
+    """场景：用户清理 uploads，附件引用的文件没了 → 跳过该张并继续导出.
+
+    附件类章节的内容就是 [IMG:...] 标记行，标记由 _render_image_marker 就地
+    出图。文件不存在时必须静默跳过而不是抛异常 —— 一次导出几十个附件，
+    少一张不该让整份标书导不出来。
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+    doc = Document()
+
+    assert render_engine._render_image_marker(
+        doc, "[IMG:不存在/的文件.png|丢失的凭证]", STYLE,
+    ) is True, "标记行应当被识别（返回 True），只是插不进图"
+
+    assert len(doc.inline_shapes) == 0, "文件不存在时不能插图，也不能抛异常"
