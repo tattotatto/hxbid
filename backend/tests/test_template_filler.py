@@ -16,6 +16,7 @@ from app.services.template_filler import (
     build_variable_values,
     extract_fixed_form_section,
     fill_fixed_form_section_from_template,
+    fill_fixed_form_section_from_template_with_tables,
     post_scan,
     scan_and_mark_variables,
 )
@@ -1212,3 +1213,101 @@ class TestFillFixedFormSectionFromTemplate:
         assert "根据贵方 保安业务项目 招标文件" in result
         # 5. 占位符词已被替换
         assert "招标人名称" not in result
+
+
+class TestBoundaryWithSubLevelHeadings:
+    """回归：截取边界必须严格按层级.
+
+    旧实现只认「一、」式编号，遇到 `（一）` 这类子级标题根本不当边界（子级
+    小节能留在父级正文里，这是对的），但它同时也不认 `（一）` 这类**标题本身**
+    ——所以「投标函附录」这种子级小节压根提取不出来。
+    """
+
+    CORPUS = (
+        "一、投标函\n\n"
+        "致：某某单位\n"
+        "我方已仔细阅读。\n\n"
+        "（一）投标函附录\n\n"
+        "附录内容\n\n"
+        "二、开标一览表\n\n"
+        "序号 | 服务内容\n"
+    )
+
+    def test_parent_body_keeps_sub_level_section(self):
+        out = extract_fixed_form_section(self.CORPUS, "投标函")
+        assert "我方已仔细阅读" in out
+        assert "附录内容" in out, "子级小节属于父级正文"
+        assert "开标一览表" not in out, "同级标题必须截断"
+
+    def test_child_section_extractable_on_its_own(self):
+        """子级标题现在能被识别成一个小节——旧实现返回空串。"""
+        out = extract_fixed_form_section(self.CORPUS, "投标函附录")
+        assert "附录内容" in out
+        assert "我方已仔细阅读" not in out
+
+
+class TestSectionTextOverride:
+    """传了原文片段就以它为准，不再按标题去 format_section_text 里找.
+
+    这是「所见即所得」的关键：用户在结构页看到的预览，必须就是最终进标书
+    的那一段。
+    """
+
+    @staticmethod
+    def _mock_ai(payload: dict):
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.return_value = json.dumps(payload)
+        return mock_ai
+
+    @staticmethod
+    def _empty_scan():
+        return {"text_replacements": [], "table_fills": [], "warnings": []}
+
+    @pytest.mark.asyncio
+    async def test_override_wins_over_relocation(self):
+        out = await fill_fixed_form_section_from_template(
+            section_title="投标函",
+            format_section_text="一、投标函\n\n【这一份不该被用到】\n",
+            section_text_override="投标函\n\n投标人名称：某某公司\n",
+            company_profile=MOCK_COMPANY,
+            requirements=MOCK_REQS,
+            ai_adapter=self._mock_ai(self._empty_scan()),
+        )
+        assert "这一份不该被用到" not in out, "传了 override 就不得再按标题重定位"
+        assert "投标人名称" in out
+
+    @pytest.mark.asyncio
+    async def test_override_strips_duplicate_leading_heading(self):
+        out = await fill_fixed_form_section_from_template(
+            section_title="投标函",
+            format_section_text="一、投标函\n\n别的\n",
+            section_text_override="投标函\n投标函\n\n正文甲\n",
+            company_profile=MOCK_COMPANY,
+            requirements=MOCK_REQS,
+            ai_adapter=self._mock_ai(self._empty_scan()),
+        )
+        assert out.startswith("正文甲"), f"重复标题行应被剥掉, got {out!r}"
+
+
+class TestTableFillsCarriedOut:
+    @pytest.mark.asyncio
+    async def test_table_fills_are_returned_not_dropped(self):
+        """旧实现把 scan_result['table_fills'] 丢掉了，表格填充是死代码。"""
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.return_value = json.dumps({
+            "text_replacements": [],
+            "table_fills": [
+                {"page": 33, "table_index": 0, "row": 1, "col": 1, "var": "company_name"}
+            ],
+            "warnings": [],
+        })
+        _text, table_fills = await fill_fixed_form_section_from_template_with_tables(
+            section_title="开标一览表",
+            format_section_text="一、开标一览表\n\n序号 | 服务内容\n",
+            format_tables=[{"page": 33, "table_index": 0,
+                            "rows": [["序号", "服务内容"], ["1", ""]]}],
+            company_profile=MOCK_COMPANY,
+            requirements=MOCK_REQS,
+            ai_adapter=mock_ai,
+        )
+        assert table_fills, "table_fills 必须带出来，不能再被丢弃"

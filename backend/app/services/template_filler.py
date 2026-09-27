@@ -12,6 +12,9 @@ from datetime import date
 from typing import Any, Dict, List
 
 from app.services.ai_adapter import AIEmptyContentError
+from app.services.tender_section_matcher import (
+    match_tender_section,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -410,18 +413,11 @@ def post_scan(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 固定格式小节截取（从 format_section_text 中按数字标题定位单个小节）
+# 固定格式小节截取（从 format_section_text 中按标题定位单个小节）
+#
+# 定位与截取已抽到 app/services/tender_section_matcher.py（编号体系、层级边界、
+# 全文兜底都在那边）。本模块只保留「去掉重复标题行」这一步后处理。
 # ---------------------------------------------------------------------------
-
-# 数字章节标题，例如「二、投标函」「十一、商务文件其他材料」
-SECTION_HEADER_RE = re.compile(
-    r'^[ \t]*([一二三四五六七八九十]{1,3}[、．\.])([^\n]{1,80})$',
-    re.MULTILINE,
-)
-
-# 独占一行的页码，如「-72-」「72」「— 72 —」。
-# 用于判断标题行后面到底有没有正文（目录条目后面只有页码或什么都没有）。
-_PAGE_NUMBER_LINE_RE = re.compile(r'^[\s\-—–]*\d+[\s\-—–]*$', re.MULTILINE)
 
 
 def _normalize_title(s: str) -> str:
@@ -458,8 +454,16 @@ def _strip_duplicate_heading(section_text: str, section_title: str) -> str:
 def extract_fixed_form_section(format_section_text: str, section_title: str) -> str:
     """从格式章节全文中定位并截取指定固定格式小节.
 
-    匹配「数字+顿号+标题」行（如「二、投标函」）或独立标题行（如「投标承诺书」），
-    截取到下一数字章节标题前。
+    委托 ``tender_section_matcher`` 做匹配与截取，本函数只保留"返回纯文本"的
+    老签名，供既有调用方继续使用。
+
+    与旧实现的行为差异（**有意为之**）：截取边界改为"下一个层级 ≤ 本级的标题"，
+    且编号体系扩展到 `（一）` / `1.` / `1.1` / `第X节`。因此子级小节既能留在
+    父级正文里，也能被单独提取出来。
+
+    ``ambiguous``（同名小节出现多次）时取分数最高、位置最靠前的一个——保持
+    旧实现"取首个可用匹配"的宽容度，避免老项目突然大面积回退到 AI 生成；
+    需要用户挑候选的是**结构页**，走 ``match_tender_section`` 的完整状态。
 
     Args:
         format_section_text: 完整的「投标文件格式」章节文本。
@@ -471,57 +475,15 @@ def extract_fixed_form_section(format_section_text: str, section_title: str) -> 
     if not format_section_text or not section_title:
         return ""
 
-    target_norm = _normalize_title(section_title)
-
-    # 找所有数字章节标题
-    headers = []
-    for m in SECTION_HEADER_RE.finditer(format_section_text):
-        headers.append({
-            "pos": m.start(),
-            "end": m.end(),
-            "body": m.group(2).strip(),
-            "body_norm": _normalize_title(m.group(2)),
-        })
-
-    def _body_of(idx: int) -> str:
-        """标题行与下一个标题之间的正文（末节取到文末）."""
-        start = headers[idx]["end"]
-        stop = (
-            headers[idx + 1]["pos"]
-            if idx + 1 < len(headers)
-            else len(format_section_text)
-        )
-        return format_section_text[start:stop]
-
-    def _has_body(raw: str) -> bool:
-        """剔除独占行的页码后是否还有正文.
-
-        目录里的标题连续成行，标题后要么没有内容，要么只剩一个页码
-        （如「十九、附件」后面是「-73-」）。真小节后面必有正文。
-        """
-        return bool(_PAGE_NUMBER_LINE_RE.sub("", raw).strip())
-
-    # 匹配目标标题：完全相等或目标标题是标题行的子串（容忍"投标函" vs "二、投标函"）。
-    # 必须跳过目录条目——它与真小节共用同一个标题正则，且在文中先出现；
-    # 取首个匹配会截出「一、封面」这 4 个字当成整章内容。
-    start_idx = None
-    for i, h in enumerate(headers):
-        if h["body_norm"] == target_norm or target_norm in h["body_norm"]:
-            if not _has_body(_body_of(i)):
-                continue
-            start_idx = i
-            break
-
-    if start_idx is None:
+    result = match_tender_section(
+        section_title,
+        chapter_type="fixed_form",
+        format_section_text=format_section_text,
+    )
+    if result.best is None:
         return ""
 
-    section_start = headers[start_idx]["pos"]
-    if start_idx + 1 < len(headers):
-        section_end = headers[start_idx + 1]["pos"]
-    else:
-        section_end = len(format_section_text)
-
-    section_text = format_section_text[section_start:section_end].strip()
+    section_text = format_section_text[result.best.start:result.best.end].strip()
     return _strip_duplicate_heading(section_text, section_title)
 
 
@@ -532,6 +494,7 @@ async def fill_fixed_form_section_from_template(
     company_profile: dict | None = None,
     requirements: dict | None = None,
     ai_adapter=None,
+    section_text_override: str | None = None,
 ) -> str:
     """从招标文件的格式章节原文模板中提取并填充指定固定格式小节.
 
@@ -549,21 +512,56 @@ async def fill_fixed_form_section_from_template(
         company_profile: 公司信息字典。
         requirements: 解析后的招标文件要求字典。
         ai_adapter: AI 适配器实例。
+        section_text_override: 已经切好的原文片段。传了就直接用它，**跳过按标题
+            重新定位**——结构页固化的匹配区间必须被尊重，否则"用户看到的预览"
+            与"最终进标书的内容"可能不是同一段（见设计文档 §8.1）。
 
     Returns:
         填充后的小节文本。找不到该小节、AI 扫描失败、或格式章节为空时返回空字符串，
         由调用方走 ``generate_file_section`` 兜底。
     """
-    if not format_section_text or not section_title:
-        return ""
+    filled, _table_fills = await fill_fixed_form_section_from_template_with_tables(
+        section_title=section_title,
+        format_section_text=format_section_text,
+        format_tables=format_tables,
+        company_profile=company_profile,
+        requirements=requirements,
+        ai_adapter=ai_adapter,
+        section_text_override=section_text_override,
+    )
+    return filled
 
-    section_text = extract_fixed_form_section(format_section_text, section_title)
+
+async def fill_fixed_form_section_from_template_with_tables(
+    section_title: str,
+    format_section_text: str,
+    format_tables: list[dict] | None = None,
+    company_profile: dict | None = None,
+    requirements: dict | None = None,
+    ai_adapter=None,
+    section_text_override: str | None = None,
+) -> tuple[str, list[dict]]:
+    """同 fill_fixed_form_section_from_template，但把 table_fills 一并带出.
+
+    旧实现把 ``scan_result["table_fills"]`` 直接丢弃，导致 ``batch_fill_tables``
+    成了死代码；表格类章节因此拿不到招标表格里的填值位置。
+
+    Returns:
+        (填充后文本, table_fills)；失败时返回 ``("", [])``。
+    """
+    if not format_section_text or not section_title:
+        return "", []
+
+    if section_text_override:
+        section_text = _strip_duplicate_heading(section_text_override, section_title)
+    else:
+        section_text = extract_fixed_form_section(format_section_text, section_title)
     if not section_text:
         logger.info(
             "Section '%s' not found in format_section_text, caller should fallback",
             section_title,
         )
-        return ""
+        return "", []
 
     variables = build_variable_values(company_profile, requirements)
 
@@ -582,7 +580,7 @@ async def fill_fixed_form_section_from_template(
             "Scan for section '%s' returned no replacements (%s); caller should fallback",
             section_title, scan_result["warnings"],
         )
-        return ""
+        return "", []
 
     # 把 variable 值注入到 replacement（如果 AI 没填）
     enriched = []
@@ -622,7 +620,7 @@ async def fill_fixed_form_section_from_template(
         "Filled fixed-form section '%s': %d chars, %d replacements applied",
         section_title, len(filled_text), len(enriched),
     )
-    return filled_text
+    return filled_text, list(scan_result.get("table_fills") or [])
 
 
 # ---------------------------------------------------------------------------
