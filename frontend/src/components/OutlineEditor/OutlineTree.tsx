@@ -8,8 +8,16 @@ import {
   CloseOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
-import type { DataNode } from 'antd/es/tree'
+import type { DataNode, TreeProps } from 'antd/es/tree'
 import type { OutlineChapter, ChapterType } from '../../api/outline'
+import {
+  flatten,
+  getNode,
+  insertNode,
+  moveNode,
+  removeNode,
+  updateNode,
+} from './outlineTreeOps'
 
 interface OutlineTreeProps {
   chapters: OutlineChapter[]
@@ -38,108 +46,6 @@ const TYPE_LABELS: Record<ChapterType, string> = {
 
 let nextId = 0
 const tempId = () => `__new_${Date.now()}_${nextId++}`
-
-type FlatNode = {
-  key: string
-  chapter: OutlineChapter
-  parent: OutlineChapter[] | null
-  path: number[] // index path from root
-}
-
-function flatten(
-  chapters: OutlineChapter[],
-  parent: OutlineChapter[] | null,
-  basePath: number[],
-): FlatNode[] {
-  const out: FlatNode[] = []
-  chapters.forEach((ch, idx) => {
-    const path = [...basePath, idx]
-    const key = path.join('.')
-    out.push({ key, chapter: ch, parent, path })
-    if (ch.children && ch.children.length > 0) {
-      out.push(...flatten(ch.children, chapters, path))
-    }
-  })
-  return out
-}
-
-function getNode(chapters: OutlineChapter[], path: number[]): OutlineChapter | null {
-  let arr: OutlineChapter[] | undefined = chapters
-  let node: OutlineChapter | null = null
-  for (const idx of path) {
-    if (!arr) return null
-    node = arr[idx]
-    arr = node?.children
-  }
-  return node
-}
-
-function updateNode(
-  chapters: OutlineChapter[],
-  path: number[],
-  updater: (n: OutlineChapter) => OutlineChapter,
-): OutlineChapter[] {
-  if (path.length === 0) return chapters
-  const [head, ...rest] = path
-  return chapters.map((ch, idx) => {
-    if (idx !== head) return ch
-    if (rest.length === 0) return updater(ch)
-    return { ...ch, children: updateNode(ch.children ?? [], rest, updater) }
-  })
-}
-
-function removeNode(chapters: OutlineChapter[], path: number[]): OutlineChapter[] {
-  if (path.length === 0) return chapters
-  const [head, ...rest] = path
-  if (rest.length === 0) {
-    return chapters.filter((_, idx) => idx !== head)
-  }
-  return chapters.map((ch, idx) => {
-    if (idx !== head) return ch
-    return { ...ch, children: removeNode(ch.children ?? [], rest) }
-  })
-}
-
-function insertNode(
-  chapters: OutlineChapter[],
-  parentPath: number[],
-  position: 'child' | 'after',
-  newNode: OutlineChapter,
-): OutlineChapter[] {
-  if (position === 'after') {
-    // 插入到 parentPath 节点之后（同级）。parentPath = [] 表示插到最前面。
-    if (parentPath.length === 0) {
-      return [newNode, ...chapters]
-    }
-    const [head, ...rest] = parentPath
-    return chapters.map((ch, idx) => {
-      if (idx !== head) return ch
-      if (rest.length === 0) {
-        // 当前节点是兄弟的目标 → 把 newNode 紧接其后
-        // 这里 rest=[] 但 parentPath 非空，意味着在某个父节点里。
-        // 父节点的 children 在下一层 updateNode 处理。
-        return ch
-      }
-      return { ...ch, children: insertNode(ch.children ?? [], rest, 'after', newNode) }
-    })
-  }
-
-  // child: 在 parentPath 节点下添加子节点
-  if (parentPath.length === 0) {
-    return [...chapters, newNode]
-  }
-  const [head, ...rest] = parentPath
-  return chapters.map((ch, idx) => {
-    if (idx !== head) return ch
-    const newChildren =
-      rest.length === 0
-        ? [...(ch.children ?? []), newNode]
-        : [...(ch.children ?? [])].map((c, i) =>
-            i === rest[0] ? insertNode([c], rest.slice(1), 'child', newNode)[0] : c,
-          )
-    return { ...ch, children: newChildren }
-  })
-}
 
 function makeNewChapter(orderIndex: number): OutlineChapter {
   return {
@@ -201,6 +107,21 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({ chapters, onChange }) => {
     }
     const key = String(keys[0])
     setSelectedPath(key.split('.').map((s) => Number(s)))
+  }
+
+  const handleDrop: TreeProps['onDrop'] = (info) => {
+    const dragPath = String(info.dragNode.key).split('.').map(Number)
+    const dropPath = String(info.node.key).split('.').map(Number)
+    // antd 的 dropPosition 是相对投影值：-1 之前、0 之内、1 之后
+    const dropPos = info.node.pos.split('-')
+    const dropOffset = info.dropPosition - Number(dropPos[dropPos.length - 1])
+
+    const position: 'before' | 'after' | 'inside' =
+      info.dropToGap ? (dropOffset < 0 ? 'before' : 'after') : 'inside'
+
+    const next = moveNode(chapters, dragPath, dropPath, position)
+    if (next === chapters) return
+    onChange(next)
   }
 
   const handleAdd = (position: 'top' | 'child') => {
@@ -328,13 +249,15 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({ chapters, onChange }) => {
             defaultExpandAll
             selectedKeys={selectedKey ? [selectedKey] : []}
             onSelect={handleSelect}
+            draggable
+            onDrop={handleDrop}
             blockNode
             showLine
           />
         )}
       </div>
       <div style={{ marginTop: 8, color: '#999', fontSize: 12 }}>
-        共 {chapters.length} 个顶级章节 / {flatList.length} 个节点（含子章节）。本地手动编辑仅本会话内有效，刷新页面会还原；通过 AI 对话修改会持久化到服务器。
+        共 {chapters.length} 个顶级章节 / {flatList.length} 个节点（含子章节）。拖拽可调整顺序与层级，修改会自动保存。
       </div>
     </div>
   )

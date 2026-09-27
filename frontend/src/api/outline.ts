@@ -3,6 +3,46 @@ import type { RubricCover } from './scoring'
 
 export type ChapterType = 'fixed_form' | 'table' | 'ai_generated' | 'attachment' | 'mixed'
 
+/** 用户可在结构页选择的类型（mixed 由 AI 提取产生，保留展示但不可选） */
+export const USER_SELECTABLE_TYPES: ChapterType[] = [
+  'fixed_form',
+  'table',
+  'attachment',
+  'ai_generated',
+]
+
+export interface OutlineMatchCandidate {
+  title: string
+  raw: string
+  level: number
+  start: number
+  end: number
+  score: number
+  page: number | null
+  preview: string
+  preview_truncated: boolean
+}
+
+export interface OutlineMatchResult {
+  status: 'matched' | 'ambiguous' | 'missing' | 'na'
+  source: string | null
+  best: OutlineMatchCandidate | null
+  candidates: OutlineMatchCandidate[]
+  table_index: number | null
+  /** 表格章节的命中内容（best 为空时抽屉靠它显示） */
+  table_preview: string | null
+  /** auto=系统最佳；manual=用户从候选里点选过 */
+  picked: 'auto' | 'manual'
+  corpus_hash: string | null
+}
+
+export interface OutlineAttachment {
+  kind: 'qualification' | 'personnel_cert' | 'contract' | 'upload'
+  id: string
+  label: string
+  path: string
+}
+
 export interface OutlineChapter {
   order_index: number
   number: string
@@ -17,6 +57,10 @@ export interface OutlineChapter {
   table_columns?: string[]
   /** 评分指标自动补入的节点标记（「来自评标办法」徽标） */
   source?: string
+  /** 结构页固化的招标原文匹配引用（生成阶段据此切片） */
+  match?: OutlineMatchResult | null
+  /** 附件清单（仅 type === 'attachment' 有意义） */
+  attachments?: OutlineAttachment[]
   children?: OutlineChapter[]
 }
 
@@ -79,9 +123,51 @@ export const outlineApi = {
     return res.data
   },
 
-  /** 新增：唯一的「目录确认门」出口，物化 ProjectChapter + status -> collecting */
-  confirm: async (projectId: string): Promise<OutlineConfirmResponse> => {
-    const res = await client.post<OutlineConfirmResponse>(`/bid/${projectId}/outline/confirm`)
+  /** 保存整棵章节结构树（拖拽/改名/改类型/挂附件后调用） */
+  saveStructure: async (projectId: string, chapters: OutlineChapter[]): Promise<void> => {
+    await client.put(`/bid/${projectId}/chapter-structure`, { chapters })
+  },
+
+  /** 试匹配：给定标题与类型，返回命中的招标原文片段或候选 */
+  match: async (
+    projectId: string,
+    title: string,
+    type: ChapterType,
+  ): Promise<OutlineMatchResult> => {
+    const res = await client.post<OutlineMatchResult>(
+      `/bid/${projectId}/chapter-structure/match`,
+      { title, type },
+    )
+    return res.data
+  },
+
+  /** 上传本项目专用附件，返回一条可塞进章节节点的附件记录 */
+  uploadAttachment: async (
+    projectId: string,
+    file: File,
+    label: string,
+  ): Promise<OutlineAttachment> => {
+    const form = new FormData()
+    form.append('file', file)
+    // label 是标量字段：后端用 Form() 接，必须走 FormData 而不是 query
+    form.append('label', label)
+    const res = await client.post<OutlineAttachment>(
+      `/bid/${projectId}/attachments/upload`,
+      form,
+    )
+    return res.data
+  },
+
+  /** 唯一的「目录确认门」出口，物化 ProjectChapter + status -> collecting。
+   *  带 chapters 时先存再物化，避免"改了忘保存" */
+  confirm: async (
+    projectId: string,
+    chapters?: OutlineChapter[],
+  ): Promise<OutlineConfirmResponse> => {
+    const res = await client.post<OutlineConfirmResponse>(
+      `/bid/${projectId}/outline/confirm`,
+      chapters ? { chapters } : {},
+    )
     return res.data
   },
 }
