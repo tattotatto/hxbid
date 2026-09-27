@@ -19,6 +19,7 @@ import {
   Input,
   InputNumber,
   Alert,
+  Tooltip,
 } from 'antd'
 import type { InputRef } from 'antd'
 import {
@@ -639,6 +640,20 @@ export default function ProjectWorkflow() {
     done()
   }
 
+  // 与后端 _GENERATABLE_STATUS 一致：目录确认之前不许生成。
+  // 前端也拦一道，免得用户点了拿到 400 再回头猜。
+  const GENERATABLE_STATUS = ['parsed', 'review', 'error', 'exported', 'generating']
+  const generateBlockedHint =
+    project.status === 'collecting'
+      ? '请先完成信息搜集'
+      : project.status === 'structure_ready'
+        ? '请先到「目录确认」页确认目录'
+        : project.status === 'archived'
+          ? '项目已归档'
+          : !GENERATABLE_STATUS.includes(project.status)
+            ? `当前状态「${project.status}」不允许生成`
+            : ''
+
   const handleGenerate = async () => {
     if (!id) return
     setGenerating(true)
@@ -997,15 +1012,17 @@ export default function ProjectWorkflow() {
             style={{ width: 180 }}
             disabled={generating || retrying}
           />
-          <Button
-            type="primary"
-            icon={<ThunderboltOutlined />}
-            loading={generating}
-            onClick={handleGenerate}
-            disabled={generating || retrying || project.status === 'collecting'}
-          >
-            一键生成标书
-          </Button>
+          <Tooltip title={generateBlockedHint}>
+            <Button
+              type="primary"
+              icon={<ThunderboltOutlined />}
+              loading={generating}
+              onClick={handleGenerate}
+              disabled={generating || retrying || !!generateBlockedHint}
+            >
+              一键生成标书
+            </Button>
+          </Tooltip>
           <Select
             value={selectedTemplateId}
             onChange={setSelectedTemplateId}

@@ -397,6 +397,26 @@ class OutlineConfirmRequest(BaseModel):
     chapters: list[dict] | None = None
 
 
+# 确认目录被拒时给**用户**看的原因。原先是一句
+# 「请先 POST /extract-chapters，再走确认流程」—— API 指令，对用户毫无意义，
+# 而且他往往没做错任何事（例如生成已启动、或项目早过了这一关）。
+_CONFIRM_BLOCKED_REASON = {
+    "generating": "标书正在生成中，暂时无法确认目录。请等生成结束，或重新生成后再试。",
+    "collecting": "项目已在信息搜集阶段（目录确认过了）。如需改目录，请先重新提取章节。",
+    "review": "标书已生成，目录已锁定。如需改目录，请先重新提取章节。",
+    "exported": "标书已导出，目录已锁定。如需改目录，请先重新提取章节。",
+    "archived": "项目已归档，无法确认目录。",
+    "draft": "项目还没提取过章节，请先重新提取章节。",
+}
+
+
+def _confirm_blocked_reason(status: str) -> str:
+    """返回确认目录被拒时给用户看的原因."""
+    return _CONFIRM_BLOCKED_REASON.get(
+        status, f"当前项目状态 {status or '(空)'} 不允许确认目录。",
+    )
+
+
 async def _apply_submitted_tree(project, chapters: list[dict], db: AsyncSession) -> list[str]:
     """把前端提交的整棵树落库，返回**被剔除的附件 label**.
 
@@ -437,10 +457,7 @@ async def confirm_outline(
     if project.status != "structure_ready":
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"当前项目状态 {project.status} 不允许确认目录。"
-                "请先 POST /extract-chapters，再走确认流程。"
-            ),
+            detail=_confirm_blocked_reason(project.status),
         )
 
     pruned: list[str] = []

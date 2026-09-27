@@ -291,6 +291,61 @@ async def upload_history(
 # POST /generate  (Step 3 — SSE streaming generation)
 # ---------------------------------------------------------------------------
 
+# 允许进入生成的**全部**状态（白名单）。用白名单而不是"黑名单 collecting"：
+# 后者会放行 structure_ready（目录还没确认），线上实测用户就是这样在未确认的
+# 项目上点了生成，项目进了 generating，随后确认目录被 400 拦住、永久卡住。
+_GENERATABLE_STATUS = ("parsed", "review", "error", "exported", "generating")
+
+_BLOCKED_REASON = {
+    "structure_ready": "目录尚未确认，请先到「目录确认」页确认目录后再生成标书。",
+    "collecting": "请先完成信息搜集再生成标书。",
+    "draft": "项目还没到可生成的阶段，请先上传招标文件并确认目录。",
+    "archived": "项目已归档，无法生成标书。",
+}
+
+
+async def _unstick_generating(project_id: str, session_factory=None) -> bool:
+    """把**仍然停在 generating** 的项目复位到 parsed，返回是否真的复位了.
+
+    生成流被取消时（用户跳走/关页面 → SSE 客户端断开），生成器抛
+    ``CancelledError``；而 Python 3.8 起它是 ``BaseException``，**`except
+    Exception` 抓不到** —— 于是既不写 ``review`` 也不写 ``error``，项目永久
+    卡在 generating：再点「确认目录」是 400，没有任何出路。
+    ``except ValueError``（标题未细化）那条路同样不复位。
+    两条都由生成器的 ``finally`` 兜住。
+
+    **幂等**：只认 ``generating``。异常路径已经写过 ``error``、正常路径写过
+    ``review`` 的，这里一律不碰。
+    """
+    factory = session_factory or async_session
+    try:
+        async with factory() as db:
+            project = await db.get(BidProject, project_id)
+            if project is None or project.status != "generating":
+                return False
+            project.status = "parsed"
+            await db.commit()
+            logger.warning(
+                "生成流异常结束，已把项目 %s 从 generating 复位到 parsed", project_id,
+            )
+            return True
+    except Exception as exc:  # noqa: BLE001 - 复位失败不能再炸一次生成流
+        logger.warning("复位 generating 失败（%s）：%s", project_id, exc)
+        return False
+
+
+def _generation_blocked_reason(status: str) -> str | None:
+    """返回不允许生成的原因；``None`` = 允许.
+
+    ``generating`` 也在白名单里：卡住的项目必须能重跑，否则用户没有出路。
+    """
+    if status in _GENERATABLE_STATUS:
+        return None
+    return _BLOCKED_REASON.get(
+        status, f"当前项目状态 {status or '(空)'} 不允许生成标书。",
+    )
+
+
 @router.post("/generate")
 async def generate_bid(
     data: GenerateRequest,
@@ -315,10 +370,11 @@ async def generate_bid(
             detail="Project not found",
         )
 
-    if project.status == "collecting":
+    blocked = _generation_blocked_reason(project.status)
+    if blocked:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请先完成信息搜集再生成标书",
+            detail=blocked,
         )
 
     from app.services.ai_pipeline import requirements_with_rubric
@@ -485,6 +541,11 @@ async def generate_bid(
                         ),
                     }
                     return
+                finally:
+                    # 客户端断开时生成器被取消，CancelledError 是 BaseException，
+                    # 上面两个 except 都抓不到 —— 状态会永久停在 generating。
+                    # shield 保护这次写库：finally 里的 await 本身也可能被取消。
+                    await asyncio.shield(_unstick_generating(project_id))
 
         # ── Legacy deep generation mode ──
         if (
@@ -578,6 +639,9 @@ async def generate_bid(
                         ),
                     }
                     return
+                finally:
+                    # 同新管线：客户端断开时的 CancelledError 抓不到，状态会卡住
+                    await asyncio.shield(_unstick_generating(project_id))
 
         # ── Legacy generation mode (original pipeline) ──
         async with async_session() as gen_db:
@@ -989,6 +1053,9 @@ async def retry_failed_sections(
                         ensure_ascii=False,
                     ),
                 }
+            finally:
+                # 同新管线：客户端断开时的 CancelledError 抓不到，状态会卡住
+                await asyncio.shield(_unstick_generating(project_id))
 
     return EventSourceResponse(event_generator())
 
