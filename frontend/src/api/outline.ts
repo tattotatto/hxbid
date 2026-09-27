@@ -76,6 +76,36 @@ function normalize(ch: any): OutlineChapter {
   }
 }
 
+/** 按索引路径不可变地更新节点（与 OutlineTree 内的同名 helper 语义一致） */
+export function updateNodeByPath(
+  chapters: OutlineChapter[],
+  path: number[],
+  updater: (n: OutlineChapter) => OutlineChapter,
+): OutlineChapter[] {
+  if (path.length === 0) return chapters
+  const [head, ...rest] = path
+  return chapters.map((ch, idx) => {
+    if (idx !== head) return ch
+    if (rest.length === 0) return updater(ch)
+    return { ...ch, children: updateNodeByPath(ch.children ?? [], rest, updater) }
+  })
+}
+
+/** 按索引路径取节点 */
+export function getNodeByPath(
+  chapters: OutlineChapter[],
+  path: number[],
+): OutlineChapter | null {
+  let arr: OutlineChapter[] | undefined = chapters
+  let node: OutlineChapter | null = null
+  for (const idx of path) {
+    if (!arr) return null
+    node = arr[idx]
+    arr = node?.children
+  }
+  return node
+}
+
 export interface OutlineGetResponse {
   chapters: OutlineChapter[]
   rubric_cover?: RubricCover | null

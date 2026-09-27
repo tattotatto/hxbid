@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react'
-import { Tree, Button, Space, Tag, Input, Empty, Tooltip, Modal } from 'antd'
+import { Tree, Button, Space, Tag, Input, Empty, Tooltip, Modal, Select } from 'antd'
 import {
   PlusOutlined,
   MinusOutlined,
@@ -10,6 +10,7 @@ import {
 } from '@ant-design/icons'
 import type { DataNode, TreeProps } from 'antd/es/tree'
 import type { OutlineChapter, ChapterType } from '../../api/outline'
+import { USER_SELECTABLE_TYPES } from '../../api/outline'
 import {
   flatten,
   getNode,
@@ -22,19 +23,15 @@ import {
 interface OutlineTreeProps {
   chapters: OutlineChapter[]
   onChange: (next: OutlineChapter[]) => void
+  /** 标题或类型变化时通知父组件重新匹配（父组件负责防抖与落库） */
+  onMatchRequest?: (path: number[], title: string, type: ChapterType) => void
+  /** 点匹配徽标时通知父组件打开抽屉 */
+  onOpenMatch?: (path: number[]) => void
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-const TYPE_COLORS: Record<ChapterType, string> = {
-  fixed_form: 'blue',
-  table: 'purple',
-  ai_generated: 'green',
-  attachment: 'orange',
-  mixed: 'magenta',
-}
 
 const TYPE_LABELS: Record<ChapterType, string> = {
   fixed_form: '固定格式',
@@ -58,27 +55,77 @@ function makeNewChapter(orderIndex: number): OutlineChapter {
   }
 }
 
-function buildTreeData(chapters: OutlineChapter[]): DataNode[] {
+const MATCH_BADGE: Record<
+  string,
+  { status: 'success' | 'warning' | 'error' | 'default'; text: string }
+> = {
+  matched: { status: 'success', text: '已匹配' },
+  ambiguous: { status: 'warning', text: '多候选' },
+  missing: { status: 'error', text: '未匹配' },
+  na: { status: 'default', text: '—' },
+}
+
+function buildTreeData(
+  chapters: OutlineChapter[],
+  basePath: number[],
+  onTypeChange: (path: number[], type: ChapterType) => void,
+  onOpenMatch: (path: number[]) => void,
+): DataNode[] {
   return chapters.map((ch, idx) => {
+    const path = [...basePath, idx]
     // 兼容后端两种返回形态：
     // 1. chapter_structure_json（extract/chat 输出） → 字段名 type
     // 2. ProjectChapter 行 → 字段名 chapter_type
     // 历史上前端只用 type，导致已 confirm 的项目回看 /outline 页面渲染「暂无章节」。
     const type = (ch.type ?? (ch as any).chapter_type ?? 'ai_generated') as ChapterType
+    // AI 生成章节不参与匹配；其余按后端回来的状态显示（还没匹配过的算"未匹配"）
+    const matchStatus = ch.match?.status ?? (type === 'ai_generated' ? 'na' : 'missing')
+    const badge = MATCH_BADGE[matchStatus] ?? MATCH_BADGE.missing
+    const needsMatch = type === 'fixed_form' || type === 'table'
+
     return {
-      key: String(idx),
+      key: path.join('.'),
       title: (
         <Space size={4}>
-          <Tag color={TYPE_COLORS[type] ?? 'default'} style={{ marginRight: 0 }}>
-            {TYPE_LABELS[type] ?? type}
-          </Tag>
+          <Select
+            size="small"
+            value={type}
+            style={{ width: 104 }}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(v) => onTypeChange(path, v as ChapterType)}
+            options={USER_SELECTABLE_TYPES.map((t) => ({
+              value: t,
+              label: TYPE_LABELS[t],
+            }))}
+          />
           <span style={{ fontWeight: 500 }}>{ch.title || '(未命名)'}</span>
           {ch.source === 'scoring_rubric' && (
-            <Tag color="gold" style={{ marginRight: 0, marginLeft: 6 }}>来自评标办法</Tag>
+            <Tag color="gold" style={{ marginRight: 0 }}>来自评标办法</Tag>
+          )}
+          {needsMatch && (
+            <Tooltip title={ch.match?.best?.raw ? `命中：${ch.match.best.raw}` : badge.text}>
+              <Tag
+                color={badge.status === 'default' ? 'default' : badge.status}
+                style={{ marginRight: 0, cursor: 'pointer' }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onOpenMatch(path)
+                }}
+              >
+                {badge.text}
+              </Tag>
+            </Tooltip>
+          )}
+          {ch.attachments && ch.attachments.length > 0 && (
+            <Tag color="orange" style={{ marginRight: 0 }}>
+              {ch.attachments.length} 个附件
+            </Tag>
           )}
         </Space>
       ),
-      children: ch.children ? buildTreeData(ch.children) : undefined,
+      children: ch.children
+        ? buildTreeData(ch.children, path, onTypeChange, onOpenMatch)
+        : undefined,
     }
   })
 }
@@ -87,12 +134,36 @@ function buildTreeData(chapters: OutlineChapter[]): DataNode[] {
 // Component
 // ---------------------------------------------------------------------------
 
-const OutlineTree: React.FC<OutlineTreeProps> = ({ chapters, onChange }) => {
+const OutlineTree: React.FC<OutlineTreeProps> = ({
+  chapters,
+  onChange,
+  onMatchRequest,
+  onOpenMatch,
+}) => {
   const [selectedPath, setSelectedPath] = useState<number[] | null>(null)
   const [editingTitle, setEditingTitle] = useState<string | null>(null)
   const [titleDraft, setTitleDraft] = useState('')
 
-  const treeData = useMemo(() => buildTreeData(chapters), [chapters])
+  const handleTypeChange = (path: number[], type: ChapterType) => {
+    const next = updateNode(chapters, path, (n) => ({ ...n, type }))
+    onChange(next)
+    const node = getNode(next, path)
+    if (node) onMatchRequest?.(path, node.title, type)
+  }
+
+  const treeData = useMemo(
+    () =>
+      buildTreeData(
+        chapters,
+        [],
+        handleTypeChange,
+        (p) => onOpenMatch?.(p),
+      ),
+    // handleTypeChange 每次渲染都是新函数，但它只闭包 chapters / onChange /
+    // onMatchRequest，三者在依赖里都已列出
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chapters, onChange, onMatchRequest, onOpenMatch],
+  )
   const flatList = useMemo(() => flatten(chapters, null, []), [chapters])
 
   const selectedNode =
@@ -166,7 +237,19 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({ chapters, onChange }) => {
       setEditingTitle(null)
       return
     }
-    onChange(updateNode(chapters, selectedPath, (n) => ({ ...n, title: titleDraft.trim() || n.title })))
+    const next = updateNode(chapters, selectedPath, (n) => ({
+      ...n,
+      title: titleDraft.trim() || n.title,
+    }))
+    onChange(next)
+    const node = getNode(next, selectedPath)
+    if (node) {
+      onMatchRequest?.(
+        selectedPath,
+        node.title,
+        (node.type ?? 'ai_generated') as ChapterType,
+      )
+    }
     setEditingTitle(null)
   }
 

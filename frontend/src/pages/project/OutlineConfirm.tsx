@@ -1,12 +1,21 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Card, Button, Space, Tag, Spin, Empty, message as antMessage } from 'antd'
 import { ArrowLeftOutlined, CheckCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import OutlineTree from '../../components/OutlineEditor/OutlineTree'
 import OutlineChat from '../../components/OutlineEditor/OutlineChat'
+import MatchDrawer from '../../components/OutlineEditor/MatchDrawer'
 import ScoringRubricPanel from '../../components/ScoringRubric/ScoringRubricPanel'
 import type { RubricCover } from '../../api/scoring'
-import { outlineApi, OutlineChapter } from '../../api/outline'
+import {
+  outlineApi,
+  getNodeByPath,
+  updateNodeByPath,
+  type ChapterType,
+  type OutlineChapter,
+  type OutlineMatchCandidate,
+  type OutlineMatchResult,
+} from '../../api/outline'
 
 const OutlineConfirm: React.FC = () => {
   const { id } = useParams<{ id: string }>()
@@ -18,6 +27,52 @@ const OutlineConfirm: React.FC = () => {
   const [convId, setConvId] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
   const [rubricCover, setRubricCover] = useState<RubricCover | null>(null)
+
+  // 匹配抽屉
+  const [matchOpen, setMatchOpen] = useState(false)
+  const [matchLoading, setMatchLoading] = useState(false)
+  const [matchResult, setMatchResult] = useState<OutlineMatchResult | null>(null)
+  const [matchPath, setMatchPath] = useState<number[] | null>(null)
+
+  const saveTimer = useRef<number | null>(null)
+  const matchTimer = useRef<number | null>(null)
+
+  /** 保存防抖：拖拽/改名/改类型/挂附件后都会调它 */
+  const scheduleSave = (next: OutlineChapter[]) => {
+    if (!id) return
+    if (saveTimer.current) window.clearTimeout(saveTimer.current)
+    saveTimer.current = window.setTimeout(() => {
+      outlineApi.saveStructure(id, next).catch((err: any) => {
+        antMessage.error(err?.response?.data?.detail || '章节结构保存失败')
+      })
+    }, 800)
+  }
+
+  const applyTree = (next: OutlineChapter[]) => {
+    setChapters(next)
+    scheduleSave(next)
+  }
+
+  /** 重新匹配（防抖 500ms）。只有固定格式/表格需要匹配 */
+  const requestMatch = (path: number[], title: string, type: ChapterType) => {
+    if (!id || (type !== 'fixed_form' && type !== 'table')) return
+    if (matchTimer.current) window.clearTimeout(matchTimer.current)
+    matchTimer.current = window.setTimeout(async () => {
+      setMatchLoading(true)
+      try {
+        const res = await outlineApi.match(id, title, type)
+        setChapters((prev) => {
+          const next = updateNodeByPath(prev, path, (n) => ({ ...n, match: res }))
+          scheduleSave(next)
+          return next
+        })
+      } catch {
+        /* 匹配失败不打断编辑；徽标沿用旧值 */
+      } finally {
+        setMatchLoading(false)
+      }
+    }, 500)
+  }
 
   useEffect(() => {
     if (!id) return
@@ -69,7 +124,7 @@ const OutlineConfirm: React.FC = () => {
     if (!id || confirming) return
     setConfirming(true)
     try {
-      const res = await outlineApi.confirm(id)
+      const res = await outlineApi.confirm(id, chapters)
       const msg = `已确认 ${res.chapters_count} 个章节，进入信息搜集阶段`
       antMessage.success(
         res.added_from_rubric?.length
@@ -174,7 +229,16 @@ const OutlineConfirm: React.FC = () => {
               </div>
             </div>
           ) : (
-            <OutlineTree chapters={chapters} onChange={setChapters} />
+            <OutlineTree
+              chapters={chapters}
+              onChange={applyTree}
+              onMatchRequest={requestMatch}
+              onOpenMatch={(path) => {
+                setMatchPath(path)
+                setMatchResult(getNodeByPath(chapters, path)?.match ?? null)
+                setMatchOpen(true)
+              }}
+            />
           )}
         </Card>
 
@@ -190,6 +254,30 @@ const OutlineConfirm: React.FC = () => {
           />
         </Card>
       </div>
+
+      <MatchDrawer
+        open={matchOpen}
+        loading={matchLoading}
+        title={matchPath ? getNodeByPath(chapters, matchPath)?.title ?? '' : ''}
+        result={matchResult}
+        onPick={(c: OutlineMatchCandidate) => {
+          if (!matchPath) return
+          const next = updateNodeByPath(chapters, matchPath, (n) => ({
+            ...n,
+            match: {
+              ...(n.match as OutlineMatchResult),
+              status: 'matched',
+              best: c,
+              candidates: [],
+              picked: 'manual',
+            },
+          }))
+          applyTree(next)
+          setMatchResult(getNodeByPath(next, matchPath)?.match ?? null)
+          setMatchOpen(false)
+        }}
+        onClose={() => setMatchOpen(false)}
+      />
     </div>
   )
 }
