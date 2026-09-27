@@ -1390,6 +1390,76 @@ def _resolve_section_text(
     return None, [f"「{chapter.title}」未匹配到招标原文，将改由 AI 撰写"]
 
 
+async def _generate_table_chapter(
+    chapter, meta: dict, requirements: dict, company_profile: dict, ai_adapter,
+    full_text: str | None,
+) -> tuple[str, list[str]]:
+    """按招标原文的表格定义产出表格类章节内容，返回 (markdown, 警告列表).
+
+    取材顺序：
+      1. 结构页固化的 ``match.table_index`` 指向的表
+      2. 表索引失效 → 按标题重匹配一张
+      3. 都没有 → 只输出 ``table_columns`` 声明的空表头（**绝不编数据**）
+
+    无论哪条路径都不调用 AI 自由生成——那正是本次要修的 bug。
+    """
+    from app.services.template_filler import (
+        batch_fill_tables, build_variable_values,
+        fill_fixed_form_section_from_template_with_tables, rows_to_markdown,
+    )
+
+    warnings: list[str] = []
+    tables = requirements.get("format_tables") or []
+    match = (meta or {}).get("match") or {}
+    table_index = match.get("table_index")
+
+    if table_index is None or not (0 <= table_index < len(tables)):
+        if table_index is not None:
+            warnings.append(f"「{chapter.title}」的表格索引已失效，已按标题重新匹配")
+        from app.services.tender_section_matcher import match_tender_section
+        relookup = match_tender_section(
+            chapter.title, chapter_type="table",
+            format_section_text=requirements.get("format_section_text"),
+            full_text=full_text,
+            format_tables=tables,
+            format_page_map=requirements.get("format_page_map") or [],
+        )
+        table_index = relookup.table_index
+
+    if table_index is not None and 0 <= table_index < len(tables):
+        rows = [list(r) for r in (tables[table_index].get("rows") or [])]
+        # 让 AI 标出单元格里哪些位置要填值（拿不到就原样输出，不写占位符）
+        section_text, _w = _resolve_section_text(chapter, meta, requirements, full_text)
+        variables = build_variable_values(company_profile, requirements)
+        if section_text:
+            try:
+                _filled, table_fills = await fill_fixed_form_section_from_template_with_tables(
+                    section_title=chapter.title,
+                    format_section_text=requirements.get("format_section_text") or "",
+                    format_tables=[tables[table_index]],
+                    company_profile=company_profile,
+                    requirements=requirements,
+                    ai_adapter=ai_adapter,
+                    section_text_override=section_text,
+                )
+                if table_fills:
+                    rows = batch_fill_tables(
+                        [tables[table_index]], table_fills, variables,
+                    )[0]["rows"]
+            except Exception as exc:
+                logger.warning("Table fill for '%s' failed: %s", chapter.title, exc)
+                warnings.append(f"「{chapter.title}」表格填值失败，已输出空白模板")
+        return rows_to_markdown(rows), warnings
+
+    columns = meta.get("table_columns") or []
+    if columns:
+        warnings.append(f"「{chapter.title}」未找到招标表格，已输出空表头模板")
+        return rows_to_markdown([list(columns)]), warnings
+
+    warnings.append(f"「{chapter.title}」未找到招标表格，且无列定义，无法生成")
+    return "", warnings
+
+
 async def generate_from_chapter_structure(
     project_id: str,
     requirements: dict,
@@ -1518,6 +1588,13 @@ async def generate_from_chapter_structure(
                         chapter.title, exc,
                     )
                     format_warnings.append(f"「{chapter.title}」原文回填失败，已改用 AI 撰写")
+
+            elif chapter.chapter_type == "table":
+                file_content, table_warnings = await _generate_table_chapter(
+                    chapter, chapter_meta, requirements, company_profile,
+                    ai_adapter, full_text,
+                )
+                format_warnings.extend(table_warnings)
 
             if not file_content and chapter.chapter_type == "fixed_form":
                 try:
