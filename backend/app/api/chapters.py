@@ -5,8 +5,10 @@ Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 
 import json
 import logging
+import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +23,59 @@ from app.utils.security import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# 用户可以在结构页选择的章节类型。mixed 由 AI 提取产生，保留展示但不可选。
+USER_SELECTABLE_TYPES = ("fixed_form", "table", "attachment", "ai_generated")
+_KNOWN_TYPES = set(USER_SELECTABLE_TYPES) | {"mixed"}
+
+# 允许在结构页编辑的项目状态（「目录确认」之前）
+_STRUCTURE_EDITABLE_STATUS = ("draft", "structure_ready")
+
+
+def _normalize_chapter_tree(tree: list) -> list:
+    """校验并归一化前端提交的章节树.
+
+    - ``type`` 不在已知集合内 → 退回 ``ai_generated``（不报错，避免前端版本
+      稍旧就整单失败）
+    - ``order_index`` 一律按数组顺序重排，忽略前端传来的值（拖拽后的顺序就是
+      数组顺序，这是唯一的真相）
+    - ``match`` / ``attachments`` 原样保留
+    """
+    out = []
+    for node in tree or []:
+        if not isinstance(node, dict):
+            continue
+        ch_type = node.get("type") or "ai_generated"
+        if ch_type not in _KNOWN_TYPES:
+            ch_type = "ai_generated"
+        normalized = {
+            "order_index": len(out),
+            "number": node.get("number", ""),
+            "title": (node.get("title") or "").strip(),
+            "type": ch_type,
+            "required": bool(node.get("required", False)),
+            "format_notes": node.get("format_notes"),
+            "scoring_context": node.get("scoring_context"),
+            "table_columns": node.get("table_columns"),
+            "source": node.get("source"),
+        }
+        if node.get("match"):
+            normalized["match"] = node["match"]
+        normalized["attachments"] = list(node.get("attachments") or [])
+        normalized["children"] = _normalize_chapter_tree(node.get("children") or [])
+        out.append(normalized)
+    return out
+
+
+def _generation_chapter_type(raw: str) -> str:
+    """把章节类型归一化成生成管线认识的四种.
+
+    ``mixed`` 是 AI 提取的产物，生成管线只处理 ``fixed_form`` / ``table`` /
+    ``attachment`` / ``ai_generated`` —— ``mixed`` 落进"两个循环都进不去"的空档，
+    最终渲染成「（待补充…）」占位文本。落库时归到 ``ai_generated``。
+    （``chapter_structure_json`` 里仍保留 ``mixed``，结构页照常展示。）
+    """
+    return raw if raw in USER_SELECTABLE_TYPES else "ai_generated"
 
 
 # ---------------------------------------------------------------------------
@@ -1208,3 +1263,125 @@ async def get_section(
 
     content = get_section_content(chapter.children_json, path)
     return {"content": content, "section_path": path}
+
+
+# ---------------------------------------------------------------------------
+# 章节结构保存（目录确认页的手动编辑落库通道）
+# ---------------------------------------------------------------------------
+
+async def _prune_attachments(tree: list, db: AsyncSession) -> list[str]:
+    """剔除失效附件，返回被剔除的 label 列表.
+
+    剔除三种情况：
+      - 路径越出 ``UPLOAD_DIR``（防目录穿越）
+      - 引用的资源库行已被删除
+      - 与前面节点重复（按**内容 md5** 判重，与 materials_injection 的
+        ``drop_already_embedded`` 同一口径）
+
+    剔除而非整单拒绝：用户可能填了十个附件、其中一个被删了，整单报错会让
+    他白填一遍。
+    """
+    from app.models.contract import Contract
+    from app.models.personnel import PersonnelCertificate
+    from app.models.qualification import Qualification
+    from app.services.render_engine import image_content_key
+
+    _MODEL_BY_KIND = {
+        "qualification": Qualification,
+        "personnel_cert": PersonnelCertificate,
+        "contract": Contract,
+    }
+
+    upload_root = Path(settings.UPLOAD_DIR).resolve()
+    pruned: list[str] = []
+    seen_content: set[str] = set()
+
+    async def _walk_async(nodes: list) -> None:
+        for node in nodes or []:
+            kept = []
+            for att in node.get("attachments") or []:
+                label = att.get("label") or att.get("id") or "(未命名)"
+                kind = att.get("kind")
+                path = att.get("path") or ""
+
+                try:
+                    resolved = (upload_root / path).resolve()
+                    if not str(resolved).startswith(str(upload_root)):
+                        pruned.append(label)
+                        continue
+                except (OSError, ValueError):
+                    pruned.append(label)
+                    continue
+
+                if kind in _MODEL_BY_KIND:
+                    model = _MODEL_BY_KIND[kind]
+                    found = (
+                        await db.execute(select(model.id).where(model.id == att.get("id")))
+                    ).scalars().all()
+                    if not found:
+                        pruned.append(label)
+                        continue
+
+                key = image_content_key(path)
+                if key in seen_content:
+                    pruned.append(label)
+                    continue
+                seen_content.add(key)
+
+                kept.append(att)
+            node["attachments"] = kept
+            await _walk_async(node.get("children") or [])
+
+    await _walk_async(tree)
+    return pruned
+
+
+class ChapterStructureSaveRequest(BaseModel):
+    chapters: list[dict] = []
+
+
+class ChapterStructureSaveResponse(BaseModel):
+    success: bool = False
+    chapters_count: int = 0
+    pruned_attachments: list[str] = []
+
+
+@router.put("/{project_id}/chapter-structure", response_model=ChapterStructureSaveResponse)
+async def save_chapter_structure(
+    project_id: str,
+    payload: ChapterStructureSaveRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """保存用户在目录确认页编辑后的章节结构.
+
+    服务端**不重新匹配**——``match`` 是前端从 /chapter-structure/match 拿到的
+    结果原样带回的，服务端只做结构校验与附件有效性剔除。
+    """
+    result = await db.execute(select(BidProject).where(BidProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status not in _STRUCTURE_EDITABLE_STATUS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目已进入 {project.status} 阶段，不能再修改章节结构",
+        )
+
+    if not payload.chapters:
+        raise HTTPException(status_code=400, detail="章节结构不能为空")
+
+    tree = _normalize_chapter_tree(payload.chapters)
+    pruned = await _prune_attachments(tree, db)
+
+    project.chapter_structure_json = json.dumps(tree, ensure_ascii=False)
+    await db.commit()
+
+    logger.info(
+        "Chapter structure saved for project %s: %d top-level chapters, %d attachments pruned",
+        project_id, len(tree), len(pruned),
+    )
+    return ChapterStructureSaveResponse(
+        success=True, chapters_count=len(tree), pruned_attachments=pruned,
+    )
