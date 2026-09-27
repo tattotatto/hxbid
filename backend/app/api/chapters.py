@@ -349,7 +349,8 @@ async def lock_chapters(
             detail="请先提取章节（POST /extract-chapters）再进行锁定",
         )
 
-    created, auto_added, validation, added_from_rubric = await _materialise_chapters(project, db)
+    # unplaced 只记日志：/chapters/lock 是 admin 兜底路径，用户可见的是 /outline/confirm
+    created, auto_added, validation, added_from_rubric, _unplaced_from_rubric = await _materialise_chapters(project, db)
     await db.commit()
 
     logger.info(
@@ -387,6 +388,9 @@ class OutlineConfirmResponse(BaseModel):
     added_from_rubric: list[str] = []
     # 确认时被剔除的附件 label（资源库行已删 / 路径越界 / 内容重复）
     pruned_attachments: list[str] = []
+    # 评标办法有、但确认的目录里找不到归属章节的内容项 —— **没有**加进目录，
+    # 必须报给用户让他决定加到哪（只挂不建）
+    unplaced_rubric_items: list[str] = []
 
 
 class OutlineConfirmRequest(BaseModel):
@@ -450,7 +454,7 @@ async def confirm_outline(
             detail="章节数据为空，请先 POST /extract-chapters",
         )
 
-    created, auto_added, _validation, added_from_rubric = await _materialise_chapters(project, db)
+    created, auto_added, _validation, added_from_rubric, unplaced_from_rubric = await _materialise_chapters(project, db)
     project.status = "collecting"
     await db.commit()
 
@@ -465,6 +469,7 @@ async def confirm_outline(
         status="collecting",
         added_from_rubric=added_from_rubric,
         pruned_attachments=pruned,
+        unplaced_rubric_items=unplaced_from_rubric,
     )
 
 
@@ -479,7 +484,8 @@ async def _materialise_chapters(
     """根据 project.chapter_structure_json + format_template + 评标办法 物化 ProjectChapter 行.
 
     Returns:
-        (created_chapters, auto_added_titles, validation_report, added_from_rubric)
+        (created_chapters, auto_added_titles, validation_report, added_from_rubric,
+         unplaced_from_rubric)
 
     第 4 个返回值 added_from_rubric：由评标办法内容型指标自动补充的标题列表（空 = 未补）。
     行为与历史 /chapters/lock 一致；调用方负责 db.commit() 与 project.status 推进。
@@ -598,8 +604,8 @@ async def _materialise_chapters(
 
     # ── 评标办法补全：内容型缺失指标自动补章，标记「来自评标办法」，幂等防重 ----------
     added_from_rubric: list[str] = []
+    unplaced_from_rubric: list[str] = []       # 找不到归属、未加进目录的条目标题
     writeback_children: dict[str, list] = {}   # 顶层章节 title -> 追加的补入叶子（回写 chapter_structure_json）
-    writeback_new_top: list[dict] = []         # 无 dimension 章节时新建的顶层节点（回写 chapter_structure_json）
     fresh_rubric_items = rubric.get("items")
     if fresh_rubric_items and not rubric.get("applied"):
         from app.services.rubric_gap import gap_detect, build_rubric_nodes
@@ -623,9 +629,11 @@ async def _materialise_chapters(
         missing = gap_detect(rubric, all_titles)
         if missing:
             from app.services.rubric_gap import attach_key_for
-            # attach/new_top 归属只看顶层章节标题；子标题仅参与缺口检测（key_terms 命中）
+            # attach 归属只看顶层章节标题；子标题仅参与缺口检测（key_terms 命中）
             # —— 否则维度名只出现在子标题时 attach 会指向不存在的顶层章节，补入节点静默丢失
-            new_top, attach, added_from_rubric = build_rubric_nodes(missing, [c.title for c in created])
+            # **只挂不建**：匹配不到已有章节的条目进 unplaced，不新建顶层章节
+            attach, added_from_rubric, unplaced_from_rubric = build_rubric_nodes(
+                missing, [c.title for c in created])
             # 已存在 dimension 章节 -> 追加小节 + 刷新 children_json
             # （章节标题可能带序号前缀如「三、技术部分」，用双向包含匹配维度 key；
             #  首命中即消费该维度补入节点，后续同维度章节不再重复挂）
@@ -641,44 +649,36 @@ async def _materialise_chapters(
                     ch.children_json = json.dumps(children, ensure_ascii=False)
                     writeback_children[ch.title] = payload
             # 未消费的 attach 键（两个缺失项的维度键同时命中同一章节标题时 attach_key_for
-            # 只消费首命中 → 剩余叶子既不挂章节也不进 new_top = 静默丢失）。
-            # 按 R9「永不静默丢失」语义降级为新建顶层：added_from_rubric 保持真实
-            # （降级节点确实会被补入），applied=True 仍成立。
+            # 只消费首命中 → 剩余叶子既不挂章节也没别处可去）。
+            # 按「只挂不建」进 unplaced 报给用户，**不新建顶层章节**。added_from_rubric
+            # 保持真实（只记真正挂上去的），applied=True 仍成立。
             if attach:
                 leftover = list(attach)
                 for _k in leftover:
-                    new_top.extend(attach.pop(_k))
+                    unplaced_from_rubric.extend(
+                        str(n.get("title") or "") for n in attach.pop(_k)
+                    )
                 logger.warning(
-                    "评标办法 attach 键未全部消费（维度键冲突命中同一章节），降级为新建顶层: %s",
+                    "评标办法 attach 键未全部消费（维度键冲突命中同一章节），已报为待人工处理: %s",
                     leftover,
                 )
-            # 无 dimension 章节 -> 新建顶层（走同一 _make_chapter，正常 token 预算分配）
-            for node in new_top:
-                chapter = _make_chapter(
-                    title=node.get("title", ""),
-                    order_index=0,
-                    ch_type="ai_generated",
-                    meta=_build_chapter_meta(node, None, global_rules),
-                    children=node.get("children", []),
+            if unplaced_from_rubric:
+                logger.warning(
+                    "评标办法有 %d 个内容项在确认的目录里找不到归属章节，未自动加入（只挂不建）: %s",
+                    len(unplaced_from_rubric), unplaced_from_rubric,
                 )
-                db.add(chapter)
-                created.append(chapter)
-                writeback_new_top.append(node)
             # 幂等：补入成功后置 applied，rubric 内容再变动时才清除
             rubric["applied"] = True
             project.scoring_rubric_json = json.dumps(rubric, ensure_ascii=False)
 
             # ── 回写 chapter_structure_json（spec §6.3：children_json / chapter_structure_json
-            #    节点同样带 source 标记）——已有章节扩子节点、无 dimension 章节追加顶层节点 ──
-            if writeback_children or writeback_new_top:
+            #    节点同样带 source 标记）——已有章节扩子节点 ──
+            if writeback_children:
                 struct = [c for c in chapters if isinstance(c, dict)]
                 for part in struct:
                     payload = writeback_children.pop(part.get("title", ""), None)
                     if payload is not None:
                         part["children"] = list(part.get("children") or []) + payload
-                for n in writeback_new_top:
-                    n.setdefault("order_index", len(struct))
-                    struct.append(n)
                 # placeholder 章节（由 format 模板补入、structure_json 无对应节点）→
                 # 镜像补为 struct 顶层节点，保证 §6.3 结构一致性；正常路径此循环为空
                 for title, payload in writeback_children.items():
@@ -698,7 +698,7 @@ async def _materialise_chapters(
     for i, c in enumerate(created):
         c.order_index = i
 
-    return created, auto_added, validation, added_from_rubric
+    return created, auto_added, validation, added_from_rubric, unplaced_from_rubric
 
 
 # ---------------------------------------------------------------------------

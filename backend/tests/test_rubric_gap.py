@@ -40,49 +40,75 @@ class TestGapDetect:
 
 class TestBuildRubricNodes:
     def test_attaches_to_existing_dimension_chapter(self):
-        # 注意：标题列表必须同时覆盖 performance 项 p2（业绩），否则它会以
-        # 「业绩」维度新建顶层，与本用例的断言（只测 技术部分 挂载）冲突。
         missing = gap_detect(_rubric(), ["技术部分", "类似项目业绩", "投标函"])
-        new_top, attach, added = build_rubric_nodes(missing, ["技术部分", "类似项目业绩", "投标函"])
-        assert new_top == []  # 技术部分已存在 → 不建新顶层
+        attach, added, unplaced = build_rubric_nodes(
+            missing, ["技术部分", "类似项目业绩", "投标函"])
         assert list(attach.keys()) == ["技术部分"]
         assert attach["技术部分"][0]["source"] == "scoring_rubric"
         assert attach["技术部分"][0]["rubric_item_id"] == "t1"
         assert added == ["服务方案"]
+        assert unplaced == []
 
-    def test_creates_top_level_when_dimension_missing(self):
-        # 标题需覆盖 content 项 t1（服务方案）以免它作为缺失项参与，只留 p2 缺失。
+    def test_no_chapter_matches_goes_to_unplaced_not_new_top_level(self):
+        """**只挂不建**：维度匹配不到已有章节时不得新建顶层章节.
+
+        用户确认过的目录必须被严格遵守。真实项目实测：评标办法维度叫「技术标」，
+        而招标自己的章节叫「十八、技术文件其他材料」——字面双向包含匹配不上，
+        旧实现凭空建出一个顶层「技术标」挂在「十九、附件」之后，还写回了
+        chapter_structure_json。
+        """
         missing = gap_detect(_rubric(), ["投标函", "服务方案"])
-        new_top, attach, added = build_rubric_nodes(missing, ["投标函", "服务方案"])
-        # 业绩维度无匹配章节 → 新建顶层「业绩」
-        assert len(new_top) == 1
-        assert new_top[0]["title"] == "业绩"
-        assert new_top[0]["source"] == "scoring_rubric"
-        assert len(new_top[0]["children"]) == 1
-        assert added == ["类似项目业绩"]
+        attach, added, unplaced = build_rubric_nodes(missing, ["投标函", "服务方案"])
         assert attach == {}
+        assert added == []
+        assert unplaced == ["类似项目业绩"], "找不到归属的条目必须报出来，不能静默丢"
 
-    def test_child_only_dimension_is_top_level_when_only_child_matches(self):
-        # 维度名只出现在子标题时（调用方只传顶层标题），应新建顶层而非 attach
-        missing = [{"dimension": "技术部分", "item": _item("服务方案")}]
-        new_top, attach, added = build_rubric_nodes(missing, ["商务标"])
-        assert attach == {}
-        assert len(new_top) == 1 and new_top[0]["title"] == "技术部分"
+    def test_dimension_matches_chapter_by_keyword(self):
+        """「技术标」维度要能挂到「十八、技术文件其他材料」下（靠核心词「技术」）."""
+        missing = [{"dimension": "技术标", "item": _item("服务方案")}]
+        attach, added, unplaced = build_rubric_nodes(
+            missing, ["十八、技术文件其他材料", "十九、附件"])
+        assert list(attach.keys()) == ["技术标"]
         assert added == ["服务方案"]
+        assert unplaced == []
+
+    def test_business_dimension_matches_business_chapter(self):
+        missing = [{"dimension": "商务标", "item": _item("投标报价")}]
+        attach, _added, unplaced = build_rubric_nodes(
+            missing, ["十一、商务文件其他材料"])
+        assert list(attach.keys()) == ["商务标"]
+        assert unplaced == []
+
+    def test_child_only_dimension_is_unplaced_not_top_level(self):
+        """维度名在标题里完全找不到 → 报为 unplaced，不建顶层."""
+        missing = [{"dimension": "技术部分", "item": _item("服务方案")}]
+        attach, added, unplaced = build_rubric_nodes(missing, ["商务标"])
+        assert attach == {}
+        assert added == []
+        assert unplaced == ["服务方案"]
 
     def test_dimension_in_top_title_attaches(self):
         # 维度名出现在顶层标题时正常挂接（顶层标题带序号前缀也能匹配）
         missing = [{"dimension": "技术部分", "item": _item("服务方案")}]
-        new_top, attach, added = build_rubric_nodes(missing, ["三、技术部分"])
-        assert new_top == []
+        attach, added, unplaced = build_rubric_nodes(missing, ["三、技术部分"])
         assert attach.get("技术部分") is not None
         assert added == ["服务方案"]
+        assert unplaced == []
 
 
 class TestAttachKeyFor:
     def test_matches_dimension_in_prefixed_title(self):
         # 章节标题带序号前缀（「三、技术部分」）→ 命中维度 key
         assert attach_key_for("三、技术部分", {"技术部分": []}) == "技术部分"
+
+    def test_matches_dimension_by_core_keyword(self):
+        """「技术标」维度要认得出「十八、技术文件其他材料」这个章节.
+
+        评分维度是「技术标/商务标」这类分类标签，招标自己的章节名不带这三个字
+        —— 只做字面双向包含永远匹配不上（真实项目就是因此凭空多出一个顶层章节）。
+        """
+        assert attach_key_for("十八、技术文件其他材料", {"技术标": []}) == "技术标"
+        assert attach_key_for("十一、商务文件其他材料", {"商务标": []}) == "商务标"
 
     def test_no_match_returns_none(self):
         assert attach_key_for("投标函", {"技术部分": []}) is None

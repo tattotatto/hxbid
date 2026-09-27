@@ -177,6 +177,8 @@ export interface OutlineConfirmResponse {
   added_from_rubric: string[]
   /** 确认时被剔除的附件 label（资源库行已删 / 路径越界 / 内容重复） */
   pruned_attachments: string[]
+  /** 评标办法有、但确认的目录里找不到归属章节的内容项（**未**加进目录） */
+  unplaced_rubric_items: string[]
 }
 
 export const outlineApi = {

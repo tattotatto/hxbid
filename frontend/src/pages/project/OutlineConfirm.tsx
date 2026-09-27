@@ -144,6 +144,19 @@ const OutlineConfirm: React.FC = () => {
             res.pruned_attachments.join('、'),
         )
       }
+      // 评标办法里计分、但目录里没有归属章节的内容项：**没有**自动加进目录
+      // （只挂不建 —— 目录严格按你确认的那份走），必须让他知道漏了什么
+      if (res.unplaced_rubric_items?.length) {
+        antMessage.warning(
+          {
+            content:
+              `评标办法有 ${res.unplaced_rubric_items.length} 个计分内容项在目录里找不到归属章节，` +
+              `未自动加入：${res.unplaced_rubric_items.join('、')}。` +
+              `如需覆盖，请回目录确认页新增对应章节后再确认。`,
+            duration: 10,
+          },
+        )
+      }
       if (id) sessionStorage.removeItem(`outline_conv_${id}`)
       navigate(`/projects/${id}`)
     } catch (err: any) {
@@ -248,7 +261,8 @@ const OutlineConfirm: React.FC = () => {
         ) : (
           <Card size="small" style={{ marginBottom: 12, borderColor: '#faad14' }}>
             <Tag color="gold">评标办法覆盖</Tag>
-            确认目录时将自动补充以下缺失内容项（可改可删）：
+            确认目录时，以下计分内容项会<b>挂到最相关的已有章节下</b>（不会新建顶层章节）；
+            找不到归属的不会自动加入，确认后会另行提示：
             <Space wrap style={{ marginTop: 4 }}>
               {rubricCover.missing.map((m, i) => (
                 <Tag key={i} color="gold">{m.name}</Tag>
