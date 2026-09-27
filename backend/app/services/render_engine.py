@@ -1667,6 +1667,31 @@ def render_bid_to_docx(chapters, project_name, style_config=None, chapter_images
     return str(output_path)
 
 
+def _canonical_title(title: str | None) -> str:
+    """标题的**比对用**归一化形式：剥序号前缀 + 去空白 + 全半角统一 + 小写.
+
+    两侧标题对序号的处理不一致：章节结构侧 AI 常把序号并进 title（「一、封面」），
+    格式模板侧把序号放 number 字段、title 是裸的（「封面」）。渲染时若用裸字符串
+    精确查表就会静默落空 —— 内容走位置兜底、甚至同一章被重复渲染一遍。
+    归一化后「一、封面」/「（一）封面」/「1.封面」/「封面」全部等价。
+
+    复用匹配器那套（``normalize_title``）：同一个问题、同一种解法。
+    """
+    from app.services.tender_section_matcher import normalize_title
+
+    return normalize_title(title or "")
+
+
+def _title_index(items: list[dict]) -> dict:
+    """按归一化标题建索引；归一化后同名的只保留**先出现**的那个."""
+    index: dict = {}
+    for item in items or []:
+        key = _canonical_title(item.get("title", ""))
+        if key and key not in index:
+            index[key] = item
+    return index
+
+
 def _render_body_strict(doc, chapters, format_template, style, chapter_images=None):
     """严格模式：按 format_template.document_structure 渲染正文.
 
@@ -1689,10 +1714,10 @@ def _render_body_strict(doc, chapters, format_template, style, chapter_images=No
     by_title: dict = {}
     idx_by_title: dict = {}
     for ch_idx, ch in enumerate(chapters):
-        title = ch.get("title", "")
-        if title:
-            by_title[title] = ch
-            idx_by_title.setdefault(title, ch_idx)
+        key = _canonical_title(ch.get("title", ""))
+        if key:
+            by_title[key] = ch
+            idx_by_title.setdefault(key, ch_idx)
 
     rendered_set: set = set()
 
@@ -1717,15 +1742,15 @@ def _render_body_strict(doc, chapters, format_template, style, chapter_images=No
                 style["heading1_font_size"],
                 bold=True,
             )
-        rendered_set.add(part_title)
+        rendered_set.add(_canonical_title(part_title))
 
         # ── Render each sub-section ──
         children = part.get("children", []) or []
-        existing_chapter = by_title.get(part_title)
+        existing_chapter = by_title.get(_canonical_title(part_title))
         existing_children = (
             existing_chapter.get("children", []) if existing_chapter else []
         ) or []
-        by_child_title = {c.get("title", ""): c for c in existing_children}
+        by_child_title = _title_index(existing_children)
 
         # Split existing chapter content into sub-blocks by H2/H3 markers
         chapter_content = (existing_chapter or {}).get("content", "") or ""
@@ -1763,7 +1788,7 @@ def _render_body_strict(doc, chapters, format_template, style, chapter_images=No
                 )
 
             # ── Resolve child content ──
-            existing_child = by_child_title.get(child_title)
+            existing_child = by_child_title.get(_canonical_title(child_title))
             child_content = (
                 (existing_child or {}).get("content")
                 or (existing_child or {}).get("ai_generated_content")
@@ -1805,13 +1830,13 @@ def _render_body_strict(doc, chapters, format_template, style, chapter_images=No
 
         # ── Chapter material images (once per part, not per sub-section) ──
         if chapter_images:
-            src_idx = idx_by_title.get(part_title)
+            src_idx = idx_by_title.get(_canonical_title(part_title))
             if src_idx is not None and src_idx < len(chapter_images):
                 _insert_chapter_images(doc, chapter_images[src_idx], style)
 
     # ── Render any chapters not covered by structure (defensive) ──
     for ch in chapters:
-        if ch.get("title", "") not in rendered_set:
+        if _canonical_title(ch.get("title", "")) not in rendered_set:
             _insert_page_break(doc)
             h = doc.add_heading(ch.get("title", ""), level=1)
             h.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1824,10 +1849,10 @@ def _render_body_strict(doc, chapters, format_template, style, chapter_images=No
                 )
             _render_child_content(doc, ch.get("content", ""), style)
             if chapter_images:
-                fb_idx = idx_by_title.get(ch.get("title", ""))
+                fb_idx = idx_by_title.get(_canonical_title(ch.get("title", "")))
                 if fb_idx is not None and fb_idx < len(chapter_images):
                     _insert_chapter_images(doc, chapter_images[fb_idx], style)
-            rendered_set.add(ch.get("title", ""))
+            rendered_set.add(_canonical_title(ch.get("title", "")))
 
 
 def _split_content_by_h2(content: str) -> list[str]:
