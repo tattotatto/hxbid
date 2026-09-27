@@ -9,8 +9,9 @@ Copyright (c) 2026 云南宏曦科技有限公司. All rights reserved.
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # 打分档位。0.75 以下不计候选；最高分 ≥ 0.9 且与次高分拉开 0.15 才算「确定命中」，
 # 否则进「多候选」让用户挑。
@@ -197,3 +198,150 @@ def classify(scored: list[MatchCandidate]) -> str:
         if top - runner >= AMBIGUITY_GAP:
             return "matched"
     return "ambiguous"
+
+
+@dataclass
+class MatchResult:
+    """一次匹配的完整结果."""
+
+    status: str                                   # matched | ambiguous | missing | na
+    source: str | None = None                     # format_section | full_text | table
+    best: MatchCandidate | None = None
+    candidates: list[MatchCandidate] = field(default_factory=list)
+    table_index: int | None = None
+    corpus_hash: str | None = None
+
+
+def corpus_hash(text: str) -> str:
+    """语料文本的 sha1，用于判断"原文变了没"."""
+    return "sha1:" + hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+
+
+def page_at(page_map: list[dict] | None, offset: int) -> int | None:
+    """按偏移量查真实页码；没有映射表返回 None（调用方不要把 None 编造成页号）."""
+    if not page_map:
+        return None
+    page = None
+    for entry in page_map:
+        if entry.get("start", 0) <= offset:
+            page = entry.get("page")
+        else:
+            break
+    return page
+
+
+def _pick_table_index(
+    target_norm: str, tables: list[dict] | None, section_page: int | None,
+) -> int | None:
+    """选出该章节对应的表格下标.
+
+    优先按页码就近取——招标原文里表格紧跟在小节标题之后；没有页码信息时退到
+    用首行（表头）文字打分。
+    """
+    if not tables:
+        return None
+
+    if section_page is not None:
+        later = [i for i, t in enumerate(tables) if (t.get("page") or 0) >= section_page]
+        if later:
+            return later[0]
+
+    best_i, best_score = None, 0.0
+    for i, t in enumerate(tables):
+        rows = t.get("rows") or []
+        if not rows:
+            continue
+        header_norm = normalize_title("".join(str(c or "") for c in rows[0]))
+        s = score_title(target_norm, header_norm)
+        if s > best_score:
+            best_i, best_score = i, s
+    return best_i if best_score >= MATCH_THRESHOLD else None
+
+
+def _score_corpus(
+    target_norm: str, text: str, page_map: list[dict] | None,
+) -> list[MatchCandidate]:
+    """在单份语料里给所有标题行打分，返回 ≥ MATCH_THRESHOLD 的候选（降序）."""
+    headers = enumerate_headers(text)
+    scored: list[MatchCandidate] = []
+    for idx, h in enumerate(headers):
+        s = score_title(target_norm, normalize_title(h.title))
+        if s < MATCH_THRESHOLD:
+            continue
+        if not has_body(text, headers, idx):
+            continue
+        scored.append(MatchCandidate(
+            title=h.title,
+            raw=h.raw,
+            level=h.level,
+            start=h.start,
+            end=section_end(headers, idx, len(text)),
+            score=s,
+            page=page_at(page_map, h.start),
+        ))
+    scored.sort(key=lambda c: (-c.score, c.start))
+    return scored
+
+
+def match_tender_section(
+    title: str,
+    *,
+    chapter_type: str = "fixed_form",
+    format_section_text: str | None = None,
+    full_text: str | None = None,
+    format_tables: list[dict] | None = None,
+    format_page_map: list[dict] | None = None,
+) -> MatchResult:
+    """按标题在招标原文中定位一个小节.
+
+    语料优先级：``format_section_text``（投标文件格式章节）→ ``full_text``（全文）。
+    ``chapter_type == "table"`` 时额外选出一张表并记 ``table_index``。
+
+    注意：**不在此处做"匹配不上就降级 AI"的兜底**——那由调用方决定，
+    本函数只如实报告 status，好让结构页能把红叉显示给用户。
+    """
+    target_norm = normalize_title(title)
+    if not target_norm:
+        return MatchResult(status="missing")
+
+    if chapter_type == "ai_generated":
+        return MatchResult(status="na")
+
+    # 先按文字找小节（两种情况都要：文本类要靠它切片，表格类要靠它的页码定表）
+    text_hit: MatchResult | None = None
+    for source, text, pmap in (
+        ("format_section", format_section_text, format_page_map),
+        ("full_text", full_text, None),
+    ):
+        if not text:
+            continue
+        scored = _score_corpus(target_norm, text, pmap)
+        if not scored:
+            continue
+        status = classify(scored)
+        text_hit = MatchResult(
+            status=status, source=source, best=scored[0],
+            candidates=scored[:MAX_CANDIDATES] if status == "ambiguous" else [],
+            corpus_hash=corpus_hash(text),
+        )
+        break
+
+    if chapter_type != "table":
+        return text_hit or MatchResult(status="missing")
+
+    # 表格类：**那张表本身就是内容**，不要求标题文案先匹配上小节。
+    # 有文字命中就拿它的页码就近取表；没有就直接用表头文字打分。
+    section_page = text_hit.best.page if (text_hit and text_hit.best) else None
+    table_index = _pick_table_index(target_norm, format_tables, section_page)
+    if table_index is None:
+        # 一张表都没有 → 退化成普通文本匹配的结果（可能 matched / ambiguous / missing）
+        return text_hit or MatchResult(status="missing")
+
+    return MatchResult(
+        status="matched",
+        source="table",
+        best=text_hit.best if text_hit else None,
+        candidates=[],
+        table_index=table_index,
+        corpus_hash=text_hit.corpus_hash if text_hit else None,
+    )

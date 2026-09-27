@@ -378,6 +378,28 @@ def extract_clean_text_from_pages(pdf, start: int, end: int) -> str:
     Returns:
         合并后的文本，页间以空行分隔
     """
+    text, _page_map = extract_clean_text_with_page_map(pdf, start, end)
+    return text
+
+
+def extract_clean_text_with_page_map(
+    pdf, start: int, end: int,
+) -> tuple[str, list[dict]]:
+    """同 extract_clean_text_from_pages，但额外返回每页在合并文本中的起始偏移.
+
+    页与页以 ``"\\n\\n"`` 相连，且空页不产出文本（原实现行为，必须保持不变），
+    所以页码**无法**从合并文本里数分隔符反推。需要报「第 N 页」的调用方
+    （如章节匹配器）必须靠这份映射。
+
+    Args:
+        pdf: pdfplumber.PDF 实例
+        start: 起始页（0-indexed）
+        end: 结束页（0-indexed，包含）
+
+    Returns:
+        (合并后的文本, [{"start": int, "page": int}, ...])，page 为 1-indexed，
+        且只包含真正产出文本的页。
+    """
     pages = []
     for i in range(start, end + 1):
         if i >= len(pdf.pages):
@@ -386,7 +408,7 @@ def extract_clean_text_from_pages(pdf, start: int, end: int) -> str:
         lines = page.extract_text_lines()
         if not lines:
             continue
-        pages.append((page, lines, [t.bbox for t in page.find_tables()]))
+        pages.append((i, page, lines, [t.bbox for t in page.find_tables()]))
 
     # 正文栏右边界取整份文档的表格外行，**不能在单页里取**：第 83 页表格占了大
     # 半页，表格外只剩「八、投标人基本资料」「（一）投标人基本情况表」两行标题，
@@ -394,20 +416,26 @@ def extract_clean_text_from_pages(pdf, start: int, end: int) -> str:
     # 表格比正文栏宽，算进来又会把边界抬高，所以只取表格外的行。
     edge_candidates = [
         (ln.get("x1") or 0.0)
-        for _, lines, boxes in pages
+        for _, _, lines, boxes in pages
         for ln in lines
         if not _in_table(ln, boxes)
     ] or [
-        (ln.get("x1") or 0.0) for _, lines, _ in pages for ln in lines
+        (ln.get("x1") or 0.0) for _, _, lines, _ in pages for ln in lines
     ]
     right_edge = max(edge_candidates) if edge_candidates else 0.0
 
-    parts = []
-    for page, lines, boxes in pages:
+    parts: list[str] = []
+    page_map: list[dict] = []
+    cursor = 0
+    for page_no, page, lines, boxes in pages:
         cleaned = _clean_page_lines(page, lines, boxes, right_edge)
-        if cleaned:
-            parts.append("\n".join(cleaned))
-    return "\n\n".join(parts)
+        if not cleaned:
+            continue
+        chunk = "\n".join(cleaned)
+        page_map.append({"start": cursor, "page": page_no + 1})
+        parts.append(chunk)
+        cursor += len(chunk) + 2  # 与 "\n\n".join 的间隔一致
+    return "\n\n".join(parts), page_map
 
 
 def extract_tables_from_pages(pdf, start: int, end: int) -> list[dict]:
@@ -480,12 +508,13 @@ def extract_format_section(pdf_path: str) -> dict:
         # 固定格式章节要按招标原文逐字回填，必须用清洗过的文本：原样转储会把
         # 排版硬换行和印刷页码一起带进标书正文（实测「其中：治」/「安保卫业务」
         # 断在词中间、「-75-」夹在「投标人名称：」和「日期：」之间）。
-        full_text = extract_clean_text_from_pages(pdf, start, end)
+        full_text, page_map = extract_clean_text_with_page_map(pdf, start, end)
         tables = extract_tables_from_pages(pdf, start, end)
 
         result = {
             "full_text": full_text,
             "tables": tables,
+            "page_map": page_map,
             "start_page": start + 1,
             "end_page": end + 1,
             "total_pages": len(pdf.pages),

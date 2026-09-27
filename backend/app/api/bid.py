@@ -140,6 +140,7 @@ async def upload_and_parse(
         requirements["format_section_text"] = format_section["full_text"]
         requirements["format_tables"] = format_section["tables"]
         requirements["format_pages"] = [format_section["start_page"], format_section["end_page"]]
+        requirements["format_page_map"] = format_section.get("page_map", [])
     except Exception as e:
         logger.warning("Format section extraction failed: %s", e)
 

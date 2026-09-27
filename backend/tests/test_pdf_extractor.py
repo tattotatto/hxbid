@@ -10,6 +10,7 @@ import pytest
 
 from app.services.pdf_extractor import (
     extract_clean_text_from_pages,
+    extract_clean_text_with_page_map,
     extract_format_section,
     extract_full_document,
     extract_tables_from_pages,
@@ -66,6 +67,14 @@ class TestExtractFormatSection:
         assert result["start_page"] >= 1
         assert result["end_page"] >= result["start_page"]
         assert result["total_pages"] >= result["end_page"]
+
+        # 页偏移映射必须带出来——章节匹配器靠它报「第 N 页」，
+        # 而页码无法从合并文本里数分隔符反推（空页不产出文本）
+        assert "page_map" in result, "extract_format_section 必须带出 page_map"
+        assert len(result["page_map"]) >= 1
+        first = result["page_map"][0]
+        assert first["start"] == 0
+        assert result["full_text"][first["start"]:].strip(), "起始偏移必须指向真实文本"
 
         print(
             f"Text: {len(result['full_text'])} chars, "
@@ -790,3 +799,72 @@ class TestLocateEvaluationSection:
         start, end, text = located
         assert start == 0 and end == 2, f"got start={start} end={end}"
         assert "详细评审" in text
+
+
+class TestCleanTextWithPageMap:
+    """extract_clean_text_with_page_map 的页偏移映射.
+
+    `_clean_page_lines` 被 monkeypatch 成恒等，只验**页偏移的算术**：
+    页与页以 "\n\n" 相连、空页不产出文本，所以页码无法从合并文本里
+    数分隔符反推——需要报「第 N 页」的调用方必须靠这份映射。
+    """
+
+    @staticmethod
+    def _pdf(pages_lines):
+        class FakePage:
+            def __init__(self, texts):
+                self._texts = texts
+
+            def extract_text_lines(self):
+                return [
+                    {"text": t, "x0": 50.0, "x1": 500.0,
+                     "top": 100.0 + i * 14, "bottom": 112.0 + i * 14}
+                    for i, t in enumerate(self._texts)
+                ]
+
+            def find_tables(self):
+                return []
+
+        class FakePdf:
+            def __init__(self, pages):
+                self.pages = pages
+
+        return FakePdf([FakePage(t) for t in pages_lines])
+
+    @staticmethod
+    def _patch_clean(monkeypatch):
+        from app.services import pdf_extractor
+        monkeypatch.setattr(
+            pdf_extractor,
+            "_clean_page_lines",
+            lambda page, lines, boxes, right_edge: [ln["text"] for ln in lines],
+        )
+
+    def test_page_map_offsets_address_the_joined_text(self, monkeypatch):
+        self._patch_clean(monkeypatch)
+        text, page_map = extract_clean_text_with_page_map(
+            self._pdf([["第一页内容"], ["第二页内容"]]), 0, 1,
+        )
+
+        assert len(page_map) == 2
+        assert page_map[0] == {"start": 0, "page": 1}
+        assert text[page_map[0]["start"]:].startswith("第一页内容")
+        assert text[page_map[1]["start"]:].startswith("第二页内容")
+
+    def test_blank_page_is_skipped_but_page_numbers_stay_true(self, monkeypatch):
+        """空页不产出文本，但后面页的页码必须仍是它的**真实页码**，不是序号。"""
+        self._patch_clean(monkeypatch)
+        text, page_map = extract_clean_text_with_page_map(
+            self._pdf([["第一页内容"], [], ["第三页内容"]]), 0, 2,
+        )
+
+        assert len(page_map) == 2
+        assert page_map[0]["page"] == 1
+        assert page_map[1]["page"] == 3, "跳过的空页不能把页码压成 2"
+        assert text[page_map[1]["start"]:].startswith("第三页内容")
+
+    def test_original_function_still_returns_plain_text(self, monkeypatch):
+        """委托不能改变原函数的返回类型与内容。"""
+        self._patch_clean(monkeypatch)
+        text = extract_clean_text_from_pages(self._pdf([["甲"], ["乙"]]), 0, 1)
+        assert text == "甲\n\n乙"
