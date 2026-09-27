@@ -221,3 +221,27 @@ class TestMatchPayload:
         )
         payload = _to_match_payload(result, corpus)
         assert payload["table_preview"] is None
+
+
+class TestAttachmentUploadRules:
+    def test_allowed_extensions(self):
+        from app.api.chapters import ALLOWED_ATTACHMENT_EXT
+
+        assert ".png" in ALLOWED_ATTACHMENT_EXT
+        assert ".pdf" in ALLOWED_ATTACHMENT_EXT
+        assert ".exe" not in ALLOWED_ATTACHMENT_EXT
+
+    def test_safe_attachment_filename_strips_path(self):
+        from app.api.chapters import _safe_attachment_name
+
+        assert "/" not in _safe_attachment_name("../../evil.png")
+        assert _safe_attachment_name("../../evil.png").endswith("evil.png")
+        assert _safe_attachment_name("证明 文件.PNG").endswith(".png")
+
+    def test_unsupported_extension_is_rejected(self):
+        from app.api.chapters import _is_allowed_attachment
+
+        assert _is_allowed_attachment("a.png") is True
+        assert _is_allowed_attachment("a.PDF") is True
+        assert _is_allowed_attachment("a.exe") is False
+        assert _is_allowed_attachment("noext") is False

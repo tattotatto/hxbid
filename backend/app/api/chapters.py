@@ -1497,3 +1497,72 @@ async def match_chapter_section(
     return _to_match_payload(
         match_result, corpus, requirements.get("format_tables") or [],
     )
+
+
+# ---------------------------------------------------------------------------
+# 本项目附件上传（资源库里没有的文件：保证金凭证、基本账户证明等）
+# ---------------------------------------------------------------------------
+
+ALLOWED_ATTACHMENT_EXT = (".png", ".jpg", ".jpeg", ".pdf")
+
+
+def _is_allowed_attachment(filename: str) -> bool:
+    return Path(filename or "").suffix.lower() in ALLOWED_ATTACHMENT_EXT
+
+
+def _safe_attachment_name(filename: str) -> str:
+    """只取 basename 并统一小写扩展名，防目录穿越."""
+    name = Path(filename or "file").name
+    stem = Path(name).stem or "file"
+    return f"{stem}{Path(name).suffix.lower()}"
+
+
+@router.post("/{project_id}/attachments/upload")
+async def upload_project_attachment(
+    project_id: str,
+    file: UploadFile = File(...),
+    label: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """上传本项目专用附件，返回一条可塞进章节节点的附件记录.
+
+    只负责落盘并返回记录；清单本身住在章节树里，由前端塞进节点后随
+    ``PUT /chapter-structure`` 统一保存（结构树节点没有稳定 id，按编号寻址
+    会在用户改编号后错位）。
+
+    注意 ``label`` 必须是 ``Form()``：它是前端 FormData 发的标量字段，不标就是
+    query 参数，收不到、**且不报错**，静默退化成 file.filename。
+    """
+    result = await db.execute(select(BidProject).where(BidProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status not in _STRUCTURE_EDITABLE_STATUS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目已进入 {project.status} 阶段，不能再添加附件",
+        )
+
+    if not _is_allowed_attachment(file.filename or ""):
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型，仅接受 {'/'.join(ALLOWED_ATTACHMENT_EXT)}",
+        )
+
+    upload_dir = Path(settings.UPLOAD_DIR) / f"project_{project_id}"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _safe_attachment_name(file.filename or "file")
+    stored_name = f"{uuid.uuid4().hex}_{safe_name}"
+    (upload_dir / stored_name).write_bytes(await file.read())
+
+    rel_path = f"project_{project_id}/{stored_name}"
+    logger.info("Attachment uploaded for project %s: %s", project_id, rel_path)
+    return {
+        "kind": "upload",
+        "id": uuid.uuid4().hex,
+        "label": label or Path(safe_name).stem,
+        "path": rel_path,
+    }
