@@ -1332,6 +1332,64 @@ def _load_chapter_meta(chapter) -> dict:
         return {}
 
 
+def _resolve_section_text(
+    chapter, meta: dict, requirements: dict, full_text: str | None,
+) -> tuple[str | None, list[str]]:
+    """把章节对应的招标原文片段取出来，返回 (片段, 警告列表).
+
+    优先用结构页固化的 ``match`` 区间**原样切片**——用户预览时看到的就是最终
+    进标书的那段。只有区间失效（语料 hash 变了、越界）才按标题重新匹配一次并
+    告警；再失败则返回 None 交给调用方走 AI 兜底。
+
+    没有 ``match`` 的老项目返回 ``(None, [])``——那不是异常，是"走老路径"。
+    """
+    from app.services.tender_section_matcher import corpus_hash, match_tender_section
+
+    match = (meta or {}).get("match") or {}
+    if not match or match.get("status") not in ("matched", "ambiguous"):
+        return None, []
+
+    corpus = requirements.get("format_section_text") or ""
+    source = match.get("source")
+
+    def _slice(text: str) -> str | None:
+        start, end = match.get("start"), match.get("end")
+        if not isinstance(start, int) or not isinstance(end, int):
+            return None
+        if start < 0 or end <= start or end > len(text):
+            return None
+        return text[start:end]
+
+    if source == "full_text":
+        candidate = full_text or ""
+        if candidate and match.get("corpus_hash") == corpus_hash(candidate):
+            sliced = _slice(candidate)
+            if sliced:
+                return sliced, []
+    else:
+        if corpus and match.get("corpus_hash") == corpus_hash(corpus):
+            sliced = _slice(corpus)
+            if sliced:
+                return sliced, []
+
+    # 区间失效 → 按标题重匹配
+    relookup = match_tender_section(
+        chapter.title,
+        chapter_type="fixed_form",
+        format_section_text=corpus,
+        full_text=full_text,
+        format_page_map=requirements.get("format_page_map") or [],
+    )
+    if relookup.best is not None:
+        text_used = full_text if relookup.source == "full_text" else corpus
+        if text_used:
+            return (
+                text_used[relookup.best.start:relookup.best.end],
+                [f"「{chapter.title}」的原文位置已变化，已按标题重新匹配"],
+            )
+    return None, [f"「{chapter.title}」未匹配到招标原文，将改由 AI 撰写"]
+
+
 async def generate_from_chapter_structure(
     project_id: str,
     requirements: dict,
@@ -1416,10 +1474,13 @@ async def generate_from_chapter_structure(
 
     # ── Generate file sections first ──
     file_chapters_output = []  # pre-generated file/table chapters
+    format_warnings: list[str] = []   # 累计各类降级/兜底，最后写进校验报告
     from app.services.template_filler import (
-        fill_fixed_form_section_from_template,
+        fill_fixed_form_section_from_template_with_tables,
         generate_file_section,
     )
+    from app.services.tender_corpus import load_full_text
+    full_text = load_full_text(requirements, settings.UPLOAD_DIR)
 
     for chapter in chapters:
         if chapter.chapter_type in ("fixed_form", "table"):
@@ -1431,13 +1492,20 @@ async def generate_from_chapter_structure(
             file_content = ""
             if chapter.chapter_type == "fixed_form" and requirements.get("format_section_text"):
                 try:
-                    file_content = await fill_fixed_form_section_from_template(
-                        section_title=chapter.title,
-                        format_section_text=requirements["format_section_text"],
-                        format_tables=requirements.get("format_tables", []),
-                        company_profile=company_profile,
-                        requirements=requirements,
-                        ai_adapter=ai_adapter,
+                    section_text_override, section_warnings = _resolve_section_text(
+                        chapter, chapter_meta, requirements, full_text,
+                    )
+                    format_warnings.extend(section_warnings)
+                    file_content, _table_fills = (
+                        await fill_fixed_form_section_from_template_with_tables(
+                            section_title=chapter.title,
+                            format_section_text=requirements["format_section_text"],
+                            format_tables=requirements.get("format_tables", []),
+                            company_profile=company_profile,
+                            requirements=requirements,
+                            ai_adapter=ai_adapter,
+                            section_text_override=section_text_override,
+                        )
                     )
                     if file_content:
                         logger.info(
@@ -1449,8 +1517,9 @@ async def generate_from_chapter_structure(
                         "Scan-and-fill failed for '%s': %s; falling back to AI generation",
                         chapter.title, exc,
                     )
+                    format_warnings.append(f"「{chapter.title}」原文回填失败，已改用 AI 撰写")
 
-            if not file_content:
+            if not file_content and chapter.chapter_type == "fixed_form":
                 try:
                     file_content = await generate_file_section(
                         section_type=chapter.title,
@@ -1458,6 +1527,9 @@ async def generate_from_chapter_structure(
                         requirements=requirements,
                         project_name=requirements.get("project_name", "") if requirements else "",
                         ai_adapter=ai_adapter,
+                    )
+                    format_warnings.append(
+                        f"「{chapter.title}」未匹配到招标原文，已由 AI 撰写"
                     )
                 except Exception as exc:
                     logger.warning("File section '%s' generation failed: %s", chapter.title, exc)
@@ -2022,6 +2094,10 @@ async def generate_from_chapter_structure(
     # ── Phase: 格式校验（与招标文件格式模板对账）──
     from app.services.format_verifier import verify_format
     verification = verify_format(chapters_payload, format_template)
+    if format_warnings:
+        # 生成期的降级/兜底一律不静默：写进校验报告，导出前的检查清单可见
+        verification.setdefault("warnings", [])
+        verification["warnings"].extend(format_warnings)
     try:
         project.format_verification_json = json.dumps(verification, ensure_ascii=False)
         await db.commit()
