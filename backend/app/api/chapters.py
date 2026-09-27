@@ -744,6 +744,20 @@ async def get_chapters(
     except json.JSONDecodeError:
         chapters = []
 
+    # ── 补齐未匹配章节的匹配结果（读时派生，**不落库**）──
+    # 没有这一步，页面加载时每个固定格式/表格章节都显示红「未匹配」，
+    # 而它们其实大多能匹配上（匹配原本只在改标题/改类型时才跑）。
+    if chapters and not project.chapters:
+        from app.services.tender_corpus import load_full_text
+
+        try:
+            _match_reqs = json.loads(project.parsed_requirements_json or "{}")
+        except json.JSONDecodeError:
+            _match_reqs = {}
+        chapters = _enrich_missing_matches(
+            chapters, _match_reqs, load_full_text(_match_reqs, settings.UPLOAD_DIR),
+        )
+
     # ── 评标办法覆盖预览（未落库，仅供确认页「评标办法覆盖」提示条）──
     def _collect_titles(items) -> list[str]:
         out = []
@@ -1532,6 +1546,61 @@ def _to_match_payload(
         "candidates": [_cand(c) for c in result.candidates],
         "table_preview": table_preview,
     }
+
+
+def _enrich_missing_matches(
+    chapters: list, requirements: dict, full_text: str | None,
+) -> list:
+    """给**还没有、或已失效**的 match 的固定格式/表格章节补上匹配结果.
+
+    线上反馈：「不点修改就显示未匹配，实际上是可以匹配的」。
+    匹配原本只在「改标题 / 改类型」时触发（前端 ``onMatchRequest``），
+    **加载时根本不跑** —— 刚提取/刚打开的结构，每个固定格式/表格章节都挂着
+    红「未匹配」，用户得逐个点一次「重命名→保存」才看得到真实状态。
+    页面在说谎，而这正是"哪里会出问题"的唯一告知渠道。
+
+    在这里按需补算（与 ``rubric_cover`` 一样属于读时派生，**不落库**）：
+    - 已有 match 且 ``corpus_hash`` 与对应语料一致 → 不动（幂等，且不会
+      覆盖用户手选 ``picked="manual"`` 的结果）
+    - ``ai_generated`` / ``attachment`` / ``mixed`` → 不参与匹配，跳过
+    """
+    from app.services.tender_section_matcher import corpus_hash, match_tender_section
+
+    fmt_text = requirements.get("format_section_text")
+    tables = requirements.get("format_tables") or []
+    page_map = requirements.get("format_page_map") or []
+    corpus_available = bool(fmt_text or full_text)
+
+    def _existing_is_fresh(existing: dict) -> bool:
+        if not existing:
+            return False
+        source_corpus = full_text if existing.get("source") == "full_text" else fmt_text
+        if not source_corpus:
+            return False
+        return existing.get("corpus_hash") == corpus_hash(source_corpus)
+
+    def _walk(nodes) -> None:
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            if node.get("type") in ("fixed_form", "table"):
+                if not _existing_is_fresh(node.get("match") or {}):
+                    result = match_tender_section(
+                        node.get("title") or "",
+                        chapter_type=node["type"],
+                        format_section_text=fmt_text,
+                        full_text=full_text,
+                        format_tables=tables,
+                        format_page_map=page_map,
+                    )
+                    corpus = (full_text or "") if result.source == "full_text" else (fmt_text or "")
+                    node["match"] = _to_match_payload(
+                        result, corpus, tables, corpus_available=corpus_available,
+                    )
+            _walk(node.get("children"))
+
+    _walk(chapters)
+    return chapters
 
 
 class ChapterMatchRequest(BaseModel):

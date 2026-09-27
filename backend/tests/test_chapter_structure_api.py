@@ -387,3 +387,85 @@ class TestCorpusAvailabilityFlag:
 
         result = match_tender_section("投标函", format_section_text="一、投标函\n\n正文")
         assert _to_match_payload(result, "一、投标函\n\n正文")["corpus_available"] is True
+
+
+class TestEnrichMissingMatches:
+    """页面加载时必须显示真实的匹配状态.
+
+    线上反馈：「不点修改就显示未匹配，实际上是可以匹配的」。
+    匹配原本只在「改标题 / 改类型」时触发（前端 onMatchRequest），**加载时不跑**
+    —— 于是刚提取/刚打开的结构，每个固定格式/表格章节都挂着「未匹配」，
+    用户必须逐个点一次「重命名→保存」才看到真实状态。页面在说谎。
+    """
+
+    CORPUS = "一、封面\n\n封面正文\n\n二、投标函\n\n投标函正文\n"
+    REQS = {"format_section_text": CORPUS, "format_tables": [], "format_page_map": []}
+
+    def _enrich(self, chapters, reqs=None, full_text=None):
+        from app.api.chapters import _enrich_missing_matches
+
+        # 注意用 is None 而不是 `or`：空 dict 是"真的没有语料"，不能被兜底成 REQS
+        return _enrich_missing_matches(
+            chapters, self.REQS if reqs is None else reqs, full_text)
+
+    def test_fills_match_for_nodes_lacking_one(self):
+        tree = [{"title": "一、封面", "type": "fixed_form", "children": []}]
+        out = self._enrich(tree)
+        assert out[0]["match"]["status"] == "matched"
+        assert out[0]["match"]["start"] is not None
+
+    def test_bare_title_also_matches(self):
+        """生成侧标题不带序号时也要匹配上（序号归一化）。"""
+        tree = [{"title": "封面", "type": "fixed_form"}]
+        assert self._enrich(tree)[0]["match"]["status"] == "matched"
+
+    def test_table_node_gets_table_index(self):
+        # 表格按表头文字打分选表（语料里没有对应小标题、也没有 page_map 时）
+        reqs = dict(self.REQS)
+        reqs["format_tables"] = [{"page": 75, "table_index": 0,
+                                  "rows": [["序号", "服务内容"], ["1", "安保"]]}]
+        tree = [{"title": "序号服务内容", "type": "table",
+                 "match": {"status": "missing"}}]
+        out = self._enrich(tree, reqs)
+        assert out[0]["match"]["table_index"] == 0
+
+    def test_ai_generated_and_attachment_are_left_alone(self):
+        tree = [{"title": "服务方案", "type": "ai_generated"},
+                {"title": "附件", "type": "attachment"}]
+        out = self._enrich(tree)
+        assert out[0].get("match") is None
+        assert out[1].get("match") is None
+
+    def test_existing_fresh_match_is_not_recomputed(self):
+        """已有且语料未变的 match 不动 —— 幂等，避免每次刷新都重算。"""
+        from app.services.tender_section_matcher import corpus_hash
+
+        kept = {"status": "matched", "source": "format_section", "start": 0, "end": 9,
+                "corpus_hash": corpus_hash(self.CORPUS), "picked": "manual"}
+        tree = [{"title": "一、封面", "type": "fixed_form", "match": dict(kept)}]
+        out = self._enrich(tree)
+        assert out[0]["match"] == kept, "用户手选的结果不该被重算覆盖"
+
+    def test_stale_match_is_recomputed(self):
+        tree = [{"title": "一、封面", "type": "fixed_form",
+                 "match": {"status": "matched", "corpus_hash": "sha1:stale"}}]
+        out = self._enrich(tree)
+        assert out[0]["match"]["status"] == "matched"
+        assert out[0]["match"]["corpus_hash"] != "sha1:stale"
+
+    def test_children_are_walked(self):
+        tree = [{"title": "父", "type": "ai_generated", "children": [
+            {"title": "一、封面", "type": "fixed_form"}]}]
+        out = self._enrich(tree)
+        assert out[0]["children"][0]["match"]["status"] == "matched"
+
+    def test_empty_corpus_yields_missing_not_crash(self):
+        tree = [{"title": "一、封面", "type": "fixed_form"}]
+        out = self._enrich(tree, reqs={}, full_text=None)
+        assert out[0]["match"]["status"] == "missing"
+
+    def test_full_text_fallback_is_used(self):
+        tree = [{"title": "一、封面", "type": "fixed_form"}]
+        out = self._enrich(tree, reqs={}, full_text=self.CORPUS)
+        assert out[0]["match"]["status"] == "matched"
+        assert out[0]["match"]["source"] == "full_text"
