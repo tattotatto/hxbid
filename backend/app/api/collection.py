@@ -8,10 +8,13 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
+from app.models.project import BidProject, ProjectChapter
 from app.models.user import User
 from app.schemas.collection import (
     AssignPersonnelRequest,
@@ -20,6 +23,7 @@ from app.schemas.collection import (
     LinkQualificationRequest,
     UnlinkResourceRequest,
 )
+from app.services.chapter_attachments import set_chapter_attachments
 from app.services.collection import (
     analyze_collection_needs,
     assign_personnel,
@@ -253,3 +257,54 @@ async def list_collected_resources(
     and personnel directly into the AI prompt.
     """
     return await get_collected_resources(project_id, db)
+
+
+# ── PUT /{project_id}/chapters/{chapter_id}/attachments ─────────────────
+#
+# 附件清单的**第二个编辑入口**（另一个是目录确认页的抽屉）。用户 2026-09-27
+# 需求：目录里设成「附件」的章节，到信息搜集这一步要在「资质与证件」里让用户
+# 把材料补齐，包含上传和从资源库选。
+#
+# 两处写的是同一份数据 —— `ProjectChapter.chapter_meta_json["attachments"]`
+# （生成期只认它），清洗口径也同一套（`prune_attachments`）。
+#
+# 上传文件走现成的 `POST /bid/{pid}/attachments/upload`（该端点的状态门禁已放宽到
+# 覆盖 collecting），这里只负责把前端选好的清单整份落库。
+
+
+class SetChapterAttachmentsRequest(BaseModel):
+    attachments: list[dict] = Field(default_factory=list)
+
+
+@router.put("/{project_id}/chapters/{chapter_id}/attachments")
+async def set_chapter_attachments_for_project(
+    project_id: str,
+    chapter_id: str,
+    payload: SetChapterAttachmentsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    """替换某个附件章节的材料清单，返回落库后的清单与被剔除的项.
+
+    剔除是静默发生的（资源库行已删 / 路径越界 / 跨章节内容重复），所以必须
+    把 ``pruned_attachments`` 透给前端 —— 不说一声用户会以为挂上了。
+    """
+    result = await db.execute(select(BidProject).where(BidProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status == "generating":
+        raise HTTPException(status_code=409, detail="标书正在生成中，暂时不能改附件")
+
+    chapter = await db.get(ProjectChapter, chapter_id)
+    if not chapter or chapter.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+    if chapter.chapter_type != "attachment":
+        raise HTTPException(
+            status_code=400,
+            detail="只有「附件」类型的章节才需要挂材料",
+        )
+
+    kept, pruned = await set_chapter_attachments(chapter, payload.attachments, db)
+    await db.commit()
+    return {"attachments": kept, "pruned_attachments": pruned}

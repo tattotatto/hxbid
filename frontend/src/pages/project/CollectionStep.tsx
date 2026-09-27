@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react'
-import { Card, Tag, Button, Space, message, Progress, Alert, List, Popconfirm } from 'antd'
+import { useEffect, useState, useCallback, useMemo } from 'react'
+import { Card, Tag, Button, Space, message, Progress, Alert, List, Popconfirm, Upload } from 'antd'
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -10,6 +10,8 @@ import {
   DeleteOutlined,
 } from '@ant-design/icons'
 import client from '../../api/client'
+import { buildAttachmentOptions } from '../../api/outline'
+import type { OutlineAttachment } from '../../api/outline'
 import QualificationPickerModal, { PickerMode, PickerSelection } from './QualificationPickerModal'
 import QuickPersonnelForm from './QuickPersonnelForm'
 import QuickQualificationUpload from './QuickQualificationUpload'
@@ -27,11 +29,30 @@ interface ResourceMatch {
   match_status: string
 }
 
+/**
+ * 「目录里设成附件类型」的章节 —— 与 document_items（招标要求的需求项）是
+ * **两套独立的东西**，只在本页并排展示、各写各的存储：
+ * 需求项选择写 ProjectQualification/ProjectContract 关联表；
+ * 附件章节选择写 ProjectChapter.chapter_meta_json.attachments（生成期只认它）。
+ */
+interface ChapterAttachmentRow {
+  source: 'chapter_attachment'
+  chapter_id: string
+  title: string
+  order_index: number
+  attachments: OutlineAttachment[]
+}
+
+type GzRow =
+  | { kind: 'req'; item: ResourceMatch }
+  | { kind: 'att'; item: ChapterAttachmentRow }
+
 interface CollectionData {
   project_id: string
   status: string
   document_items: ResourceMatch[]
   personnel_items: ResourceMatch[]
+  attachment_items?: ChapterAttachmentRow[]
   is_complete: boolean
 }
 
@@ -89,9 +110,133 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
 
   // ── Actions ──
 
+  // ── 附件章节（目录里设成「附件」的章节）的材料 ──
+  const [attachUploading, setAttachUploading] = useState<string | null>(null)
+  const [attachPickerTarget, setAttachPickerTarget] = useState<ChapterAttachmentRow | null>(null)
+
+  const attachmentsOf = useCallback(
+    (chapterId: string): OutlineAttachment[] =>
+      (data?.attachment_items ?? []).find((r) => r.chapter_id === chapterId)?.attachments ?? [],
+    [data],
+  )
+
+  /** 整份替换该章节的清单。后端会剔除失效项（资源库行已删/路径越界/内容重复）并把剔除的报回来 */
+  const putChapterAttachments = async (chapterId: string, next: OutlineAttachment[]) => {
+    const res = await client.put(`/collection/${projectId}/chapters/${chapterId}/attachments`, {
+      attachments: next,
+    })
+    const pruned: string[] = res.data?.pruned_attachments ?? []
+    if (pruned.length) {
+      message.warning(
+        `有 ${pruned.length} 项材料已被剔除（资源库行已删除、路径失效或与其它章节重复）：${pruned.join('、')}`,
+      )
+    }
+    fetchStatus()
+  }
+
+  const handleAttachUpload = async (chapter: ChapterAttachmentRow, file: File) => {
+    setAttachUploading(chapter.chapter_id)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      form.append('label', file.name)
+      const rec: OutlineAttachment = (
+        await client.post(`/bid/${projectId}/attachments/upload`, form)
+      ).data
+      await putChapterAttachments(chapter.chapter_id, [
+        ...attachmentsOf(chapter.chapter_id), rec,
+      ])
+      message.success(`已挂到「${chapter.title}」`)
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '附件上传失败')
+    } finally {
+      setAttachUploading(null)
+    }
+  }
+
+  /** 选择器返回的资质/合同/人员对象**不带文件路径**，回查列表拿 path.
+   *  复用 buildAttachmentOptions —— 三个库的字段形状由它统一收敛（已用 node 验过）。 */
+  const handleAttachPicked = async (picks: PickerSelection) => {
+    const chapter = attachPickerTarget
+    if (!chapter) return
+    const items: OutlineAttachment[] = []
+    let pickedCount = 0
+    try {
+      if (picks.qualifications.length) {
+        pickedCount += picks.qualifications.length
+        const opts = buildAttachmentOptions('qualification', (await client.get('/qualifications/')).data)
+        const byId = new Map(opts.map((o) => [o.value, o]))
+        for (const q of picks.qualifications) {
+          const o = byId.get(q.id)
+          if (o?.path) items.push({ kind: 'qualification', id: o.value, label: o.label, path: o.path })
+        }
+      }
+      if (picks.contracts.length) {
+        pickedCount += picks.contracts.length
+        const opts = buildAttachmentOptions('contract', (await client.get('/contracts/')).data)
+        const byId = new Map(opts.map((o) => [o.value, o]))
+        for (const c of picks.contracts) {
+          const o = byId.get(c.id)
+          if (o?.path) items.push({ kind: 'contract', id: o.value, label: o.label, path: o.path })
+        }
+      }
+      if (picks.personnel.length) {
+        pickedCount += picks.personnel.length
+        const rows: any[] = (await client.get('/personnel/')).data
+        for (const p of picks.personnel) {
+          const row = rows.find((r) => r.id === p.id)
+          for (const cert of row?.certificates ?? []) {
+            if (cert.attachment_path) {
+              items.push({
+                kind: 'personnel_cert',
+                id: cert.id,
+                label: `${row.name} · ${cert.cert_name}`,
+                path: cert.attachment_path,
+              })
+            }
+          }
+        }
+      }
+    } catch {
+      message.error('读取资源库失败')
+      return
+    }
+    if (!items.length) {
+      message.warning(pickedCount ? '选中的项都没有扫描件，未挂载' : '没有选中任何项')
+      return
+    }
+    await putChapterAttachments(chapter.chapter_id, [
+      ...attachmentsOf(chapter.chapter_id), ...items,
+    ])
+    message.success(`已挂 ${items.length} 项到「${chapter.title}」`)
+  }
+
+  const handleAttachRemove = async (chapter: ChapterAttachmentRow, index: number) => {
+    await putChapterAttachments(
+      chapter.chapter_id,
+      attachmentsOf(chapter.chapter_id).filter((_, i) => i !== index),
+    )
+  }
+
+  /** 「资质与证件」的合并行：招标需求项在前，目录附件章节在后（用户 2026-09-27 选的形态） */
+  const gzRows = useMemo(() => {
+    if (!data) return [] as GzRow[]
+    return [
+      ...(data.document_items ?? []).map((item) => ({ kind: 'req' as const, item })),
+      ...(data.attachment_items ?? []).map((item) => ({ kind: 'att' as const, item })),
+    ]
+  }, [data])
+
   // 一次确认可能同时带回资质 + 合同 + 人员（跨分类混选），逐类落库后统一刷新一次。
   // 失败时不再逐条提示——整批走同一个 try，避免混选下一半成功一半失败看不出。
   const handleConfirmSelection = async (picks: PickerSelection) => {
+    // 从「附件章节」行打开的 → 走附件清单（写 chapter_meta_json.attachments）
+    if (attachPickerTarget) {
+      setAttachPickerTarget(null)
+      setPickerOpen(false)
+      await handleAttachPicked(picks)
+      return
+    }
     const { qualifications, contracts, personnel } = picks
     try {
       for (const q of qualifications) {
@@ -251,13 +396,94 @@ export default function CollectionStep({ projectId, onComplete }: Props) {
         </Space>
       </Card>
 
-      {/* Document items */}
-      {data && data.document_items.length > 0 && (
+      {/* 资质与证件：招标要求的需求项 + 目录里设成「附件」的章节，并排展示 */}
+      {gzRows.length > 0 && (
         <Card title="资质与证件" style={{ marginBottom: 16 }}>
           <List
             loading={loading}
-            dataSource={data.document_items}
-            renderItem={(item: ResourceMatch) => {
+            dataSource={gzRows}
+            renderItem={(row: GzRow) => {
+              if (row.kind === 'att') {
+                const ch = row.item
+                const list = ch.attachments ?? []
+                return (
+                  <List.Item
+                    style={
+                      list.length
+                        ? { background: '#f6ffed', borderLeft: '3px solid #52c41a', paddingLeft: 12 }
+                        : { borderLeft: '3px solid #faad14', paddingLeft: 12 }
+                    }
+                    actions={[
+                      <Space key="actions">
+                        <Tag color={list.length ? 'success' : 'warning'}>
+                          {list.length ? `已挂 ${list.length} 项` : '待挂材料'}
+                        </Tag>
+                        <Upload
+                          showUploadList={false}
+                          beforeUpload={(file) => {
+                            // 自己发请求（走 /bid 的附件端点），不让 antd 代传
+                            handleAttachUpload(ch, file as unknown as File)
+                            return false
+                          }}
+                        >
+                          <Button
+                            size="small"
+                            icon={<UploadOutlined />}
+                            loading={attachUploading === ch.chapter_id}
+                          >
+                            上传
+                          </Button>
+                        </Upload>
+                        <Button
+                          size="small"
+                          icon={<LinkOutlined />}
+                          onClick={() => {
+                            setAttachPickerTarget(ch)
+                            setPickerReq(ch.title)
+                            setPickerAllowedModes(['qualification', 'contract', 'personnel'])
+                            setPickerDefaultMode('qualification')
+                            setPickerOpen(true)
+                          }}
+                        >
+                          从资源库选择
+                        </Button>
+                      </Space>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={
+                        <span>
+                          <Tag color="orange" style={{ marginRight: 8 }}>目录附件</Tag>
+                          {ch.title}
+                        </span>
+                      }
+                      description={
+                        list.length ? (
+                          <Space wrap size={4}>
+                            {list.map((a, i) => (
+                              <Tag
+                                key={`${a.path}-${i}`}
+                                closable
+                                onClose={(e) => {
+                                  e.preventDefault()
+                                  handleAttachRemove(ch, i)
+                                }}
+                              >
+                                {a.label || a.path}
+                              </Tag>
+                            ))}
+                          </Space>
+                        ) : (
+                          <span style={{ color: '#999' }}>
+                            这一章生成时按此清单插图：可上传本项目文件，或从资源库选资质 / 合同 / 人员证书
+                          </span>
+                        )
+                      }
+                    />
+                  </List.Item>
+                )
+              }
+              const item = row.item
               const meta = statusMeta(item.match_status)
               const isDone = item.match_status === 'selected' || item.match_status === 'uploaded' || item.match_status === 'auto'
 

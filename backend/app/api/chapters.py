@@ -18,6 +18,9 @@ from app.config import settings
 from app.database import get_db
 from app.models.project import BidProject, ProjectChapter
 from app.models.user import User
+from app.services.chapter_attachments import (
+    prune_attachments as _prune_attachments,
+)
 from app.utils.security import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -30,6 +33,14 @@ _KNOWN_TYPES = set(USER_SELECTABLE_TYPES) | {"mixed"}
 
 # 允许在结构页编辑的项目状态（「目录确认」之前）
 _STRUCTURE_EDITABLE_STATUS = ("draft", "structure_ready")
+
+# 允许上传章节附件的状态。比上面宽：附件清单有**两个**编辑入口 ——
+# 目录确认页的抽屉（structure_ready）与信息搜集页的「资质与证件」
+# （collecting）。用户 2026-09-27 的需求就是把后者也打通。
+# 不含 generating：那时生成流正在读 attachments，别抢。
+_ATTACHMENT_UPLOAD_STATUS = (
+    "draft", "structure_ready", "collecting", "parsed", "review", "exported",
+)
 
 
 def _normalize_chapter_tree(tree: list) -> list:
@@ -1346,74 +1357,6 @@ async def get_section(
 # 章节结构保存（目录确认页的手动编辑落库通道）
 # ---------------------------------------------------------------------------
 
-async def _prune_attachments(tree: list, db: AsyncSession) -> list[str]:
-    """剔除失效附件，返回被剔除的 label 列表.
-
-    剔除三种情况：
-      - 路径越出 ``UPLOAD_DIR``（防目录穿越）
-      - 引用的资源库行已被删除
-      - 与前面节点重复（按**内容 md5** 判重，与 materials_injection 的
-        ``drop_already_embedded`` 同一口径）
-
-    剔除而非整单拒绝：用户可能填了十个附件、其中一个被删了，整单报错会让
-    他白填一遍。
-    """
-    from app.models.contract import Contract
-    from app.models.personnel import PersonnelCertificate
-    from app.models.qualification import Qualification
-    from app.services.render_engine import image_content_key
-
-    _MODEL_BY_KIND = {
-        "qualification": Qualification,
-        "personnel_cert": PersonnelCertificate,
-        "contract": Contract,
-    }
-
-    upload_root = Path(settings.UPLOAD_DIR).resolve()
-    pruned: list[str] = []
-    seen_content: set[str] = set()
-
-    async def _walk_async(nodes: list) -> None:
-        for node in nodes or []:
-            kept = []
-            for att in node.get("attachments") or []:
-                label = att.get("label") or att.get("id") or "(未命名)"
-                kind = att.get("kind")
-                path = att.get("path") or ""
-
-                try:
-                    resolved = (upload_root / path).resolve()
-                    # is_relative_to 而不是 startswith：后者会把
-                    # `…/uploads_evil/x` 这类同前缀的兄弟目录误判为通过
-                    if not resolved.is_relative_to(upload_root):
-                        pruned.append(label)
-                        continue
-                except (OSError, ValueError):
-                    pruned.append(label)
-                    continue
-
-                if kind in _MODEL_BY_KIND:
-                    model = _MODEL_BY_KIND[kind]
-                    found = (
-                        await db.execute(select(model.id).where(model.id == att.get("id")))
-                    ).scalars().all()
-                    if not found:
-                        pruned.append(label)
-                        continue
-
-                key = image_content_key(path)
-                if key in seen_content:
-                    pruned.append(label)
-                    continue
-                seen_content.add(key)
-
-                kept.append(att)
-            node["attachments"] = kept
-            await _walk_async(node.get("children") or [])
-
-    await _walk_async(tree)
-    return pruned
-
 
 class ChapterStructureSaveRequest(BaseModel):
     chapters: list[dict] = []
@@ -1693,7 +1636,7 @@ async def upload_project_attachment(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if project.status not in _STRUCTURE_EDITABLE_STATUS:
+    if project.status not in _ATTACHMENT_UPLOAD_STATUS:
         raise HTTPException(
             status_code=409,
             detail=f"项目已进入 {project.status} 阶段，不能再添加附件",

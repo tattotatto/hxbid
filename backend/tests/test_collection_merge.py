@@ -8,6 +8,7 @@ import pytest
 from app.models.company_profile import CompanyProfile
 from app.models.contract import Contract
 from app.models.personnel import Personnel
+from app.models.project import BidProject
 from app.models.project_resource import (
     ProjectContract,
     ProjectPersonnel,
@@ -201,6 +202,8 @@ class _Row:
     """轻量假行对象——helper 只按属性取值，鸭子类型即可."""
 
     def __init__(self, **kw):
+        # 项目行默认没有附件章节（analyze 会读 project.chapters 抽附件行）
+        kw.setdefault("chapters", [])
         self.__dict__.update(kw)
 
 
@@ -406,11 +409,17 @@ class _AnalyzeResult:
     def scalars(self):
         return _AnalyzeScalars(self._rows)
 
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
+
 
 def _make_analyze_db(project, *, quals=(), personnel=(), company=None,
                      contracts=(), pq=(), pp=(), pc=()):
     """按 select 的实体分派结果 —— 不依赖查询顺序，实现里调整取数次序也不会误报."""
     by_entity = {
+        # 项目本身现在是 select + selectinload(chapters) 取（附件章节行要读
+        # ProjectChapter.chapter_meta_json），不再走 db.get
+        BidProject: [project] if project is not None else [],
         Qualification: list(quals),
         Personnel: list(personnel),
         CompanyProfile: [company] if company else [],

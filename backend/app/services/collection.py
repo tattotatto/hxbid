@@ -116,7 +116,14 @@ async def analyze_collection_needs(
     each entry containing the requirement, whether it was matched, and the
     matching resources.
     """
-    project = await db.get(BidProject, project_id)
+    # 预加载 chapters：附件章节行要从 ProjectChapter.chapter_meta_json 读
+    # （异步 session 下访问未加载的关系会抛 MissingGreenlet）
+    result = await db.execute(
+        select(BidProject)
+        .where(BidProject.id == project_id)
+        .options(selectinload(BidProject.chapters))
+    )
+    project = result.scalar_one_or_none()
     if not project:
         raise ValueError(f"Project {project_id} not found")
 
@@ -236,8 +243,45 @@ async def analyze_collection_needs(
         "status": project.status,
         "document_items": document_items,
         "personnel_items": personnel_items,
+        # 目录里设成「附件」的章节 —— 与上面的需求项**并排展示、各写各的存储**
+        "attachment_items": _chapter_attachment_rows(project.chapters),
         "is_complete": all_matched,
     }
+
+
+def _chapter_attachment_rows(chapters) -> List[Dict[str, Any]]:
+    """把「目录里设成附件类型」的章节抽成信息搜集页的行.
+
+    与「招标要求的需求项」是**两套独立的东西**（用户 2026-09-27 裁定不合并）：
+      - 需求项行来自 ``parsed_requirements_json["required_documents"]``（AI 解析招标文件）
+      - 附件章节行来自目录确认页把某章设为 ``attachment`` 并挂的材料
+    它们只在本页**并排展示**，各写各的存储：
+
+      ==============  ==========================================================
+      需求项选择       ProjectQualification / ProjectContract 关联表
+      附件章节选择     ProjectChapter.chapter_meta_json["attachments"]（生成期只认它）
+      ==============  ==========================================================
+
+    每行带 ``source="chapter_attachment"``，前端据此决定调哪套端点。
+    """
+    rows: List[Dict[str, Any]] = []
+    for ch in sorted(chapters or [], key=lambda c: c.order_index or 0):
+        if getattr(ch, "chapter_type", None) != "attachment":
+            continue
+        try:
+            meta = json.loads(getattr(ch, "chapter_meta_json", None) or "{}")
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        rows.append({
+            "source": "chapter_attachment",
+            "chapter_id": ch.id,
+            "title": ch.title,
+            "order_index": ch.order_index,
+            "attachments": list(meta.get("attachments") or []),
+        })
+    return rows
 
 
 def _match_document(
