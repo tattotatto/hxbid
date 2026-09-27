@@ -50,3 +50,6 @@ frontend/tsconfig.tsbuildinfo
 
 # Generated output
 结果/
+
+# superpowers 执行计划的 scratch 工作区（ledger / 测试输出 / 复核包）
+.superpowers/
