@@ -658,7 +658,7 @@ async def _materialise_chapters(
                     title=node.get("title", ""),
                     order_index=0,
                     ch_type="ai_generated",
-                    meta=_build_meta(node, None),
+                    meta=_build_chapter_meta(node, None, global_rules),
                     children=node.get("children", []),
                 )
                 db.add(chapter)
