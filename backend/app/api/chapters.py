@@ -385,10 +385,25 @@ class OutlineConfirmResponse(BaseModel):
     chapters_count: int = 0
     status: str = ""
     added_from_rubric: list[str] = []
+    # 确认时被剔除的附件 label（资源库行已删 / 路径越界 / 内容重复）
+    pruned_attachments: list[str] = []
 
 
 class OutlineConfirmRequest(BaseModel):
     chapters: list[dict] | None = None
+
+
+async def _apply_submitted_tree(project, chapters: list[dict], db: AsyncSession) -> list[str]:
+    """把前端提交的整棵树落库，返回**被剔除的附件 label**.
+
+    返回值必须透给调用方：剔除是静默发生的（资源库行被删 / 路径越界 / 内容重复），
+    用户界面上仍显示原来的附件数，不说一声他会到生成时才发现那一页是空的。
+    """
+    tree = _normalize_chapter_tree(chapters)
+    pruned = await _prune_attachments(tree, db)
+    project.chapter_structure_json = json.dumps(tree, ensure_ascii=False)
+    await db.flush()
+    return pruned
 
 
 @router.post("/{project_id}/outline/confirm", response_model=OutlineConfirmResponse)
@@ -424,11 +439,9 @@ async def confirm_outline(
             ),
         )
 
+    pruned: list[str] = []
     if payload is not None and payload.chapters:
-        tree = _normalize_chapter_tree(payload.chapters)
-        await _prune_attachments(tree, db)
-        project.chapter_structure_json = json.dumps(tree, ensure_ascii=False)
-        await db.flush()
+        pruned = await _apply_submitted_tree(project, payload.chapters, db)
 
     chapters_json = project.chapter_structure_json
     if not chapters_json or chapters_json in ("[]", "{}", ""):
@@ -451,6 +464,7 @@ async def confirm_outline(
         chapters_count=len(created),
         status="collecting",
         added_from_rubric=added_from_rubric,
+        pruned_attachments=pruned,
     )
 
 
@@ -1338,7 +1352,9 @@ async def _prune_attachments(tree: list, db: AsyncSession) -> list[str]:
 
                 try:
                     resolved = (upload_root / path).resolve()
-                    if not str(resolved).startswith(str(upload_root)):
+                    # is_relative_to 而不是 startswith：后者会把
+                    # `…/uploads_evil/x` 这类同前缀的兄弟目录误判为通过
+                    if not resolved.is_relative_to(upload_root):
                         pruned.append(label)
                         continue
                 except (OSError, ValueError):
@@ -1439,7 +1455,10 @@ def _load_match_inputs(project) -> tuple[dict, str | None]:
     return requirements, load_full_text(requirements, settings.UPLOAD_DIR)
 
 
-def _to_match_payload(result, corpus: str, tables: list[dict] | None = None) -> dict:
+def _to_match_payload(
+    result, corpus: str, tables: list[dict] | None = None,
+    corpus_available: bool = True,
+) -> dict:
     """把 MatchResult 转成前端要的形状，附上预览片段.
 
     表格章节的 ``best`` 可能为空（标题文案对不上小节、只按表头选出了表），
@@ -1469,16 +1488,32 @@ def _to_match_payload(result, corpus: str, tables: list[dict] | None = None) -> 
                 [list(r) for r in (rows[result.table_index].get("rows") or [])][:20]
             )
 
+    best = result.best
     return {
+        # ── 扁平记录：生成阶段就是照这些键切片（spec §4）──
+        # 必须**顶层**给出，不能只塞在 best 里：`_resolve_section_text` 读的是
+        # 顶层 `start`/`end`。曾经只放在 best 里，导致每一次生成都落回"按标题重
+        # 匹配"，用户手选的候选被丢弃、每个章节还多一条假告警。
         "status": result.status,
         "source": result.source,
-        "best": _cand(result.best) if result.best else None,
-        "candidates": [_cand(c) for c in result.candidates],
+        "matched_title": best.title if best else None,
+        "page": best.page if best else None,
+        "start": best.start if best else None,
+        "end": best.end if best else None,
+        "score": round(best.score, 4) if best else None,
         "table_index": result.table_index,
-        "table_preview": table_preview,
         # 服务端一律给 auto；用户从候选里点选后由前端改成 manual（见 §4.1）
         "picked": "auto",
         "corpus_hash": result.corpus_hash,
+        # 语料是否可用：false = 招标文件整体没有可匹配的文本（扫描件等）。
+        # 这时"未匹配"的原因不是标题没写对，页面要给的是整体说明而不是
+        # 「建议改标题」——改标题也没用，候选恒为空。
+        "corpus_available": corpus_available,
+
+        # ── 供结构页渲染：带原文片段 ──
+        "best": _cand(best) if best else None,
+        "candidates": [_cand(c) for c in result.candidates],
+        "table_preview": table_preview,
     }
 
 
@@ -1528,6 +1563,7 @@ async def match_chapter_section(
         corpus = requirements.get("format_section_text") or ""
     return _to_match_payload(
         match_result, corpus, requirements.get("format_tables") or [],
+        corpus_available=bool(requirements.get("format_section_text") or full_text),
     )
 
 

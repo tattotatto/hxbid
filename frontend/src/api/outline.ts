@@ -26,14 +26,27 @@ export interface OutlineMatchCandidate {
 export interface OutlineMatchResult {
   status: 'matched' | 'ambiguous' | 'missing' | 'na'
   source: string | null
-  best: OutlineMatchCandidate | null
-  candidates: OutlineMatchCandidate[]
+  /**
+   * 扁平记录 —— **生成阶段就是照这几个键切片**（spec §4）。
+   * 改类型/点候选时必须同步更新它们，只改 `best` 是无效的：
+   * 后端 `_resolve_section_text` 读的是这里的 start/end。
+   */
+  matched_title: string | null
+  page: number | null
+  start: number | null
+  end: number | null
+  score: number | null
   table_index: number | null
-  /** 表格章节的命中内容（best 为空时抽屉靠它显示） */
-  table_preview: string | null
   /** auto=系统最佳；manual=用户从候选里点选过 */
   picked: 'auto' | 'manual'
   corpus_hash: string | null
+  /** false = 招标文件整体没有可匹配的文本（扫描件等）——改标题也没用 */
+  corpus_available: boolean
+  /** 供抽屉渲染：带原文片段 */
+  best: OutlineMatchCandidate | null
+  candidates: OutlineMatchCandidate[]
+  /** 表格章节的命中内容（best 为空时抽屉靠它显示） */
+  table_preview: string | null
 }
 
 export interface OutlineAttachment {
@@ -162,6 +175,8 @@ export interface OutlineConfirmResponse {
   status: string
   /** 本次确认按评标办法自动补充的章节/小节标题 */
   added_from_rubric: string[]
+  /** 确认时被剔除的附件 label（资源库行已删 / 路径越界 / 内容重复） */
+  pruned_attachments: string[]
 }
 
 export const outlineApi = {

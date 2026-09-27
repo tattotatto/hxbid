@@ -367,3 +367,96 @@ class TestTableMatching:
             format_page_map=pmap,
         )
         assert res.table_index == 1, "第 31 页在小节之前，应取其后的第 40 页那张"
+
+
+class TestTocEntryWithPageOnItsOwnLine:
+    """目录条目：标题独占一行、页码另起一行 —— 这是 PDF 目录最常见的形态.
+
+    旧的覆盖测试用的是「一、投标函 ...... -32-」（页码与标题同行），那种行
+    `score_title` 算出来 ~0.06 直接被阈值滤掉，走的是**打分**过滤。而真正为
+    这种形态准备的 `has_body` / 页码剥离路径（标题后只剩一个页码行）此前
+    **一条测试都没有**。
+    """
+
+    CORPUS = (
+        "一、投标函\n"
+        "-32-\n"
+        "\n"
+        "一、投标函\n"
+        "\n"
+        "致：某某单位\n"
+        "我方已仔细阅读。\n"
+    )
+
+    def test_page_only_body_entry_is_skipped(self):
+        res = match_tender_section(
+            "投标函", chapter_type="fixed_form", format_section_text=self.CORPUS,
+        )
+        assert res.status == "matched"
+        assert "致：某某单位" in self.CORPUS[res.best.start:res.best.end]
+        assert res.best.start > 0, "必须取正文那份，不能取页码那一条"
+
+    def test_bare_page_number_line_counts_as_no_body(self):
+        """直接钉住 has_body：标题后面只有一个页码行 → 不算有正文。"""
+        from app.services.tender_section_matcher import enumerate_headers, has_body
+
+        headers = enumerate_headers(self.CORPUS)
+        toc = next(i for i, h in enumerate(headers) if h.start == 0)
+        real = next(i for i, h in enumerate(headers) if h.start > 0)
+        assert has_body(self.CORPUS, headers, toc) is False
+        assert has_body(self.CORPUS, headers, real) is True
+
+    def test_decorated_page_number_after_blank_lines_is_still_no_body(self):
+        """带装饰的页码（破折号/全角空格）也要被认出来。"""
+        from app.services.tender_section_matcher import enumerate_headers, has_body
+
+        corpus = "十九、附件\n\n\n— 73 —\n\n一、别的\n\n正文\n"
+        headers = enumerate_headers(corpus)
+        assert has_body(corpus, headers, 0) is False
+
+
+class TestWeakCandidatesAreStillOffered:
+    """真实招标文件暴露的问题：用户的标题是真实小节名的**前缀**时，候选被滤空了.
+
+    实测：红云红河的「投标保证金」对真实标题「（五）投标保证金及基本户凭证」
+    打分 0.8×5/13 ≈ 0.31，低于 MATCH_THRESHOLD，于是 status=missing 且
+    **候选列表为空** —— 抽屉里写着「建议改标题，或从下方候选中选一个」，
+    而下方空无一物，用户无路可走，只能拿到 AI 撰写的文本。
+    对一个明确规定了格式的章节，这就是废标风险。
+
+    定档仍要保守（不许把弱命中当 matched），但候选必须给出来让用户挑。
+    """
+
+    CORPUS = "（五）投标保证金及基本户凭证\n\n致：某某单位\n正文甲\n"
+
+    def test_partial_title_offers_candidates_but_is_not_matched(self):
+        res = match_tender_section(
+            "投标保证金", chapter_type="fixed_form", format_section_text=self.CORPUS,
+        )
+        assert res.status == "missing", "弱命中不许擅自当成 matched"
+        assert res.best is None
+        assert res.candidates, "但必须有候选，否则用户无路可走"
+        assert "投标保证金及基本户凭证" in res.candidates[0].title
+
+    def test_user_picked_weak_candidate_is_usable(self):
+        """用户从弱候选中点选后，那条区间必须真的能切片。"""
+        res = match_tender_section(
+            "投标保证金", chapter_type="fixed_form", format_section_text=self.CORPUS,
+        )
+        c = res.candidates[0]
+        assert self.CORPUS[c.start:c.end].startswith("（五）投标保证金及基本户凭证")
+        assert "正文甲" in self.CORPUS[c.start:c.end]
+
+    def test_unrelated_title_gets_no_candidates(self):
+        """无关的标题不该硬凑候选。"""
+        res = match_tender_section(
+            "应急预案", chapter_type="fixed_form", format_section_text=self.CORPUS,
+        )
+        assert res.status == "missing"
+        assert res.candidates == []
+
+    def test_empty_corpus_still_has_no_candidates(self):
+        res = match_tender_section(
+            "投标函", chapter_type="fixed_form", format_section_text=None,
+        )
+        assert res.candidates == []

@@ -2877,7 +2877,9 @@ async def _generate_table_chapter(
     return "", warnings
 ```
 
-在文件章节循环里，把 `table` 接到这个函数（在 `if chapter.chapter_type in ("fixed_form", "table"):` 块内、`fixed_form` 那支之后）：
+在文件章节循环里，把 `table` 接到这个函数（在 `if chapter.chapter_type in ("fixed_form", "table"):` 块内、`fixed_form` 那支之后）。
+
+> **外层条件本任务先不动**——Task 12 会把它扩成三元素。这一步只加 `elif`。
 
 ```python
             elif chapter.chapter_type == "table":
@@ -3031,6 +3033,14 @@ def _generate_attachment_chapter(chapter, meta: dict) -> tuple[str, list[str]]:
 ```
 
 在文件章节循环里加上：
+
+**先把外层条件扩成三元素**——`attachment` 不在 `("fixed_form", "table")` 里，不扩的话下面这个 `elif` 永远不可达（这正是本次要修的「attachment 章节不产出内容」的根因）：
+
+```python
+        if chapter.chapter_type in ("fixed_form", "table", "attachment"):
+```
+
+然后在 `table` 那支之后加：
 
 ```python
             elif chapter.chapter_type == "attachment":

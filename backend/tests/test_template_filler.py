@@ -1329,7 +1329,7 @@ class TestRowsToMarkdown:
 
     def test_pipe_in_cell_is_escaped(self):
         md = rows_to_markdown([["A|B"], ["x"]])
-        assert "A\|B" in md
+        assert "A\\|B" in md
 
     def test_ragged_row_is_padded(self):
         md = rows_to_markdown([["A", "B", "C"], ["1"]])
@@ -1337,3 +1337,49 @@ class TestRowsToMarkdown:
 
     def test_empty_rows(self):
         assert rows_to_markdown([]) == ""
+
+
+class TestOverrideWithoutFormatSectionText:
+    """场景：招标文件没解析出「投标文件格式」章节（扫描件 / 定位失败），
+    但全文兜底匹配到了这一段，由结构页固化成 override 传进来.
+
+    旧实现在函数入口就 `if not format_section_text: return "", []`，把这批章节
+    整批挡回 AI 撰写 —— 而结构页给用户看的是绿色「已匹配」+ 原文预览。
+    """
+
+    @staticmethod
+    def _mock_ai():
+        mock_ai = AsyncMock()
+        mock_ai.chat_completion.return_value = json.dumps({
+            "text_replacements": [],
+            "table_fills": [],
+            "warnings": [],
+        })
+        return mock_ai
+
+    @pytest.mark.asyncio
+    async def test_empty_format_section_text_with_override_still_fills(self):
+        filled, table_fills = await fill_fixed_form_section_from_template_with_tables(
+            section_title="投标函",
+            format_section_text="",          # 格式章节没解析出来
+            section_text_override="投标函\n\n投标人名称：某某公司\n",
+            company_profile=MOCK_COMPANY,
+            requirements=MOCK_REQS,
+            ai_adapter=self._mock_ai(),
+        )
+        assert "投标人名称" in filled
+        assert table_fills == []
+
+    @pytest.mark.asyncio
+    async def test_no_format_section_text_and_no_override_still_bails(self):
+        """两个都没有 → 老实返回空，交调用方兜底（不能凭空造内容）。"""
+        filled, table_fills = await fill_fixed_form_section_from_template_with_tables(
+            section_title="投标函",
+            format_section_text="",
+            section_text_override=None,
+            company_profile=MOCK_COMPANY,
+            requirements=MOCK_REQS,
+            ai_adapter=self._mock_ai(),
+        )
+        assert filled == ""
+        assert table_fills == []

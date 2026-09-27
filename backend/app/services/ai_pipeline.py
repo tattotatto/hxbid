@@ -1332,6 +1332,22 @@ def _load_chapter_meta(chapter) -> dict:
         return {}
 
 
+def _merge_format_warnings(verification: dict, warnings: list[str]) -> dict:
+    """把生成期的降级/兜底告警并进格式校验报告，并**把状态带上去**.
+
+    只追加 `warnings` 是不够的：`overall_status` 在追加之前就由 verify_format
+    算好了，前端也只读状态（`pass` / `pass_with_warnings` / `fail`），于是
+    「所有固定格式章节都退回 AI 撰写」的项目在界面上仍显示「通过」。
+    """
+    if not warnings:
+        return verification
+    verification.setdefault("warnings", [])
+    verification["warnings"].extend(warnings)
+    if verification.get("overall_status") == "pass":
+        verification["overall_status"] = "pass_with_warnings"
+    return verification
+
+
 def _resolve_section_text(
     chapter, meta: dict, requirements: dict, full_text: str | None,
 ) -> tuple[str | None, list[str]]:
@@ -1348,6 +1364,11 @@ def _resolve_section_text(
     match = (meta or {}).get("match") or {}
     if not match or match.get("status") not in ("matched", "ambiguous"):
         return None, []
+
+    # 多候选且用户没点选过 → 不替他决定（spec §5）。擅自取分数第一那条，
+    # 在"同名小节出现两次"的场景里就是把错误的原文抄进标书。
+    if match.get("status") == "ambiguous" and match.get("picked") != "manual":
+        return None, [f"「{chapter.title}」有多个候选尚未选定，将改由 AI 撰写"]
 
     corpus = requirements.get("format_section_text") or ""
     source = match.get("source")
@@ -1588,7 +1609,10 @@ async def generate_from_chapter_structure(
             # 优先用招标文件原文模板扫描填充（保留原文措辞），
             # 当 format_section_text 不可用或扫描失败时回退到 AI 生成。
             file_content = ""
-            if chapter.chapter_type == "fixed_form" and requirements.get("format_section_text"):
+            # 门槛只看类型，不看 format_section_text —— 语料可能来自全文兜底
+            # （招标文件没解析出格式章节时匹配器会退到全文）。旧写法把这种情况
+            # 整批挡回 AI 撰写，而结构页给用户看的是绿色「已匹配」+ 原文预览。
+            if chapter.chapter_type == "fixed_form":
                 try:
                     section_text_override, section_warnings = _resolve_section_text(
                         chapter, chapter_meta, requirements, full_text,
@@ -2204,11 +2228,21 @@ async def generate_from_chapter_structure(
 
     # ── Phase: 格式校验（与招标文件格式模板对账）──
     from app.services.format_verifier import verify_format
+
+    # 渲染层对缺失图片是静默跳过的（那一页最后是空白），所以在生成结束时
+    # 主动扫一遍，把"少了一张"这件事写进校验报告
+    from app.services.materials_injection import collect_missing_image_markers
+    missing_images = collect_missing_image_markers(chapters_payload)
+    if missing_images:
+        format_warnings.append(
+            "以下附件/材料的文件已不存在，标书中对应位置将是空白，请重新挂载："
+            + "、".join(missing_images)
+        )
+
     verification = verify_format(chapters_payload, format_template)
-    if format_warnings:
-        # 生成期的降级/兜底一律不静默：写进校验报告，导出前的检查清单可见
-        verification.setdefault("warnings", [])
-        verification["warnings"].extend(format_warnings)
+    # 生成期的降级/兜底一律不静默：并进校验报告并**抬高状态**，
+    # 否则界面仍显示「通过」（见 _merge_format_warnings 的说明）
+    verification = _merge_format_warnings(verification, format_warnings)
     try:
         project.format_verification_json = json.dumps(verification, ensure_ascii=False)
         await db.commit()

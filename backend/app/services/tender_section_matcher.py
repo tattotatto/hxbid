@@ -20,6 +20,16 @@ STRONG_THRESHOLD = 0.9
 AMBIGUITY_GAP = 0.15
 MAX_CANDIDATES = 8
 
+# 候选的**收集**门槛，低于 MATCH_THRESHOLD。定档仍按 MATCH_THRESHOLD ——
+# 弱命中绝不当成 matched，但必须列出来让用户挑。
+#
+# 真实招标文件实测的必要性：用户写「投标保证金」而原文小节叫
+# 「（五）投标保证金及基本户凭证」时，子串得分 0.8×5/13 ≈ 0.31 低于命中
+# 阈值，于是状态是 missing 且**候选为空** —— 抽屉里写着「或从下方候选中选
+# 一个」，下方却空无一物，用户只能拿到 AI 撰写的文本。对明确规定了格式的
+# 章节，这就是废标风险。
+SUGGEST_THRESHOLD = 0.2
+
 # 标题行正则：**(层级, 模式)**，**顺序即优先级**——多级阿拉伯数字（1.1）必须先于
 # 单级（1.）尝试，否则「1.1 项目概况」会被判成 level 3。同一位置只取首个命中。
 _HEADER_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
@@ -260,13 +270,14 @@ def _pick_table_index(
 
 def _score_corpus(
     target_norm: str, text: str, page_map: list[dict] | None,
+    threshold: float = MATCH_THRESHOLD,
 ) -> list[MatchCandidate]:
-    """在单份语料里给所有标题行打分，返回 ≥ MATCH_THRESHOLD 的候选（降序）."""
+    """在单份语料里给所有标题行打分，返回 ≥ threshold 的候选（降序）."""
     headers = enumerate_headers(text)
     scored: list[MatchCandidate] = []
     for idx, h in enumerate(headers):
         s = score_title(target_norm, normalize_title(h.title))
-        if s < MATCH_THRESHOLD:
+        if s < threshold:
             continue
         if not has_body(text, headers, idx):
             continue
@@ -315,15 +326,25 @@ def match_tender_section(
     ):
         if not text:
             continue
-        scored = _score_corpus(target_norm, text, pmap)
+        scored = _score_corpus(target_norm, text, pmap, SUGGEST_THRESHOLD)
         if not scored:
             continue
-        status = classify(scored)
-        text_hit = MatchResult(
-            status=status, source=source, best=scored[0],
-            candidates=scored[:MAX_CANDIDATES] if status == "ambiguous" else [],
-            corpus_hash=corpus_hash(text),
-        )
+        strong = [c for c in scored if c.score >= MATCH_THRESHOLD]
+        if strong:
+            status = classify(strong)
+            text_hit = MatchResult(
+                status=status, source=source, best=strong[0],
+                candidates=strong[:MAX_CANDIDATES] if status == "ambiguous" else [],
+                corpus_hash=corpus_hash(text),
+            )
+        else:
+            # 只有弱候选：不擅自当成命中（status 仍是 missing、best 为空），
+            # 但把候选列出来让用户挑 —— 否则「或从下方候选中选一个」指向空列表
+            text_hit = MatchResult(
+                status="missing", source=source, best=None,
+                candidates=scored[:MAX_CANDIDATES],
+                corpus_hash=corpus_hash(text),
+            )
         break
 
     if chapter_type != "table":

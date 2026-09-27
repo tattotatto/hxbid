@@ -42,7 +42,9 @@ def load_full_text(requirements: dict, upload_dir: str) -> str | None:
     try:
         root = Path(upload_dir).resolve()
         resolved = (root / rel).resolve()
-        if not str(resolved).startswith(str(root)):
+        # is_relative_to 而不是 startswith：后者会把 `…/uploads_evil/x`
+        # 这类同前缀的兄弟目录误判为通过
+        if not resolved.is_relative_to(root):
             logger.warning("Refused full-text path outside upload dir: %s", rel)
             return None
         if not resolved.is_file():

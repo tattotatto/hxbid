@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react'
-import { Tree, Button, Space, Tag, Input, Empty, Tooltip, Modal, Select } from 'antd'
+import { Tree, Button, Space, Tag, Input, Empty, Tooltip, Modal, Select, message } from 'antd'
 import {
   PlusOutlined,
   MinusOutlined,
@@ -16,6 +16,7 @@ import {
   getNode,
   insertNode,
   moveNode,
+  nodeBadge,
   removeNode,
   updateNode,
 } from './outlineTreeOps'
@@ -55,16 +56,6 @@ function makeNewChapter(orderIndex: number): OutlineChapter {
   }
 }
 
-const MATCH_BADGE: Record<
-  string,
-  { status: 'success' | 'warning' | 'error' | 'default'; text: string }
-> = {
-  matched: { status: 'success', text: '已匹配' },
-  ambiguous: { status: 'warning', text: '多候选' },
-  missing: { status: 'error', text: '未匹配' },
-  na: { status: 'default', text: '—' },
-}
-
 function buildTreeData(
   chapters: OutlineChapter[],
   basePath: number[],
@@ -78,10 +69,8 @@ function buildTreeData(
     // 2. ProjectChapter 行 → 字段名 chapter_type
     // 历史上前端只用 type，导致已 confirm 的项目回看 /outline 页面渲染「暂无章节」。
     const type = (ch.type ?? (ch as any).chapter_type ?? 'ai_generated') as ChapterType
-    // AI 生成章节不参与匹配；其余按后端回来的状态显示（还没匹配过的算"未匹配"）
-    const matchStatus = ch.match?.status ?? (type === 'ai_generated' ? 'na' : 'missing')
-    const badge = MATCH_BADGE[matchStatus] ?? MATCH_BADGE.missing
-    const needsMatch = type === 'fixed_form' || type === 'table'
+    // 徽标也是打开抽屉的唯一入口 —— 附件类必须有（见 nodeBadge 的说明）
+    const badge = nodeBadge(ch)
 
     return {
       key: path.join('.'),
@@ -102,10 +91,10 @@ function buildTreeData(
           {ch.source === 'scoring_rubric' && (
             <Tag color="gold" style={{ marginRight: 0 }}>来自评标办法</Tag>
           )}
-          {needsMatch && (
-            <Tooltip title={ch.match?.best?.raw ? `命中：${ch.match.best.raw}` : badge.text}>
+          {badge && (
+            <Tooltip title={badge.hint}>
               <Tag
-                color={badge.status === 'default' ? 'default' : badge.status}
+                color={badge.tone === 'attachment' ? 'orange' : badge.tone}
                 style={{ marginRight: 0, cursor: 'pointer' }}
                 onClick={(e) => {
                   e.stopPropagation()
@@ -115,11 +104,6 @@ function buildTreeData(
                 {badge.text}
               </Tag>
             </Tooltip>
-          )}
-          {ch.attachments && ch.attachments.length > 0 && (
-            <Tag color="orange" style={{ marginRight: 0 }}>
-              {ch.attachments.length} 个附件
-            </Tag>
           )}
         </Space>
       ),
@@ -191,7 +175,13 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({
       info.dropToGap ? (dropOffset < 0 ? 'before' : 'after') : 'inside'
 
     const next = moveNode(chapters, dragPath, dropPath, position)
-    if (next === chapters) return
+    if (next === chapters) {
+      // 静默忽略会让人以为拖拽坏了
+      if (dragPath.join('.') !== dropPath.join('.')) {
+        message.warning('不能把章节拖进它自己的子章节')
+      }
+      return
+    }
     onChange(next)
   }
 
@@ -215,7 +205,7 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({
     if (!selectedPath || selectedPath.length === 0) return
     Modal.confirm({
       title: '删除选中章节',
-      content: `确定要删除「${selectedNode?.title ?? ''}」及其所有子章节？此操作不会上传到服务器。`,
+      content: `确定要删除「${selectedNode?.title ?? ''}」及其所有子章节？删除会自动保存到服务器。`,
       okText: '删除',
       okType: 'danger',
       cancelText: '取消',
@@ -255,8 +245,8 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({
 
   const handleReset = () => {
     Modal.confirm({
-      title: '放弃本地修改',
-      content: '本地手动编辑未上传到服务器，确认重新加载服务端版本？（仅丢失手动改名/增删，AI 对话修改仍保留）',
+      title: '重新加载服务端版本',
+      content: '将丢弃尚未保存的改名/增删/匹配/附件改动，从服务器重新拉取章节结构。已保存的改动不受影响。',
       okText: '重新加载',
       cancelText: '取消',
       onOk: () => window.location.reload(),

@@ -100,3 +100,83 @@ class TestResolveSectionText:
         )
         assert text is None
         assert warnings == []
+
+
+class TestMatchPayloadRoundTrip:
+    """跨边界：结构页拿到的 match 记录 -> 物化 -> 生成阶段切片.
+
+    **这一层是本次唯一能抓住"响应形状 ≠ 固化记录形状"的地方。**
+    之前所有触碰该形状的测试都手写了扁平记录，与实现共享同一个错误假设，
+    导致 615 条全绿却漏掉了一个"用户手选被丢弃"的真实缺陷。
+    """
+
+    def _frozen(self, corpus, title="投标函"):
+        from app.api.chapters import _build_chapter_meta, _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        result = match_tender_section(
+            title, chapter_type="fixed_form", format_section_text=corpus,
+        )
+        payload = _to_match_payload(result, corpus)
+        meta = json.loads(_build_chapter_meta({"title": title, "match": payload}, None))
+        return payload, meta["match"]
+
+    def test_payload_slice_equals_preview(self):
+        """生成时切出来的那段，必须就是结构页预览的那段。"""
+        corpus = "一、投标函\n\n致：某某单位\n我方已仔细阅读。\n\n二、开标一览表\n\n序号\n"
+        payload, match = self._frozen(corpus)
+
+        class _Ch:
+            title = "投标函"
+            chapter_meta_json = "{}"
+
+        text, warnings = _resolve_section_text(
+            _Ch(), {"match": match}, {"format_section_text": corpus}, None,
+        )
+        assert text is not None, "固化记录必须能被切片，否则又落回重匹配"
+        assert text == payload["best"]["preview"], "切出来的必须等于预览那段"
+        assert warnings == [], f"正常路径不该有告警，got {warnings}"
+
+    def test_manual_pick_is_what_gets_sliced(self):
+        """同名小节两条候选，用户手选第 2 条 —— 生成的必须是第 2 条。"""
+        corpus = "一、投标函\n\n正文甲\n\n一、投标函\n\n正文乙\n"
+        payload, match = self._frozen(corpus)
+        assert payload["status"] == "ambiguous"
+
+        # 用户在抽屉里点了第 2 条
+        chosen = payload["candidates"][1]
+        match = {
+            **match,
+            "status": "matched",
+            "picked": "manual",
+            "start": chosen["start"],
+            "end": chosen["end"],
+        }
+
+        class _Ch:
+            title = "投标函"
+            chapter_meta_json = "{}"
+
+        text, warnings = _resolve_section_text(
+            _Ch(), {"match": match}, {"format_section_text": corpus}, None,
+        )
+        assert text is not None
+        assert "正文乙" in text, "必须用用户手选的那条，不能被重匹配覆盖回第一条"
+        assert warnings == []
+
+    def test_ambiguous_without_manual_pick_is_not_frozen(self):
+        """多候选且用户没选 → 不替他决定（spec §5），退 AI 并如实告警。"""
+        corpus = "一、投标函\n\n正文甲\n\n一、投标函\n\n正文乙\n"
+        _payload, match = self._frozen(corpus)
+        assert match["status"] == "ambiguous"
+        assert match["picked"] == "auto"
+
+        class _Ch:
+            title = "投标函"
+            chapter_meta_json = "{}"
+
+        text, warnings = _resolve_section_text(
+            _Ch(), {"match": match}, {"format_section_text": corpus}, None,
+        )
+        assert text is None, "没人定过用哪条，不该擅自切片"
+        assert warnings

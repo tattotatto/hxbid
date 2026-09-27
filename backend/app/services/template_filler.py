@@ -572,13 +572,17 @@ async def fill_fixed_form_section_from_template_with_tables(
     Returns:
         (填充后文本, table_fills)；失败时返回 ``("", [])``。
     """
-    if not format_section_text or not section_title:
+    if not section_title:
         return "", []
 
     if section_text_override:
+        # 有 override 就不需要 format_section_text —— 语料可能来自全文兜底
+        # （招标文件没解析出格式章节时，匹配器会退到全文找）
         section_text = _strip_duplicate_heading(section_text_override, section_title)
-    else:
+    elif format_section_text:
         section_text = extract_fixed_form_section(format_section_text, section_title)
+    else:
+        section_text = ""
     if not section_text:
         logger.info(
             "Section '%s' not found in format_section_text, caller should fallback",

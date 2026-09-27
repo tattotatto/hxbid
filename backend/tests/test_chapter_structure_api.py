@@ -280,3 +280,110 @@ class TestBuildChapterMetaCarriesMatchAndAttachments:
         assert meta["table_schema"] == [{"name": "序号"}]
         assert meta["signature_block"]["lines"] == ["投标人：（公章）"]
         assert meta["numbering_style"] == "chinese_legal"
+
+
+class TestApplySubmittedTree:
+    """confirm 时把前端提交的整棵树落库，并把被剔除的附件透出来.
+
+    旧实现把 `_prune_attachments` 的返回值（被剔除的 label）**丢掉**了，
+    而 PUT /chapter-structure 却把它返回给前端 —— 于是用户在页面开着时资源库
+    某行被删，点「确认并继续」后附件从树里消失、界面上仍显示「2 个附件」、
+    没有任何提示，到生成时才发现是占位页。
+    """
+
+    @pytest.mark.asyncio
+    async def test_pruned_labels_are_returned(self, tmp_path, monkeypatch):
+        from app.api.chapters import _apply_submitted_tree
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+
+        class _Project:
+            chapter_structure_json = "[]"
+            id = "p1"
+
+        class _DB:
+            async def execute(self, _stmt):
+                return TestPruneAttachments._FakeResult([])
+
+            async def flush(self):
+                return None
+
+        project = _Project()
+        pruned = await _apply_submitted_tree(project, [
+            {"title": "资质", "type": "attachment", "attachments": [
+                {"kind": "qualification", "id": "gone", "label": "已删除的资质",
+                 "path": "ocr/x.png"}]},
+        ], _DB())
+
+        assert pruned == ["已删除的资质"], "被剔除的附件必须透出，不能静默"
+        assert json.loads(project.chapter_structure_json)[0]["attachments"] == []
+
+    @pytest.mark.asyncio
+    async def test_valid_tree_is_stored(self, tmp_path, monkeypatch):
+        from app.api.chapters import _apply_submitted_tree
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+
+        class _Project:
+            chapter_structure_json = "[]"
+
+        class _DB:
+            async def execute(self, _stmt):
+                return TestPruneAttachments._FakeResult([])
+
+            async def flush(self):
+                return None
+
+        project = _Project()
+        pruned = await _apply_submitted_tree(
+            project, [{"title": "投标函", "type": "fixed_form"}], _DB(),
+        )
+        assert pruned == []
+        assert json.loads(project.chapter_structure_json)[0]["type"] == "fixed_form"
+
+
+class TestConfirmResponseSurfacesPruned:
+    def test_response_model_has_pruned_attachments(self):
+        from app.api.chapters import OutlineConfirmResponse
+
+        res = OutlineConfirmResponse(success=True, pruned_attachments=["营业执照副本"])
+        assert res.pruned_attachments == ["营业执照副本"]
+        assert OutlineConfirmResponse().pruned_attachments == []
+
+
+class TestCorpusAvailabilityFlag:
+    """语料可用性必须透给前端 —— 「未匹配」的两类原因，用户能采取的动作完全不同.
+
+    有语料但标题没命中 → 改标题/改类型有用，抽屉里也能列候选。
+    语料整体为空（扫描件 PDF 没文本层）→ 改标题毫无用处，候选恒为空，
+    这时页面必须给一句整体说明，而不是让用户对着几十个红叉逐个点开看
+    "建议改标题，或从下方候选中选一个"（下方根本没有候选）。
+    """
+
+    def test_flag_true_when_format_section_present(self):
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        corpus = "一、投标函\n\n正文"
+        result = match_tender_section("投标函", format_section_text=corpus)
+        payload = _to_match_payload(result, corpus, [], corpus_available=True)
+        assert payload["corpus_available"] is True
+
+    def test_flag_false_when_no_corpus_anywhere(self):
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        result = match_tender_section("投标函", format_section_text=None, full_text=None)
+        payload = _to_match_payload(result, "", [], corpus_available=False)
+        assert payload["corpus_available"] is False
+        assert payload["status"] == "missing"
+
+    def test_flag_defaults_true_for_backward_compat(self):
+        """不给这个参数时默认 True —— 老调用方（与既有测试）不受影响。"""
+        from app.api.chapters import _to_match_payload
+        from app.services.tender_section_matcher import match_tender_section
+
+        result = match_tender_section("投标函", format_section_text="一、投标函\n\n正文")
+        assert _to_match_payload(result, "一、投标函\n\n正文")["corpus_available"] is True

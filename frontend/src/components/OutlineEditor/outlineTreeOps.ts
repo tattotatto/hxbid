@@ -4,7 +4,65 @@
  * 从 OutlineTree.tsx 抽出：这些是纯函数，不依赖 React/antd，抽出来既能
  * 独立验证（拖拽重排的下标换算是本功能最容易出错的地方），也让组件只管渲染。
  */
-import type { OutlineChapter } from '../../api/outline'
+import type { ChapterType, OutlineChapter } from '../../api/outline'
+
+// ---------------------------------------------------------------------------
+// 节点徽标
+// ---------------------------------------------------------------------------
+
+export type BadgeTone = 'success' | 'warning' | 'error' | 'default' | 'attachment'
+
+export interface TreeNodeBadge {
+  /** match=匹配状态；attachment=附件入口 */
+  kind: 'match' | 'attachment'
+  text: string
+  tone: BadgeTone
+  /** 悬停提示 */
+  hint: string
+}
+
+const MATCH_BADGE: Record<string, { text: string; tone: BadgeTone }> = {
+  matched: { text: '已匹配', tone: 'success' },
+  ambiguous: { text: '多候选', tone: 'warning' },
+  missing: { text: '未匹配', tone: 'error' },
+  na: { text: '—', tone: 'default' },
+}
+
+/**
+ * 章节行上该显示什么徽标（也是打开匹配/附件抽屉的唯一入口）。
+ *
+ * **附件类必须有徽标**：抽屉是挂附件的唯一界面，而抽屉只由徽标打开。
+ * 曾经把徽标的渲染条件写成 `type === 'fixed_form' || type === 'table'`，
+ * 于是附件章节点了没反应、清单永远为空、「附件章节渲染成占位文本」这个
+ * 要修的问题以另一种机制继续存在。
+ *
+ * AI 生成章节不参与匹配，也不需要挂附件 —— 返回 null（不渲染徽标）。
+ */
+export function nodeBadge(ch: OutlineChapter): TreeNodeBadge | null {
+  const type = (ch.type ?? (ch as any).chapter_type ?? 'ai_generated') as ChapterType
+
+  if (type === 'attachment') {
+    const n = (ch.attachments ?? []).length
+    return {
+      kind: 'attachment',
+      text: n > 0 ? `${n} 个附件` : '挂附件',
+      tone: 'attachment',
+      hint: n > 0 ? `已挂载 ${n} 个附件，点开管理` : '点开挂载附件（资源库或本项目上传）',
+    }
+  }
+
+  if (type === 'fixed_form' || type === 'table') {
+    const meta = MATCH_BADGE[ch.match?.status ?? 'missing'] ?? MATCH_BADGE.missing
+    return {
+      kind: 'match',
+      text: meta.text,
+      tone: meta.tone,
+      hint: ch.match?.best?.raw ? `命中：${ch.match.best.raw}` : meta.text,
+    }
+  }
+
+  return null
+}
 
 export type FlatNode = {
   key: string

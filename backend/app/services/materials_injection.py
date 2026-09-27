@@ -43,6 +43,52 @@ CONTRACT_PRIMARY_KEYWORDS: list[str] = [
 ]
 
 
+def collect_missing_image_markers(chapters: list[dict]) -> list[str]:
+    """扫出正文里引用了、但文件已经不在了的图片，返回去重后的 label 列表.
+
+    渲染层对缺失文件是**静默跳过**的（``_insert_image`` 找不到路径就 return），
+    所以那一页最后是空白的，而没有任何一处告诉用户少了一张营业执照/保证金凭证。
+    生成阶段结束时调一次，把结果并进校验报告。
+
+    同时认两种标记：``[IMG:path|label]`` 与 ``[IDPAIR:front|fl|back|bl]``。
+    """
+    from app.services.render_engine import _resolve_relative_path
+
+    missing: list[str] = []
+    seen: set[str] = set()
+
+    def _check(path: str, label: str) -> None:
+        if not path or _resolve_relative_path(path) is not None:
+            return
+        name = label or path
+        if name in seen:
+            return
+        seen.add(name)
+        missing.append(name)
+
+    def _scan(text: str) -> None:
+        for raw in (text or "").splitlines():
+            line = raw.strip()
+            if line.startswith("[IMG:") and line.endswith("]"):
+                img_path, _, label = line[len("[IMG:"):-1].partition("|")
+                _check(img_path.strip(), label.strip())
+            elif line.startswith("[IDPAIR:") and line.endswith("]"):
+                parts = line[len("[IDPAIR:"):-1].split("|")
+                if len(parts) == 4:
+                    _check(parts[0].strip(), parts[1].strip())
+                    _check(parts[2].strip(), parts[3].strip())
+
+    def _walk(nodes: list) -> None:
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            _scan(node.get("content") or "")
+            _walk(node.get("children") or [])
+
+    _walk(chapters)
+    return missing
+
+
 def drop_already_embedded(images: list[dict], embedded_images: set[str]) -> list[dict]:
     """剔除「内容已经出过图」的材料，**并把留下来的就地登记进 embedded_images**.
 

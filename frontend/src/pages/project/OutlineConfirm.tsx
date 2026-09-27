@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Card, Button, Space, Tag, Spin, Empty, message as antMessage } from 'antd'
+import { Alert, Card, Button, Space, Tag, Spin, Empty, message as antMessage } from 'antd'
 import { ArrowLeftOutlined, CheckCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import OutlineTree from '../../components/OutlineEditor/OutlineTree'
 import OutlineChat from '../../components/OutlineEditor/OutlineChat'
@@ -62,6 +62,10 @@ const OutlineConfirm: React.FC = () => {
       try {
         const res = await outlineApi.match(id, title, type)
         setChapters((prev) => {
+          // 防抖窗口内可能发生拖拽/删除，此时下标路径已指向**别的章节**。
+          // 不校验就会把 A 的原文区间冻到 B 上 —— 那是错误原文进标书。
+          const node = getNodeByPath(prev, path)
+          if (!node || node.title !== title) return prev
           const next = updateNodeByPath(prev, path, (n) => ({ ...n, match: res }))
           scheduleSave(next)
           return next
@@ -122,6 +126,8 @@ const OutlineConfirm: React.FC = () => {
 
   const handleConfirm = async () => {
     if (!id || confirming) return
+    // 确认会把项目推进到 collecting，此后任何迟到的 PUT 都会拿到 409
+    if (saveTimer.current) window.clearTimeout(saveTimer.current)
     setConfirming(true)
     try {
       const res = await outlineApi.confirm(id, chapters)
@@ -131,6 +137,13 @@ const OutlineConfirm: React.FC = () => {
           ? `${msg}；已按评标办法自动补充：${res.added_from_rubric.join('、')}`
           : msg,
       )
+      // 附件被静默剔除过就得说一声——不说他会到生成时才发现那一页是空的
+      if (res.pruned_attachments?.length) {
+        antMessage.warning(
+          `有 ${res.pruned_attachments.length} 个附件已被剔除（资源库行已删除、路径失效或与其它章节重复）：` +
+            res.pruned_attachments.join('、'),
+        )
+      }
       if (id) sessionStorage.removeItem(`outline_conv_${id}`)
       navigate(`/projects/${id}`)
     } catch (err: any) {
@@ -140,6 +153,36 @@ const OutlineConfirm: React.FC = () => {
       setConfirming(false)
     }
   }
+
+  /**
+   * 固定格式/表格章节的匹配概况.
+   *
+   * 徽标是逐章的，但用户可能一屏几十个红点却没意识到这意味着什么 ——
+   * 这里给一句整体说明。确认时**有意不拦截**（用户裁定），所以这句话
+   * 就是唯一的聚合告知渠道。
+   */
+  const matchStats = useMemo(() => {
+    let fixedTotal = 0
+    let unmatched = 0
+    let noCorpus = false
+    const walk = (nodes: OutlineChapter[]) => {
+      for (const n of nodes) {
+        const t = (n.type ?? 'ai_generated') as ChapterType
+        if (t === 'fixed_form' || t === 'table') {
+          fixedTotal += 1
+          const s = n.match?.status
+          // 多候选但用户没点选 → 生成时会退 AI，也算"未定"
+          if (s === 'missing' || (s === 'ambiguous' && n.match?.picked !== 'manual')) {
+            unmatched += 1
+          }
+          if (n.match && n.match.corpus_available === false) noCorpus = true
+        }
+        if (n.children?.length) walk(n.children)
+      }
+    }
+    walk(chapters)
+    return { fixedTotal, unmatched, noCorpus }
+  }, [chapters])
 
   // 总节点数（含子章节）用于显示
   const totalNodes = (function count(nodes: OutlineChapter[]): number {
@@ -177,6 +220,23 @@ const OutlineConfirm: React.FC = () => {
           </Space>
         </Space>
       </Card>
+
+      {matchStats.unmatched > 0 && (
+        <Alert
+          type={matchStats.noCorpus ? 'error' : 'warning'}
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`${matchStats.unmatched} / ${matchStats.fixedTotal} 个固定格式/表格章节未匹配到招标原文`}
+          description={
+            matchStats.noCorpus
+              ? '本次没能从招标文件里解析出可匹配的文本（可能是扫描件 PDF，没有文本层），' +
+                '这些章节生成时将由 AI 撰写。改标题无济于事 —— 需要换一份带文本层的招标文件，' +
+                '或先把格式章节的内容人工准备好。'
+              : '这些章节生成时将由 AI 撰写，不会照抄招标原文。点章节上的红色「未匹配」徽标' +
+                '可以看到具体原因与候选，或改写标题。'
+          }
+        />
+      )}
 
       <ScoringRubricPanel projectId={id!} />
       {rubricCover && rubricCover.missing.length > 0 && (
@@ -275,9 +335,16 @@ const OutlineConfirm: React.FC = () => {
             match: {
               ...(n.match as OutlineMatchResult),
               status: 'matched',
+              picked: 'manual',
+              // 扁平记录必须同步 —— 生成阶段照这些键切片，只改 best 是无效的
+              matched_title: c.title,
+              page: c.page,
+              start: c.start,
+              end: c.end,
+              score: c.score,
+              // candidates 留空表示"已定"
               best: c,
               candidates: [],
-              picked: 'manual',
             },
           }))
           applyTree(next)
