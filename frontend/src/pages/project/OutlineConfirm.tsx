@@ -258,8 +258,16 @@ const OutlineConfirm: React.FC = () => {
       <MatchDrawer
         open={matchOpen}
         loading={matchLoading}
+        projectId={id!}
         title={matchPath ? getNodeByPath(chapters, matchPath)?.title ?? '' : ''}
         result={matchResult}
+        attachments={matchPath ? getNodeByPath(chapters, matchPath)?.attachments ?? [] : []}
+        onAttachmentsChange={(next) => {
+          if (!matchPath) return
+          applyTree(
+            updateNodeByPath(chapters, matchPath, (n) => ({ ...n, attachments: next })),
+          )
+        }}
         onPick={(c: OutlineMatchCandidate) => {
           if (!matchPath) return
           const next = updateNodeByPath(chapters, matchPath, (n) => ({

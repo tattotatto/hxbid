@@ -76,6 +76,45 @@ function normalize(ch: any): OutlineChapter {
   }
 }
 
+export type AttachmentPickerOption = { label: string; value: string; path: string }
+
+/**
+ * 把三个资源库列表接口的响应收敛成统一的附件候选项.
+ *
+ * 三个接口的形状各不相同（字段名取自 app/schemas/{qualification,personnel,contract}.py）：
+ *   - qualification  → [{id, name, attachment_path}]
+ *   - personnel      → [{id, name, certificates: [{id, cert_name, attachment_path}]}]
+ *   - contract       → [{id, project_name, image_paths_json}]（JSON 字符串数组）
+ * 没有扫描件的项 path 为空串，由调用方禁用/跳过 —— 不猜路径。
+ */
+export function buildAttachmentOptions(
+  kind: OutlineAttachment['kind'],
+  rows: any[],
+): AttachmentPickerOption[] {
+  if (kind === 'qualification') {
+    return rows.map((r) => ({ value: r.id, label: r.name, path: r.attachment_path }))
+  }
+  if (kind === 'personnel_cert') {
+    return rows.flatMap((p) =>
+      (p.certificates ?? []).map((c: any) => ({
+        value: c.id,
+        label: `${p.name} · ${c.cert_name}`,
+        path: c.attachment_path,
+      })),
+    )
+  }
+  return rows.map((r) => {
+    let first = ''
+    try {
+      const arr = JSON.parse(r.image_paths_json || '[]')
+      first = Array.isArray(arr) && arr.length > 0 ? String(arr[0]) : ''
+    } catch {
+      first = ''
+    }
+    return { value: r.id, label: r.project_name, path: first }
+  })
+}
+
 /** 按索引路径不可变地更新节点（与 OutlineTree 内的同名 helper 语义一致） */
 export function updateNodeByPath(
   chapters: OutlineChapter[],

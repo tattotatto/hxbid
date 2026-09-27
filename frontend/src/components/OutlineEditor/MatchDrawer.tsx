@@ -1,14 +1,56 @@
-import React from 'react'
-import { Drawer, Space, Tag, Alert, List, Typography, Empty, Spin } from 'antd'
-import type { OutlineMatchCandidate, OutlineMatchResult } from '../../api/outline'
+import React, { useState } from 'react'
+import {
+  Drawer,
+  Space,
+  Tag,
+  Alert,
+  List,
+  Typography,
+  Empty,
+  Spin,
+  Button,
+  Upload,
+  Modal,
+  Select,
+  message,
+} from 'antd'
+import {
+  UploadOutlined,
+  DeleteOutlined,
+  PlusOutlined,
+} from '@ant-design/icons'
+import client from '../../api/client'
+import { buildAttachmentOptions, outlineApi } from '../../api/outline'
+import type {
+  AttachmentPickerOption,
+  OutlineAttachment,
+  OutlineMatchCandidate,
+  OutlineMatchResult,
+} from '../../api/outline'
 
 interface MatchDrawerProps {
   open: boolean
   loading: boolean
+  projectId: string
   title: string
   result: OutlineMatchResult | null
+  attachments: OutlineAttachment[]
+  onAttachmentsChange: (next: OutlineAttachment[]) => void
   onPick: (c: OutlineMatchCandidate) => void
   onClose: () => void
+}
+
+const KIND_LABEL: Record<string, string> = {
+  qualification: '资质',
+  personnel_cert: '人员证书',
+  contract: '合同',
+  upload: '本项目上传',
+}
+
+const KIND_ENDPOINT: Record<string, string> = {
+  qualification: '/qualifications',
+  personnel_cert: '/personnel',
+  contract: '/contracts',
 }
 
 const STATUS_META: Record<string, { color: string; text: string }> = {
@@ -27,12 +69,63 @@ const SOURCE_LABEL: Record<string, string> = {
 const MatchDrawer: React.FC<MatchDrawerProps> = ({
   open,
   loading,
+  projectId,
   title,
   result,
+  attachments,
+  onAttachmentsChange,
   onPick,
   onClose,
 }) => {
   const meta = result ? STATUS_META[result.status] ?? STATUS_META.missing : null
+
+  const [uploading, setUploading] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [pickerKind, setPickerKind] = useState<OutlineAttachment['kind']>('qualification')
+  const [options, setOptions] = useState<AttachmentPickerOption[]>([])
+  const [picked, setPicked] = useState<string[]>([])
+
+  const onUpload = async (file: File) => {
+    setUploading(true)
+    try {
+      const att = await outlineApi.uploadAttachment(projectId, file, file.name)
+      onAttachmentsChange([...attachments, att])
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '附件上传失败')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const openPicker = async (kind: OutlineAttachment['kind']) => {
+    setPickerKind(kind)
+    setPicked([])
+    try {
+      const res = await client.get(KIND_ENDPOINT[kind])
+      setOptions(buildAttachmentOptions(kind, Array.isArray(res.data) ? res.data : []))
+      setPickerOpen(true)
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '资源库加载失败')
+    }
+  }
+
+  const confirmPick = () => {
+    const chosen = options.filter((o) => picked.includes(o.value) && o.path)
+    const skipped = options.filter((o) => picked.includes(o.value) && !o.path)
+    if (skipped.length > 0) {
+      message.warning(`${skipped.length} 项没有扫描件/图片，已跳过`)
+    }
+    onAttachmentsChange([
+      ...attachments,
+      ...chosen.map((o) => ({
+        kind: pickerKind,
+        id: o.value,
+        label: o.label,
+        path: o.path,
+      })),
+    ])
+    setPickerOpen(false)
+  }
 
   return (
     <Drawer
@@ -125,8 +218,80 @@ const MatchDrawer: React.FC<MatchDrawerProps> = ({
               )}
             />
           )}
+
+          <div>
+            <Space style={{ marginBottom: 8 }} wrap>
+              <Typography.Text strong>附件清单</Typography.Text>
+              <Upload
+                showUploadList={false}
+                beforeUpload={(file) => {
+                  onUpload(file as unknown as File)
+                  return false // 自己发请求，不让 antd 代传
+                }}
+              >
+                <Button size="small" icon={<UploadOutlined />} loading={uploading}>
+                  上传本项目文件
+                </Button>
+              </Upload>
+              <Button size="small" icon={<PlusOutlined />} onClick={() => openPicker('qualification')}>
+                选资质
+              </Button>
+              <Button size="small" icon={<PlusOutlined />} onClick={() => openPicker('personnel_cert')}>
+                选人员证书
+              </Button>
+              <Button size="small" icon={<PlusOutlined />} onClick={() => openPicker('contract')}>
+                选合同
+              </Button>
+            </Space>
+            <List
+              size="small"
+              locale={{ emptyText: '尚未挂载任何附件（该章节将渲染为占位页）' }}
+              dataSource={attachments}
+              renderItem={(a, i) => (
+                <List.Item
+                  actions={[
+                    <Button
+                      key="del"
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => onAttachmentsChange(attachments.filter((_, k) => k !== i))}
+                    />,
+                  ]}
+                >
+                  <Space>
+                    <Tag>{KIND_LABEL[a.kind] ?? a.kind}</Tag>
+                    <span>{a.label}</span>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </div>
         </Space>
       )}
+
+      <Modal
+        title="从资源库选附件"
+        open={pickerOpen}
+        onOk={confirmPick}
+        onCancel={() => setPickerOpen(false)}
+        okText={`添加 ${picked.length} 项`}
+        okButtonProps={{ disabled: picked.length === 0 }}
+      >
+        <Select
+          mode="multiple"
+          style={{ width: '100%' }}
+          placeholder="选择要挂到本章的资质 / 证书 / 合同扫描件"
+          value={picked}
+          onChange={setPicked}
+          options={options.map((o) => ({
+            value: o.value,
+            label: o.path ? o.label : `${o.label}（无扫描件）`,
+            disabled: !o.path,
+          }))}
+        />
+      </Modal>
     </Drawer>
   )
 }
