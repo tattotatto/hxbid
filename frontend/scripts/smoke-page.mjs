@@ -29,7 +29,7 @@ const CHROME_CANDIDATES = [
 
 const args = process.argv.slice(2)
 // 注意：不能简单 filter(!startsWith('--')) —— 那样 flag 的**值**会被当成位置参数
-const FLAGS_WITH_VALUE = new Set(['token', 'shot'])
+const FLAGS_WITH_VALUE = new Set(['token', 'shot', 'scroll-to'])
 const positional = []
 const flags = {}
 for (let i = 0; i < args.length; i++) {
@@ -48,6 +48,7 @@ const baseUrl = (positional[0] || 'http://localhost:8888').replace(/\/$/, '')
 const path = positional[1] || '/'
 const token = flag('token')
 const shot = flag('shot')
+const scrollTo = flag('scroll-to')
 const PORT = 9222 + (process.pid % 500)
 
 const chromePath = CHROME_CANDIDATES.find((p) => existsSync(p))
@@ -183,6 +184,21 @@ async function main() {
     returnByValue: true,
   })
   const info = JSON.parse(probe.result.value)
+
+  if (scrollTo) {
+    // 把含指定文字的元素滚进视野 —— 页面很长，默认只截到顶部
+    await cdp.send('Runtime.evaluate', {
+      expression: `(() => {
+        const el = [...document.querySelectorAll('*')].find(
+          (e) => e.children.length === 0 && (e.textContent || '').includes(${JSON.stringify(scrollTo)}))
+        if (!el) return false
+        el.scrollIntoView({ block: 'start' })
+        return true
+      })()`,
+      returnByValue: true,
+    })
+    await sleep(800)
+  }
 
   if (shot) {
     const img = await cdp.send('Page.captureScreenshot', { format: 'png' })
