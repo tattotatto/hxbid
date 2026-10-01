@@ -19,6 +19,7 @@ from app.schemas.company import CompanyRead, CompanyUpdate
 from app.services.ocr_service import analyze_document_image
 from app.utils.permissions import require_editor
 from app.utils.security import get_current_user
+from app.utils.uploads import resolve_upload_path
 
 router = APIRouter()
 
@@ -134,7 +135,11 @@ async def ocr_existing_image(
 ):
     """OCR an already-uploaded company document image.
 
-    Request: {"image_path": "uploads/company/xxx.jpg", "doc_type": "business_license"}
+    Request: {"image_path": "company/xxx.jpg", "doc_type": "business_license"}
+
+    ``image_path`` is the value stored on the profile — relative to
+    ``UPLOAD_DIR``, not to the process cwd — so it must go through
+    ``resolve_upload_path`` (see that module for the cwd/UPLOAD_DIR trap).
     """
     image_path = data.get("image_path", "")
     doc_type = data.get("doc_type", "business_license")
@@ -142,15 +147,14 @@ async def ocr_existing_image(
     if not image_path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="image_path is required")
 
-    full_path = Path(image_path)
-    if not full_path.is_file():
+    full_path = resolve_upload_path(image_path)
+    if full_path is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Image not found: {image_path}",
         )
 
-    with open(full_path, "rb") as f:
-        file_bytes = f.read()
+    file_bytes = full_path.read_bytes()
 
     result = await analyze_document_image(
         file_bytes=file_bytes,
