@@ -1141,7 +1141,12 @@ async def export_bid(
     chapters_payload = []
     for c in selected:
         content = c.final_content or c.ai_generated_content
-        chapters_payload.append({"title": c.title, "content": content})
+        chapters_payload.append({
+            "title": c.title,
+            "content": content,
+            # 导出检查清单据此判断「非 AI 章节正文是否为占位」
+            "chapter_type": getattr(c, "chapter_type", "") or "",
+        })
 
     # -- Collect images for inline injection into chapters --
     # chapter_images: list of lists, one entry per chapter in chapters_payload,
@@ -1455,9 +1460,11 @@ async def export_bid(
     if data.include_checklist:
         try:
             from app.services.checklist_engine import (
-                merge_items, derive_statuses, fill_pages, build_checklist_docx,
+                derive_statuses, fill_pages, build_checklist_docx, build_rows,
             )
-            rows = merge_items(data.checklist_items, data.checklist_removed)
+            rows = build_rows(
+                data.checklist_items, data.checklist_removed, chapters_payload,
+            )
             source_ctx = {
                 "chapter_titles": [ch.get("title", "") for ch in chapters_payload],
                 "bid_opening_ok": bool(bid_opening_content),

@@ -76,6 +76,43 @@ def merge_items(checklist_items: list[dict] | None,
     return items + appended
 
 
+NON_AI_CHAPTER_TYPES = ("fixed_form", "table", "attachment")
+
+
+def missing_content_rows(chapters: list[dict]) -> list[dict]:
+    """为非 AI 章节生成「正文为占位」的核对行.
+
+    入参 ``chapters`` 形状：``[{"title", "chapter_type", "content"}, ...]``。
+    只收固定格式/表格/附件三类——AI 章节正文为空是生成失败，另有失败重试
+    卡片负责，不在核对清单里重复报。
+
+    这类行的状态由生成结果决定，PDF 命中也不得翻成 ✔（见 ``_apply_page_hits``）。
+    """
+    rows: list[dict] = []
+    for i, ch in enumerate(chapters or []):
+        if ch.get("chapter_type") not in NON_AI_CHAPTER_TYPES:
+            continue
+        if (ch.get("content") or "").strip():
+            continue
+        rows.append({
+            "key": f"missing_content_{i}",
+            "label": f"「{ch.get('title', '')}」正文为占位（未取到用户选定内容）",
+            "keywords": [ch.get("title", "")],
+            "forced_status": STATUS_WARN,
+        })
+    return rows
+
+
+def build_rows(
+    checklist_items: list[dict] | None,
+    removed: list[str] | None,
+    chapters: list[dict] | None,
+) -> list[dict]:
+    """导出时的完整行集合：预置/自定义行 + 非 AI 章节占位行."""
+    return merge_items(checklist_items, removed) + missing_content_rows(
+        chapters or [])
+
+
 def _source_ok(row: dict, ctx: dict) -> bool:
     """落库校验源（spec §3.2 第四列）：由章节标题与素材计数推导。
     仅用于 PDF 不可用或未命中时的折半状态，PDF 命中永远覆盖为 OK。"""
@@ -121,7 +158,9 @@ def derive_statuses(rows: list[dict], *, source_ctx: dict) -> list[dict]:
     out = []
     for row in rows:
         r = dict(row)
-        r["status"] = STATUS_OK if _source_ok(r, source_ctx) else STATUS_WARN
+        r["status"] = r.get("forced_status") or (
+            STATUS_OK if _source_ok(r, source_ctx) else STATUS_WARN
+        )
         out.append(r)
     return out
 
@@ -134,12 +173,26 @@ def locate_page(page_texts: list[str], keywords: list[str]) -> int | None:
     return None
 
 
+def _apply_page_hits(rows: list[dict], page_texts: list[str]) -> list[dict]:
+    """逐行回填页码；命中行状态覆盖为 STATUS_OK.
+
+    ``forced_status`` 行（正文占位）只回填页码，状态保持不变——否则
+    「章节标题出现在 PDF 里」会把「正文是占位」这件事翻成 ✔。
+    """
+    for row in rows:
+        page = locate_page(page_texts, row.get("keywords") or [])
+        row["page"] = page if page is not None else ""
+        if page is not None and not row.get("forced_status"):
+            row["status"] = STATUS_OK
+    return rows
+
+
 def fill_pages(pdf_path: str, rows: list[dict]) -> list[dict]:
     """pdfplumber 逐页抽取文本 → locate_page 回填页码（spec §4.4）。
 
     PDF 读取/扫描任何异常 → logger.warning + 原样返回 rows（调用方维持
     校验源状态，页码列留空，spec §5 降级）。成功时逐行回填 row["page"]
-    （int 或空串），命中行状态覆盖为 STATUS_OK。
+    （int 或空串），命中行状态覆盖为 STATUS_OK（forced_status 行除外）。
     """
     try:
         import pdfplumber
@@ -149,12 +202,7 @@ def fill_pages(pdf_path: str, rows: list[dict]) -> list[dict]:
         logger.warning("检查清单 PDF 页扫描失败，页码列留空: %s", exc)
         return rows
 
-    for row in rows:
-        page = locate_page(page_texts, row.get("keywords") or [])
-        row["page"] = page if page is not None else ""
-        if page is not None:
-            row["status"] = STATUS_OK
-    return rows
+    return _apply_page_hits(rows, page_texts)
 
 
 def _set_run_font(run, font_name: str, font_size: float, bold: bool = False):

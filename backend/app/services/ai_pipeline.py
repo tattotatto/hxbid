@@ -1348,6 +1348,30 @@ def _merge_format_warnings(verification: dict, warnings: list[str]) -> dict:
     return verification
 
 
+def _merge_format_errors(verification: dict, errors: list[str]) -> dict:
+    """把「用户选定内容缺失」记成 fail，并把整体状态抬到「未通过」.
+
+    与 ``_merge_format_warnings`` 的区别：warnings 只是降级提示（真实内容
+    仍然产出了），而这里的章节正文是占位——标书交付后会出现「（待补充）」，
+    必须让界面与导出检查清单都能看见。
+    """
+    if not errors:
+        return verification
+    verification.setdefault("errors", [])
+    verification["errors"].extend(errors)
+    verification.setdefault("checks", [])
+    for err in errors:
+        verification["checks"].append({
+            "check": "user_selected_content",
+            "item": "",
+            "status": "fail",
+            "detail": err,
+            "can_auto_fix": False,
+        })
+    verification["overall_status"] = "fail"
+    return verification
+
+
 def _resolve_section_text(
     chapter, meta: dict, requirements: dict, full_text: str | None,
 ) -> tuple[str | None, list[str]]:
@@ -1368,7 +1392,7 @@ def _resolve_section_text(
     # 多候选且用户没点选过 → 不替他决定（spec §5）。擅自取分数第一那条，
     # 在"同名小节出现两次"的场景里就是把错误的原文抄进标书。
     if match.get("status") == "ambiguous" and match.get("picked") != "manual":
-        return None, [f"「{chapter.title}」有多个候选尚未选定，将改由 AI 撰写"]
+        return None, [f"「{chapter.title}」有多个候选尚未选定，正文留空待补充"]
 
     corpus = requirements.get("format_section_text") or ""
     source = match.get("source")
@@ -1408,11 +1432,17 @@ def _resolve_section_text(
                 text_used[relookup.best.start:relookup.best.end],
                 [f"「{chapter.title}」的原文位置已变化，已按标题重新匹配"],
             )
-    return None, [f"「{chapter.title}」未匹配到招标原文，将改由 AI 撰写"]
+    return None, [f"「{chapter.title}」未匹配到招标原文，正文留空待补充"]
 
 
-def _generate_attachment_chapter(chapter, meta: dict) -> tuple[str, list[str]]:
-    """把附件清单渲染成 ``[IMG:path|label]`` 标记行，返回 (内容, 警告列表).
+def _generate_attachment_chapter(
+    chapter, meta: dict,
+) -> tuple[str, list[str], list[str]]:
+    """把附件清单渲染成 ``[IMG:path|label]`` 标记行.
+
+    Returns:
+        (内容, 警告列表, 错误列表)。附件清单为空 / 条目缺路径属于
+        「用户选定内容取不到」，记 error（正文会是占位），不再是静默忽略。
 
     标记由 ``render_engine._render_image_marker`` 就地出图，两条渲染分支都认。
     去重不在这一步做——同一张扫描件挂了多个章节时，由保存章节结构时的
@@ -1420,30 +1450,39 @@ def _generate_attachment_chapter(chapter, meta: dict) -> tuple[str, list[str]]:
     ``materials_injection.drop_already_embedded`` 同一口径。
     """
     warnings: list[str] = []
+    errors: list[str] = []
     attachments = (meta or {}).get("attachments") or []
     if not attachments:
-        return "", [f"「{chapter.title}」未挂载任何附件，将渲染为占位页"]
+        msg = f"「{chapter.title}」未挂载任何附件，正文留空待补充"
+        return "", [msg], [msg]
 
     lines: list[str] = []
     for att in attachments:
         path = (att or {}).get("path") or ""
         label = (att or {}).get("label") or ""
         if not path:
-            warnings.append(
-                f"「{chapter.title}」的附件「{label or (att or {}).get('id')}」缺少文件路径，已跳过"
+            msg = (
+                f"「{chapter.title}」的附件"
+                f"「{label or (att or {}).get('id')}」缺少文件路径，已跳过"
             )
+            warnings.append(msg)
+            errors.append(msg)
             continue
         if not label:
             label = path.rsplit("/", 1)[-1]
         lines.append(f"[IMG:{path}|{label}]")
-    return "\n".join(lines), warnings
+    return "\n".join(lines), warnings, errors
 
 
 async def _generate_table_chapter(
     chapter, meta: dict, requirements: dict, company_profile: dict, ai_adapter,
     full_text: str | None,
-) -> tuple[str, list[str]]:
-    """按招标原文的表格定义产出表格类章节内容，返回 (markdown, 警告列表).
+) -> tuple[str, list[str], list[str]]:
+    """按招标原文的表格定义产出表格类章节内容.
+
+    Returns:
+        (markdown, 警告列表, 错误列表)。找不到用户选定的招标表格记 error
+        ——此时正文只是空表头或空串，必须在校验报告里可见。
 
     取材顺序：
       1. 结构页固化的 ``match.table_index`` 指向的表
@@ -1458,6 +1497,7 @@ async def _generate_table_chapter(
     )
 
     warnings: list[str] = []
+    errors: list[str] = []
     tables = requirements.get("format_tables") or []
     match = (meta or {}).get("match") or {}
     table_index = match.get("table_index")
@@ -1498,15 +1538,120 @@ async def _generate_table_chapter(
             except Exception as exc:
                 logger.warning("Table fill for '%s' failed: %s", chapter.title, exc)
                 warnings.append(f"「{chapter.title}」表格填值失败，已输出空白模板")
-        return rows_to_markdown(rows), warnings
+        return rows_to_markdown(rows), warnings, errors
 
     columns = meta.get("table_columns") or []
     if columns:
-        warnings.append(f"「{chapter.title}」未找到招标表格，已输出空表头模板")
-        return rows_to_markdown([list(columns)]), warnings
+        msg = f"「{chapter.title}」未找到招标表格，已输出空表头模板，正文待补充"
+        warnings.append(msg)
+        errors.append(msg)
+        return rows_to_markdown([list(columns)]), warnings, errors
 
-    warnings.append(f"「{chapter.title}」未找到招标表格，且无列定义，无法生成")
-    return "", warnings
+    msg = f"「{chapter.title}」未找到招标表格，且无列定义，正文留空待补充"
+    warnings.append(msg)
+    errors.append(msg)
+    return "", warnings, errors
+
+
+async def _generate_strict_non_ai_chapter(
+    chapter,
+    meta: dict,
+    requirements: dict,
+    company_profile: dict | None,
+    ai_adapter,
+    full_text: str | None,
+) -> tuple[str, list[str], list[str]]:
+    """严格按用户选定内容产出非 AI 章节.
+
+    适配类型：``fixed_form`` / ``table`` / ``attachment``。取不到用户选定的
+    原文、表格或附件时，**不调用任何整章生成**，返回空正文（渲染层出占位）
+    并把原因放进错误列表。
+
+    Returns:
+        (正文, 警告列表, 错误列表)。
+    """
+    from app.services.template_filler import (
+        fill_fixed_form_section_from_template_with_tables,
+    )
+
+    chapter_type = getattr(chapter, "chapter_type", "")
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    if chapter_type == "fixed_form":
+        section_text, section_warnings = _resolve_section_text(
+            chapter, meta, requirements, full_text,
+        )
+        warnings.extend(section_warnings)
+        try:
+            content, _table_fills = (
+                await fill_fixed_form_section_from_template_with_tables(
+                    section_title=chapter.title,
+                    format_section_text=(requirements or {}).get(
+                        "format_section_text") or "",
+                    format_tables=(requirements or {}).get("format_tables", []),
+                    company_profile=company_profile,
+                    requirements=requirements,
+                    ai_adapter=ai_adapter,
+                    section_text_override=section_text,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Fixed-form fill failed for '%s': %s", chapter.title, exc)
+            content = ""
+            warnings.append(f"「{chapter.title}」原文回填失败：{exc}")
+        if content:
+            return content, warnings, []
+        errors.append(
+            f"「{chapter.title}」未取到用户选定的招标原文，正文留空待补充")
+        return "", warnings, errors
+
+    if chapter_type == "table":
+        return await _generate_table_chapter(
+            chapter, meta, requirements, company_profile, ai_adapter, full_text,
+        )
+
+    if chapter_type == "attachment":
+        return _generate_attachment_chapter(chapter, meta)
+
+    errors.append(
+        f"「{chapter.title}」章节类型 {chapter_type or 'unknown'} 不是 AI 生成，"
+        "正文留空待补充")
+    return "", warnings, errors
+
+
+async def _fetch_history_bid_references(
+    title: str, requirements: dict, project_id: str, db,
+) -> list[str]:
+    """按小节标题召回历史标书章节与「要求→应答」学习对.
+
+    只有 **AI 撰写** 的章节调用它。RAG 不可用、检索异常或没有召回时返回
+    空列表——参考是增强项，不能让整份标书生成失败。
+    """
+    if not db:
+        return []
+    try:
+        from app.services.rag import (
+            retrieve_lesson_references,
+            retrieve_similar_chapters,
+        )
+        similar = await retrieve_similar_chapters(
+            chapter_title=title,
+            requirements=requirements,
+            project_id=project_id,
+        )
+        lessons = await retrieve_lesson_references(
+            requirements, project_id, n_results=3,
+        )
+        return [
+            item.get("content", "")
+            for item in list(similar) + list(lessons)
+            if item and item.get("content")
+        ]
+    except Exception as exc:  # noqa: BLE001 — 参考召回失败不阻断生成
+        logger.debug("History-bid reference recall failed for '%s': %s", title, exc)
+        return []
 
 
 async def generate_from_chapter_structure(
@@ -1592,82 +1737,29 @@ async def generate_from_chapter_structure(
     }
 
     # ── Generate file sections first ──
-    file_chapters_output = []  # pre-generated file/table chapters
-    format_warnings: list[str] = []   # 累计各类降级/兜底，最后写进校验报告
-    from app.services.template_filler import (
-        fill_fixed_form_section_from_template_with_tables,
-        generate_file_section,
-    )
+    file_chapters_output = []  # pre-generated file/table/attachment chapters
+    format_warnings: list[str] = []   # 各类降级/兜底，最后写进校验报告
+    format_errors: list[str] = []     # 用户选定内容缺失 → 校验报告 fail
     from app.services.tender_corpus import load_full_text
     full_text = load_full_text(requirements, settings.UPLOAD_DIR)
 
     for chapter in chapters:
-        if chapter.chapter_type in ("fixed_form", "table", "attachment"):
+        # 除了 ai_generated，全部走"用户选定内容"分支：
+        # fixed_form/table/attachment 有各自的取材方式；mixed 或历史遗留的
+        # 未知类型也在这里被记成 error，而不是悄悄跳过、最后只剩占位。
+        if chapter.chapter_type != "ai_generated":
             chapter_meta = json.loads(chapter.chapter_meta_json) if chapter.chapter_meta_json else {}
 
-            # Generate file section content.
-            # 优先用招标文件原文模板扫描填充（保留原文措辞），
-            # 当 format_section_text 不可用或扫描失败时回退到 AI 生成。
-            file_content = ""
-            # 门槛只看类型，不看 format_section_text —— 语料可能来自全文兜底
-            # （招标文件没解析出格式章节时匹配器会退到全文）。旧写法把这种情况
-            # 整批挡回 AI 撰写，而结构页给用户看的是绿色「已匹配」+ 原文预览。
-            if chapter.chapter_type == "fixed_form":
-                try:
-                    section_text_override, section_warnings = _resolve_section_text(
-                        chapter, chapter_meta, requirements, full_text,
-                    )
-                    format_warnings.extend(section_warnings)
-                    file_content, _table_fills = (
-                        await fill_fixed_form_section_from_template_with_tables(
-                            section_title=chapter.title,
-                            format_section_text=requirements["format_section_text"],
-                            format_tables=requirements.get("format_tables", []),
-                            company_profile=company_profile,
-                            requirements=requirements,
-                            ai_adapter=ai_adapter,
-                            section_text_override=section_text_override,
-                        )
-                    )
-                    if file_content:
-                        logger.info(
-                            "Filled '%s' from tender template (preserves wording)",
-                            chapter.title,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "Scan-and-fill failed for '%s': %s; falling back to AI generation",
-                        chapter.title, exc,
-                    )
-                    format_warnings.append(f"「{chapter.title}」原文回填失败，已改用 AI 撰写")
-
-            elif chapter.chapter_type == "table":
-                file_content, table_warnings = await _generate_table_chapter(
+            # 严格按标注取材：只用用户在结构页选定/挂载的内容。
+            # 禁止回退 AI 整章代写——那会让"用户选的固定格式"变成 AI 自由发挥。
+            file_content, section_warnings, section_errors = (
+                await _generate_strict_non_ai_chapter(
                     chapter, chapter_meta, requirements, company_profile,
                     ai_adapter, full_text,
                 )
-                format_warnings.extend(table_warnings)
-
-            elif chapter.chapter_type == "attachment":
-                file_content, att_warnings = _generate_attachment_chapter(
-                    chapter, chapter_meta,
-                )
-                format_warnings.extend(att_warnings)
-
-            if not file_content and chapter.chapter_type == "fixed_form":
-                try:
-                    file_content = await generate_file_section(
-                        section_type=chapter.title,
-                        company_profile=company_profile,
-                        requirements=requirements,
-                        project_name=requirements.get("project_name", "") if requirements else "",
-                        ai_adapter=ai_adapter,
-                    )
-                    format_warnings.append(
-                        f"「{chapter.title}」未匹配到招标原文，已由 AI 撰写"
-                    )
-                except Exception as exc:
-                    logger.warning("File section '%s' generation failed: %s", chapter.title, exc)
+            )
+            format_warnings.extend(section_warnings)
+            format_errors.extend(section_errors)
 
             file_chapters_output.append({
                 "id": chapter.id,
@@ -1945,6 +2037,16 @@ async def generate_from_chapter_structure(
                     pending_tasks.append(task_info)
 
             if pending_tasks:
+                # 历史标书参考：只有 AI 撰写章节需要；按叶子标题召回。
+                # 之前这里是 reference_sections=[]，等于"参考历史标书"从未生效。
+                refs = await asyncio.gather(*(
+                    _fetch_history_bid_references(
+                        t["task"]["title"], requirements, project_id, db,
+                    ) for t in pending_tasks
+                ))
+                for task_info, ref in zip(pending_tasks, refs):
+                    task_info["_reference_sections"] = ref
+
                 # 本章叶子并行生成（semaphore）
                 semaphore = asyncio.Semaphore(parallel_workers)
 
@@ -1972,7 +2074,8 @@ async def generate_from_chapter_structure(
                             leaf=task,
                             requirements=chapter_requirements,
                             company_profile=company_profile,
-                            reference_sections=[],
+                            reference_sections=task_info.get(
+                                "_reference_sections", []),
                             max_retries=2,
                             retry_delay_base=1.0,
                             extra_guidance=guidance,
@@ -2243,6 +2346,8 @@ async def generate_from_chapter_structure(
     # 生成期的降级/兜底一律不静默：并进校验报告并**抬高状态**，
     # 否则界面仍显示「通过」（见 _merge_format_warnings 的说明）
     verification = _merge_format_warnings(verification, format_warnings)
+    # 用户选定内容缺失 → 正文是占位，整体判 fail（不仅是"有提示"）
+    verification = _merge_format_errors(verification, format_errors)
     try:
         project.format_verification_json = json.dumps(verification, ensure_ascii=False)
         await db.commit()

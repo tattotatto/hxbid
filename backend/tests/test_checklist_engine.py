@@ -9,11 +9,14 @@ from app.services.checklist_engine import (
     CHECKLIST_ITEM_TEMPLATES,
     STATUS_OK,
     STATUS_WARN,
+    _apply_page_hits,
     build_checklist_docx,
+    build_rows,
     derive_statuses,
     fill_pages,
     locate_page,
     merge_items,
+    missing_content_rows,
 )
 
 
@@ -64,6 +67,56 @@ class TestMergeItems:
         assert [r["key"] for r in merged] == [r["key"] for r in
             merge_items([{"key": "quotation", "label": "改"},
                          {"key": "custom-9", "label": "追加行"}], ["bid_letter"])]
+
+
+class TestMissingContentRows:
+    """非 AI 章节正文为占位时，打印核对清单必须能看见.
+
+    生成期已经把这几个章节判成 fail；导出检查清单是用户真正逐项打勾的
+    文档，缺内容不能只留在网页的格式校验卡片里。
+    """
+
+    def test_only_non_ai_empty_chapters_are_listed(self):
+        rows = missing_content_rows([
+            {"title": "投标函", "chapter_type": "fixed_form", "content": ""},
+            {"title": "服务方案", "chapter_type": "ai_generated", "content": ""},
+            {"title": "保证金凭证", "chapter_type": "attachment",
+             "content": "[IMG:p/a.png|凭证]"},
+            {"title": "开标一览表", "chapter_type": "table", "content": "   "},
+        ])
+        labels = [r["label"] for r in rows]
+        assert any("投标函" in label for label in labels)
+        assert any("开标一览表" in label for label in labels)
+        assert not any("服务方案" in label for label in labels)
+        assert not any("保证金凭证" in label for label in labels)
+        assert all(r["forced_status"] == STATUS_WARN for r in rows)
+
+    def test_forced_warn_not_turned_ok_by_source_or_page(self):
+        row = {"key": "missing_content_0", "label": "「投标函」正文为占位",
+               "keywords": ["投标函"], "forced_status": STATUS_WARN}
+        derived = derive_statuses(
+            [dict(row)],
+            source_ctx={"chapter_titles": ["投标函"], "bid_opening_ok": False,
+                        "qual_count": 0, "contract_count": 0,
+                        "personnel_count": 0},
+        )
+        assert derived[0]["status"] == STATUS_WARN
+
+        _apply_page_hits(derived, ["投标函 第 3 页"])
+        assert derived[0]["page"] == 1, "页码仍应回填，方便用户去找"
+        assert derived[0]["status"] == STATUS_WARN, "占位行不得被 PDF 命中翻成 ✔"
+
+
+class TestBuildRows:
+    def test_missing_content_rows_are_appended_after_user_items(self):
+        rows = build_rows(
+            [{"key": "custom-1", "label": "项目实施方案"}], None,
+            [{"title": "投标函", "chapter_type": "fixed_form", "content": ""}],
+        )
+        assert any(r["key"] == "custom-1" for r in rows)
+        last = rows[-1]
+        assert "投标函" in last["label"]
+        assert last["forced_status"] == STATUS_WARN
 
 
 class TestLocatePage:

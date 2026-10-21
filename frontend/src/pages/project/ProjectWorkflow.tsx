@@ -258,6 +258,7 @@ export default function ProjectWorkflow() {
   const [formatVerification, setFormatVerification] = useState<{
     overall_status: string
     message?: string
+    errors?: string[]
   } | null>(null)
   // Self-scoring report (evaluated by the scoring rubric, SSE `scoring_report` / GET /scoring-report)
   const [scoringReport, setScoringReport] = useState<ScoringReport | null>(null)
@@ -603,9 +604,13 @@ export default function ProjectWorkflow() {
                   setFormatVerification({
                     overall_status: data.overall_status || 'pass',
                     message: data.message || '',
+                    errors: Array.isArray(data.errors) ? data.errors : [],
                   })
                   if (data.overall_status === 'fail') {
-                    message.warning('格式校验未通过：' + (data.message || '存在缺失必需章节'))
+                    message.warning(
+                      '格式校验未通过：' +
+                      (data.message || data.errors?.[0] || '存在缺失必需章节'),
+                    )
                   } else if (data.overall_status === 'pass_with_warnings') {
                     message.info('格式校验通过（有提示）：' + (data.message || ''))
                   } else {
@@ -1194,6 +1199,14 @@ export default function ProjectWorkflow() {
             </Tag>
             {formatVerification.message ? <span>{formatVerification.message}</span> : null}
           </Space>
+          {/* 非 AI 章节没取到用户选定内容时，逐条列出，便于直接定位到章节 */}
+          {(formatVerification.errors?.length ?? 0) > 0 && (
+            <ul style={{ margin: '12px 0 0 0', paddingLeft: 20, color: '#cf1322' }}>
+              {formatVerification.errors!.map((err, i) => (
+                <li key={i}>{err}</li>
+              ))}
+            </ul>
+          )}
         </Card>
       )}
 

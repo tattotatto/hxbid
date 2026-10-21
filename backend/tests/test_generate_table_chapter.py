@@ -32,13 +32,14 @@ async def test_uses_tender_table_columns_not_ai():
     }})
     meta = json.loads(ch.chapter_meta_json)
 
-    content, warnings = await _generate_table_chapter(
+    content, warnings, errors = await _generate_table_chapter(
         ch, meta, {"format_section_text": CORPUS, "format_tables": TABLES},
         company_profile={"company_name": "某某公司"}, ai_adapter=None, full_text=None,
     )
     assert "| 序号 | 服务内容 | 报价 |" in content
     assert "安保服务" in content
     assert warnings == []
+    assert errors == []
 
 
 @pytest.mark.asyncio
@@ -50,12 +51,13 @@ async def test_falls_back_to_declared_columns_when_no_table():
     })
     meta = json.loads(ch.chapter_meta_json)
 
-    content, warnings = await _generate_table_chapter(
+    content, warnings, errors = await _generate_table_chapter(
         ch, meta, {"format_section_text": CORPUS, "format_tables": []},
         company_profile={}, ai_adapter=None, full_text=None,
     )
     assert "| 序号 | 服务内容 |" in content
     assert any("未找到招标表格" in w for w in warnings)
+    assert errors, "空表头意味着正文待补充，必须报 error"
 
 
 @pytest.mark.asyncio
@@ -63,12 +65,13 @@ async def test_no_table_and_no_columns_returns_empty_with_warning():
     ch = _Chapter("某表", {"match": {"status": "missing"}})
     meta = json.loads(ch.chapter_meta_json)
 
-    content, warnings = await _generate_table_chapter(
+    content, warnings, errors = await _generate_table_chapter(
         ch, meta, {"format_section_text": CORPUS, "format_tables": []},
         company_profile={}, ai_adapter=None, full_text=None,
     )
     assert content == ""
     assert warnings
+    assert errors
 
 
 @pytest.mark.asyncio
@@ -80,7 +83,7 @@ async def test_never_calls_ai_free_generation():
     meta = json.loads(ch.chapter_meta_json)
     with patch("app.services.template_filler.generate_file_section",
                new=AsyncMock(side_effect=AssertionError("不该调用 AI 自由生成"))):
-        content, _ = await _generate_table_chapter(
+        content, _, errors = await _generate_table_chapter(
             ch, meta, {"format_section_text": CORPUS, "format_tables": TABLES},
             company_profile={}, ai_adapter=None, full_text=None,
         )
@@ -96,7 +99,7 @@ async def test_out_of_range_table_index_relooks_up_by_title():
     }})
     meta = json.loads(ch.chapter_meta_json)
 
-    content, warnings = await _generate_table_chapter(
+    content, warnings, errors = await _generate_table_chapter(
         ch, meta, {
             "format_section_text": CORPUS, "format_tables": TABLES,
             "format_page_map": [{"start": 0, "page": 32}],
@@ -105,6 +108,7 @@ async def test_out_of_range_table_index_relooks_up_by_title():
     )
     assert "| 序号 | 服务内容 | 报价 |" in content
     assert any("表格索引已失效" in w for w in warnings)
+    assert errors == []
 
 
 @pytest.mark.asyncio
@@ -120,10 +124,11 @@ async def test_without_page_map_warns_instead_of_guessing_a_table():
     }, "table_columns": ["序号", "服务内容"]})
     meta = json.loads(ch.chapter_meta_json)
 
-    content, warnings = await _generate_table_chapter(
+    content, warnings, errors = await _generate_table_chapter(
         ch, meta, {"format_section_text": CORPUS, "format_tables": TABLES},
         company_profile={}, ai_adapter=None, full_text=None,
     )
     assert "| 序号 | 服务内容 |" in content
     assert "安保服务" not in content, "不得猜表——猜错就是错表进标书"
     assert any("未找到招标表格" in w for w in warnings)
+    assert errors

@@ -155,7 +155,7 @@ const MatchDrawer: React.FC<MatchDrawerProps> = ({
               type="error"
               showIcon
               message="招标文件里没找到这一节"
-              description="该章节不会照抄招标原文，将由 AI 撰写。建议改标题、改类型，或从下方候选中选一个。"
+              description="该章节不会照抄招标原文，生成时正文将留空待补充（不会由 AI 代写）。建议改标题、改类型，或从下方候选中选一个。"
             />
           )}
           {result.status === 'ambiguous' && (
